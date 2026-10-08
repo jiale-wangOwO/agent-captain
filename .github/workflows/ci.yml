@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }} / Node 22
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.11', '3.13']
+    env:
+      # CI never starts a real SSH target, user terminal, or model inference.
+      CEO_HUB_LIVE_TESTS: '0'
+      CEO_HUB_REMOTE_TESTS: '0'
+      PRON_HUB_LIVE_TESTS: '0'
+      PRON_HUB_REMOTE_TESTS: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Check candidate publication contents
+        run: python scripts/check_publication.py --tracked
+      - name: Install terminal dependencies
+        run: npm ci
+      - name: Python unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Terminal unit tests
+        run: npm run test:terminal
+      - name: Browser contract and rendering unit tests
+        run: npm run test:ui

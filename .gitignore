@@ -1,0 +1,53 @@
+# Local state may contain credentials, SSH host names, transcripts, and capabilities.
+.runtime/
+.schemas/
+# Canonical, machine-independent plugin catalog is source; all other agent data is private.
+.agents/*
+!.agents/plugins/
+.agents/plugins/*
+!.agents/plugins/marketplace.json
+.codex/
+.vscode/
+config.local.json
+connection.json
+terminal-connection.json
+auth.json
+.env
+.env.*
+!.env.example
+!.env.sample
+*.log
+*.jsonl
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.pem
+*.key
+id_rsa
+id_ed25519
+
+# Dependencies, caches, and local builds.
+node_modules/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+*.vsix
+
+# Editor and OS files.
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini

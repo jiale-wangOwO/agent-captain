@@ -1,0 +1,17 @@
+{
+  "name": "pron-hub",
+  "version": "0.4.0",
+  "description": "让当前 Codex 对话成为 CEO，与用户共用已激活的本机和 SSH 工作终端。",
+  "author": {"name": "PRON Hub contributors"},
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "PRON Hub",
+    "shortDescription": "在当前对话管理已激活的共享工作终端",
+    "longDescription": "机器连接与终端激活在 UI 配置。用户在真实终端中自行启动 codex 或 codex-switch，当前 Codex 模型与用户使用同一终端查询进展、传达任务、收集事件及打开新工作终端；后台不另运行 CEO 模型。",
+    "developerName": "PRON Hub contributors",
+    "category": "Developer Tools",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": ["作为我的 CEO，汇总已激活 agent 的进展和需要我决定的事项。", "把这项任务分派给我选定的工作 agent，跟踪结果并汇总。"]
+  }
+}

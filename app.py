@@ -1,0 +1,216 @@
+"""Loopback-only shared terminal UI, MCP gateway and history diagnostic CLI."""
+from __future__ import annotations
+
+import argparse
+import atexit
+import json
+import os
+import secrets
+import signal
+import sys
+import threading
+from http.cookies import SimpleCookie
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+from hub import Hub, ROOT, VERSION
+
+
+def connection_file():
+    override = os.environ.get("CEO_HUB_CONNECTION_FILE")
+    if override:
+        return Path(override)
+    if os.name == "nt":
+        return Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "CEOHub/service.json"
+    return Path.home() / ".local/state/ceo-hub/service.json"
+
+
+def create_server(hub, port=8766, token=None):
+    session_token = token or secrets.token_urlsafe(32)
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def trusted_host(self):
+            return self.headers.get("Host") == f"127.0.0.1:{server.server_port}"
+
+        def authenticated(self):
+            cookie = SimpleCookie()
+            try:
+                cookie.load(self.headers.get("Cookie", ""))
+                value = cookie.get("ceo_session")
+                return bool(value and secrets.compare_digest(value.value, session_token))
+            except Exception:
+                return False
+
+        def plugin_authenticated(self):
+            value = self.headers.get("Authorization", "")
+            return not self.headers.get("Origin") and value.startswith("Bearer ") and secrets.compare_digest(value[7:], session_token)
+
+        def respond(self, status, payload, content_type="application/json; charset=utf-8", cookie=False):
+            data = payload if isinstance(payload, bytes) else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'")
+            if cookie:
+                self.send_header("Set-Cookie", f"ceo_session={session_token}; HttpOnly; SameSite=Strict; Path=/")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            if not self.trusted_host():
+                self.respond(403, {"error": "Invalid host"})
+                return
+            parsed = urlparse(self.path)
+            assets = {"/": ("index.html", "text/html; charset=utf-8"),
+                      "/ui.js": ("ui.js", "text/javascript; charset=utf-8"),
+                      "/style.css": ("style.css", "text/css; charset=utf-8"),
+                      "/prose.css": ("prose.css", "text/css; charset=utf-8")}
+            vendors = {"/vendor/xterm.js": ("@xterm/xterm/lib/xterm.js", "text/javascript; charset=utf-8"),
+                       "/vendor/xterm.css": ("@xterm/xterm/css/xterm.css", "text/css; charset=utf-8"),
+                       "/vendor/xterm-addon-fit.js": ("@xterm/addon-fit/lib/addon-fit.js", "text/javascript; charset=utf-8")}
+            if parsed.path in assets:
+                file, mime = assets[parsed.path]
+                self.respond(200, (ROOT / "web" / file).read_bytes(), mime, cookie=parsed.path == "/")
+            elif parsed.path in vendors:
+                file, mime = vendors[parsed.path]
+                asset = ROOT / "node_modules" / file
+                if asset.is_file():
+                    self.respond(200, asset.read_bytes(), mime)
+                else:
+                    self.respond(503, {"error": "终端依赖未安装，请执行 npm ci。"})
+            elif parsed.path == "/health":
+                self.respond(200, {"service": "ceo_hub", "version": VERSION, "controller": "codex-plugin", "pid": os.getpid()})
+            elif parsed.path == "/api/state" and self.authenticated():
+                try:
+                    after = int(parse_qs(parsed.query).get("after", ["0"])[0])
+                    self.respond(200, hub.state(after))
+                except Exception as error:
+                    self.respond(400, {"error": str(error)})
+            elif parsed.path == "/api/terminals/output" and self.authenticated():
+                try:
+                    args = parse_qs(parsed.query)
+                    self.respond(200, hub.terminal_output(args["host"][0], args["thread_id"][0], int(args.get("after", ["0"])[0])))
+                except Exception as error:
+                    self.respond(400, {"error": str(error)})
+            else:
+                self.respond(404, {"error": "Not found or unauthorized"})
+
+        def do_POST(self):
+            plugin_request = self.path == "/api/plugin"
+            authorized = self.plugin_authenticated() if plugin_request else self.authenticated() and self.headers.get("Origin") == server.origin
+            if not self.trusted_host() or not authorized:
+                self.respond(403, {"error": "Invalid session or origin"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 100000:
+                    raise ValueError("Invalid body size")
+                body = json.loads(self.rfile.read(length))
+                if plugin_request:
+                    self.respond(200, hub.plugin_call(body["tool"], body.get("arguments", {})))
+                elif self.path == "/api/hosts/upsert":
+                    self.respond(200, hub.upsert_host(body))
+                elif self.path == "/api/hosts/connect":
+                    self.respond(200, hub.connect_host(body["host"]))
+                elif self.path == "/api/directories/list":
+                    self.respond(200, hub.list_directories(body["host"], body.get("path", "")))
+                elif self.path == "/api/agents/discover":
+                    self.respond(200, hub.discover(body["host"], body.get("query", ""), body.get("cwd", ""), body.get("limit", 20)))
+                elif self.path == "/api/agents/attach":
+                    self.respond(200, hub.attach_agent(body["host"], body["thread_id"], body.get("alias", "")))
+                elif self.path == "/api/terminals/create":
+                    self.respond(200, hub.create_terminal(body["host"], body.get("cwd", ""), body["title"], body.get("thread_id"),
+                        body.get("cols", 100), body.get("rows", 30), body.get("active") is True, body.get("request_key")))
+                elif self.path == "/api/terminals/connect":
+                    self.respond(200, hub.connect_terminal(body["host"], body["thread_id"]))
+                elif self.path == "/api/terminals/input":
+                    self.respond(200, hub.terminal_input(body["host"], body["thread_id"], body["data"]))
+                elif self.path == "/api/terminals/resize":
+                    self.respond(200, hub.terminal_resize(body["host"], body["thread_id"], body["cols"], body["rows"]))
+                elif self.path == "/api/terminals/close":
+                    self.respond(200, hub.terminal_close(body["host"], body["thread_id"], body.get("confirm") is True))
+                elif self.path == "/api/agents/activate":
+                    self.respond(200, hub.activate_agent(body["host"], body["thread_id"], body["active"] is True))
+                elif self.path == "/api/agents/read":
+                    self.respond(200, hub.read_agent(body["host"], body["thread_id"], body.get("limit", 18),
+                        cursor=body.get("cursor"), after_cursor=body.get("after_cursor"), include_tools=body.get("include_tools", False)))
+                elif self.path == "/api/agents/bind-output":
+                    self.respond(200, hub.bind_output(body["host"], body["thread_id"], body["session_id"]))
+                elif self.path == "/api/agents/message":
+                    self.respond(200, hub.send(body["host"], body["thread_id"], body["text"], request_key=body.get("request_key")))
+                elif self.path == "/api/agents/create":
+                    self.respond(200, hub.create_agent(body["host"], body["cwd"], body["title"], body.get("text", ""), body.get("active", True), body.get("request_key"), command=body.get("command", "")))
+                else:
+                    self.respond(404, {"error": "Not found"})
+            except PermissionError as error:
+                self.respond(403, {"error": str(error)})
+            except Exception as error:
+                self.respond(400, {"error": str(error)})
+
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server.daemon_threads = True
+    server.origin = f"http://127.0.0.1:{server.server_port}"
+    server.session_token = session_token
+    return server
+
+
+def serve(port=8766):
+    hub = Hub()
+    server = create_server(hub, port)
+    descriptor = connection_file()
+    descriptor.parent.mkdir(parents=True, exist_ok=True)
+    temporary = descriptor.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"url": server.origin, "token": server.session_token, "version": VERSION, "pid": os.getpid()}), encoding="utf-8")
+    temporary.chmod(0o600)
+    temporary.replace(descriptor)
+    atexit.register(hub.close)
+    print(f"PRON Hub connection service {VERSION}: {server.origin}", flush=True)
+    print("CEO 是当前 Codex 对话；本服务不运行管理模型、不自动扫描对话。", flush=True)
+    try:
+        server.serve_forever(poll_interval=0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        hub.close()
+
+
+def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    parser = argparse.ArgumentParser(description="PRON Hub (Personal Remote Ops & Nodes Hub) — 本机和 SSH 上的 Codex 会话管理入口")
+    sub = parser.add_subparsers(dest="command", required=True)
+    web = sub.add_parser("serve")
+    web.add_argument("--port", type=int, default=8766)
+    for command in ("find", "read", "probe"):
+        child = sub.add_parser(command)
+        child.add_argument("--host", default="local")
+        if command == "find":
+            child.add_argument("--query", default="")
+            child.add_argument("--cwd", default="")
+            child.add_argument("--limit", type=int, default=15)
+        elif command == "read":
+            child.add_argument("thread_id")
+            child.add_argument("--limit", type=int, default=12)
+    args = parser.parse_args()
+    if args.command == "serve":
+        serve(args.port)
+        return
+    hub = Hub()
+    try:
+        request = {"op": args.command, **vars(args)}
+        request.pop("command", None)
+        request.pop("host", None)
+        print(json.dumps(hub.history(args.host, request), ensure_ascii=False, indent=2))
+    finally:
+        hub.close()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,8 @@
+Mode: built-in image_gen; new image; opaque background.
+Use case: logo-brand
+Asset type: original raster wordmark for a GitHub software project README
+Primary request: A playful black-and-orange block wordmark for PRON Hub, a Personal Remote Ops & Nodes Hub. A knowing nod to familiar black-and-orange web wordmarks, but with distinct developer-oriented typography and no other brand's actual name or symbol.
+Scene/backdrop: solid near-black canvas.
+Subject: ONLY the exact text "PRON Hub" on one horizontal baseline. Spell PRON P-R-O-N (not PORN). PRON is bold white, the word Hub is bold black inside a flat orange rounded rectangle. Compact, balanced, legible sans-serif lettering, crisp flat edges, generous but not excessive black margin. Wide horizontal composition approximately 3:1. Logo itself should occupy most of the width. Clean professional open-source tooling identity.
+Color palette: near-black, white, warm orange #FF9900.
+Constraints: exact text only, no slogan, no additional letters, no gradients, no shadows, no 3D, no mockup, no watermark, no people or adult imagery.

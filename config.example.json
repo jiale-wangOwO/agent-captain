@@ -1,0 +1,5 @@
+{
+  "hosts": {
+    "local": {"label": "本机", "transport": "local"}
+  }
+}

@@ -1,0 +1,663 @@
+'use strict';
+
+// This process owns the PTYs, not the web UI or the Python Hub. A browser or Hub
+// restart therefore does not send EOF to the user's shell or coding agent.
+const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const crypto = require('node:crypto');
+const zlib = require('node:zlib');
+const { execFile, spawn: spawnChild } = require('node:child_process');
+const { promisify } = require('node:util');
+const pty = require('node-pty');
+const { Terminal } = require('@xterm/headless');
+const { SerializeAddon } = require('@xterm/addon-serialize');
+const execFileAsync = promisify(execFile);
+
+const VERSION = '0.3.0';
+const SESSION_ID = /^ceohub-[a-f0-9]{16,48}$/;
+const SHELLS = new Set(['bash', 'sh', 'zsh', 'fish', 'dash', 'pwsh', 'powershell', 'cmd']);
+const AGENTS = /(?:^|[\\/\s])(?:codex|claude|aider|opencode|gemini)(?:\.(?:exe|cmd|ps1|cjs|mjs|js))?(?:$|[\s\\/])/i;
+const MAX_OUTPUT = 2 * 1024 * 1024;
+
+class ApiError extends Error {
+  constructor(status, code, message) { super(message); this.status = status; this.code = code; }
+}
+
+function shellQuote(value) { return "'" + String(value).replace(/'/g, "'\\''") + "'"; }
+function boundedInteger(value, fallback, minimum, maximum) {
+  const n = value == null ? fallback : Number(value);
+  if (!Number.isInteger(n) || n < minimum || n > maximum) {
+    throw new ApiError(400, 'invalid_size', `Expected an integer between ${minimum} and ${maximum}`);
+  }
+  return n;
+}
+function classifyCommand(command) {
+  const name = path.basename(String(command || '').trim()).replace(/\.exe$/i, '').toLowerCase();
+  if (AGENTS.test(String(command || ''))) return 'agent';
+  if (SHELLS.has(name)) return 'shell';
+  return 'unknown';
+}
+
+function descriptorPath() {
+  if (process.env.CEO_HUB_TERMINAL_FILE) return path.resolve(process.env.CEO_HUB_TERMINAL_FILE);
+  const base = process.platform === 'win32'
+    ? path.join(process.env.LOCALAPPDATA || os.homedir(), 'CEOHub')
+    : path.join(os.homedir(), '.local', 'state', 'ceo-hub');
+  return path.join(base, 'terminal-broker.json');
+}
+
+function sshExecutable() {
+  return process.env.CEO_HUB_SSH || (process.platform === 'win32' ? path.join(process.env.WINDIR || 'C:\\Windows', 'System32', 'OpenSSH', 'ssh.exe') : 'ssh');
+}
+
+function updateHumanInput(session, data) {
+  session.humanLeaseUntil = Date.now() + 1500;
+  // Draft state is intentionally sticky. Cursor navigation means Backspace or
+  // Ctrl+U cannot prove that a line is empty. Only a real submit or cancel clears
+  // it; newlines inside bracketed paste are part of a draft, never a submit.
+  for (const char of data) {
+    if (session.inputEscape) {
+      session.inputEscape += char;
+      if (/^\x1b\[[0-?]*[ -/]*[@-~]$/.test(session.inputEscape)) {
+        if (session.inputEscape === '\x1b[200~') { session.humanPaste = true; session.humanLineLength = 1; }
+        else if (session.inputEscape === '\x1b[201~') session.humanPaste = false;
+        session.inputEscape = '';
+      } else if (session.inputEscape.length > 32 || /^\x1b[^\[O]/.test(session.inputEscape) || /^\x1bO./.test(session.inputEscape)) session.inputEscape = '';
+      continue;
+    }
+    if (char === '\x1b') { session.inputEscape = char; continue; }
+    if (!session.humanPaste && (char === '\r' || char === '\n' || char === '\x03')) session.humanLineLength = 0;
+    else if (session.humanPaste || char >= ' ' || char === '\t') session.humanLineLength = 1;
+  }
+}
+
+function screenText(session, lines = 14) {
+  const buffer = session.terminal.buffer.active;
+  const text = [];
+  for (let i = Math.max(0, buffer.length - lines); i < buffer.length; i++) text.push(buffer.getLine(i)?.translateToString(true) || '');
+  return text.join('\n').trimEnd();
+}
+
+function blockedScreen(session) {
+  const buffer = session.terminal.buffer.active;
+  const bottom = Array.from({ length: session.rows }, (_, i) => buffer.getLine(buffer.baseY + i)?.translateToString(true) || '').join('\n');
+  if (/(?:enter|paste|provide)\s+(?:your\s+)?(?:api[ -]?key|password|verification code)|sign in (?:with|to)|press enter to (?:open|continue.*sign)|authentication required|log in to/i.test(bottom)) return 'authentication';
+  if (/would you like to (?:run|allow|approve)|approve this (?:command|action)|allow (?:once|for this session)|requires (?:your )?approval|trust this (?:folder|directory)|do you trust|yes, proceed|1\.\s+(?:yes|allow|approve)/i.test(bottom)) return 'approval';
+  // A foreground Codex process can still be choosing its startup mode. Require
+  // the compatibility heading and a numbered action, not daemon prose alone.
+  if (/background\s+server\s+has\s+incompatible\s+feature\s+settings/i.test(bottom)
+      && /(?:^|\n)\s*(?:[›❯>]\s*)?(?:1\.\s*run\s+without\s+(?:the\s+)?daemon\s+this\s+time|2\.\s*restart\s+with\s+these\s+settings)/i.test(bottom)) return 'setup_menu';
+  // An upgrade choice is also startup UI, never an ordinary task prompt. The
+  // title and both kinds of numbered choices avoid matching update prose.
+  if (/update\s+available\b/i.test(bottom)
+      && /(?:^|\n)\s*(?:[›❯>]\s*)?1\.\s*update\s+now\b/i.test(bottom)
+      && /(?:^|\n)\s*(?:[›❯>]\s*)?[23]\.\s*skip\b/i.test(bottom)) return 'setup_menu';
+  if (/choose (?:a |your )?(?:model|provider|account)|select (?:a |your )?(?:model|provider|account)|how would you like to sign in/i.test(bottom)) return 'setup_menu';
+  return null;
+}
+
+async function commandResult(file, args, timeout = 12000) {
+  const result = execFileAsync(file, args, { windowsHide: true, timeout, maxBuffer: 2 * 1024 * 1024, encoding: 'utf8' });
+  // Every caller here is a no-input command. Windows OpenSSH can otherwise
+  // wait after its first output for this pipe to reach EOF. This must not be
+  // shared with spawnSshPipe: interactive terminals keep stdin open for input.
+  if (result.child.stdin) {
+    result.child.stdin.on('error', () => {}); // The process result still reports spawn/exit failures.
+    result.child.stdin.end();
+  }
+  return result;
+}
+
+function remoteBridgeCommand(mode, { sessionId, bridgeId, cols, rows, cwd = '' }) {
+  if (!['attach', 'resize'].includes(mode) || !SESSION_ID.test(sessionId) || !/^[a-f0-9]{24,48}$/.test(bridgeId)) {
+    throw new ApiError(400, 'invalid_bridge', 'Invalid owned remote display identity');
+  }
+  cols = boundedInteger(cols, 100, 20, 500); rows = boundedInteger(rows, 30, 5, 200);
+  if (typeof cwd !== 'string' || cwd.length > 4096 || /[\x00-\x1f\x7f-\x9f]/.test(cwd)) throw new ApiError(400, 'invalid_directory', 'Invalid terminal directory');
+  // Inline the local standalone helper; no remote installation/configuration or
+  // auth files. Compression keeps even quoted long paths below Windows argv limits.
+  const body = zlib.deflateSync(fs.readFileSync(path.join(__dirname, 'remote_pty_bridge.py'))).toString('base64');
+  const bootstrap = `import base64,zlib;exec(compile(zlib.decompress(base64.b64decode('${body}')),'ceo-hub-pty-bridge','exec'))`;
+  const args = ['python3', '-c', bootstrap, mode, '--session', sessionId, '--bridge-id', bridgeId,
+    '--cols', String(cols), '--rows', String(rows)];
+  if (mode === 'attach') args.push('--cwd', cwd);
+  return args.map(shellQuote).join(' ');
+}
+
+function remoteForegroundCommand(sessionId) {
+  if (!SESSION_ID.test(sessionId)) throw new ApiError(400, 'invalid_session_id', 'Invalid owned terminal session ID');
+  const body = zlib.deflateSync(fs.readFileSync(path.join(__dirname, 'remote_foreground_probe.py'))).toString('base64');
+  const bootstrap = `import base64,zlib;exec(compile(zlib.decompress(base64.b64decode('${body}')),'ceo-hub-foreground-probe','exec'))`;
+  return ['python3', '-c', bootstrap, '--session', sessionId].map(shellQuote).join(' ');
+}
+
+function verifiedIdentity(result) {
+  if (result.identity_verified !== true || result.state !== 'agent'
+      || !['codex', 'claude', 'aider', 'opencode', 'gemini'].includes(result.agent_kind)
+      || ![result.agent_pid, result.agent_start_ticks, result.foreground_pgid].every(value => Number.isSafeInteger(value) && value > 0)) return null;
+  return { kind: result.agent_kind, pid: result.agent_pid, startTicks: result.agent_start_ticks, pgid: result.foreground_pgid };
+}
+
+function sameIdentity(one, two) {
+  return !!one && !!two && one.kind === two.kind && one.pid === two.pid && one.startTicks === two.startTicks && one.pgid === two.pgid;
+}
+
+function spawnSshPipe(file, args, options) {
+  // With a second ConPTY around Windows OpenSSH, startup/cooked-mode DA replies
+  // were observed as stray readline text during tmux reattach. A direct raw-TTY
+  // test preserves these bytes, so this is not a general byte-corruption claim.
+  // SSH -tt already allocates a genuine remote PTY; stdio pipes remove the extra
+  // terminal layer and its startup-query traffic while preserving raw replies.
+  const child = spawnChild(file, args, { cwd: options.cwd, env: options.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  let dataListener, exitListener, exited = false, exitCode;
+  const pending = [];
+  const deliver = data => dataListener ? dataListener(data) : pending.push(data);
+  for (const stream of [child.stdout, child.stderr]) {
+    stream.setEncoding('utf8');
+    stream.on('data', deliver);
+  }
+  child.stdin.on('error', () => {});
+  const ready = new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+  child.on('error', error => { deliver(`\r\nSSH could not start: ${error.message}\r\n`); });
+  child.once('close', code => { exited = true; exitCode = code == null ? 255 : code; if (exitListener) exitListener({ exitCode }); });
+  return {
+    pid: child.pid, process: 'ssh', ready,
+    write(data) { if (exited || child.stdin.destroyed) throw new ApiError(409, 'terminal_exited', 'SSH transport disconnected'); child.stdin.write(data, 'utf8'); },
+    async resize(cols, rows) {
+      let result;
+      try {
+        result = await commandResult(file, ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', options.target,
+          remoteBridgeCommand('resize', { sessionId: options.sessionId, bridgeId: options.bridgeId, cols, rows })], 18000);
+      } catch (error) { result = { stdout: typeof error.stdout === 'string' ? error.stdout : '' }; }
+      const marker = 'CEO_HUB_PTY_RESULT=';
+      const line = String(result.stdout || '').split(/\r?\n/).reverse().find(line => line.startsWith(marker));
+      let reply;
+      try { reply = line ? JSON.parse(line.slice(marker.length)) : null; } catch {}
+      if (!reply?.ok || reply.cols !== cols || reply.rows !== rows || reply.client_cols !== cols || reply.client_rows !== rows || reply.window_cols !== cols || reply.window_rows !== rows) {
+        const error = new ApiError(409, 'remote_resize_failed', 'Remote display resize was not confirmed; retry the resize before entering input');
+        error.geometryConfirmed = reply?.geometry_confirmed === true;
+        error.actualCols = reply?.cols; error.actualRows = reply?.rows;
+        throw error;
+      }
+      return reply;
+    },
+    kill() { if (!exited) child.kill(); },
+    onData(callback) { dataListener = callback; for (const data of pending.splice(0)) callback(data); return { dispose() { dataListener = null; } }; },
+    onExit(callback) { exitListener = callback; if (exited) callback({ exitCode }); return { dispose() { exitListener = null; } }; },
+  };
+}
+
+class TerminalBroker {
+  constructor(options = {}) {
+    this.sessions = new Map();
+    this.spawn = options.spawn || pty.spawn;
+    this.spawnRemote = options.spawnRemote || options.spawn || spawnSshPipe;
+    this.probe = options.probe || this.probeForeground.bind(this);
+    this.maxOutput = options.maxOutput || MAX_OUTPUT;
+  }
+
+  describe(session) {
+    const blocked = session.geometryUnknown ? 'geometry_unknown' : session.connected && session.state === 'agent' ? blockedScreen(session) : null;
+    return {
+      id: session.id, host: session.host, transport: session.transport,
+      target: session.target, title: session.title, cwd: session.cwd,
+      connected: session.connected, pid: session.pty?.pid || null,
+      cols: session.cols, rows: session.rows, state: session.connected ? session.geometryUnknown ? 'unknown' : session.state : 'exited',
+      command: session.command, current_seq: session.seq, created_at: session.createdAt,
+      agent_ready: session.connected && session.state === 'agent' && !blocked,
+      blocked_reason: blocked,
+      geometry_unknown: !!session.geometryUnknown,
+      ...(session.exitCode == null ? {} : { exit_code: session.exitCode }),
+    };
+  }
+
+  async create(body) {
+    const transport = body.transport || 'local';
+    if (!['local', 'ssh'].includes(transport)) throw new ApiError(400, 'invalid_transport', 'Use local or ssh');
+    const id = body.session_id || `ceohub-${crypto.randomBytes(12).toString('hex')}`;
+    if (!SESSION_ID.test(id)) throw new ApiError(400, 'invalid_session_id', 'Invalid owned terminal session ID');
+    const target = transport === 'ssh' ? String(body.target || '') : '';
+    if (transport === 'ssh' && (!target || target.startsWith('-') || /[\s\x00-\x1f]/.test(target))) {
+      throw new ApiError(400, 'invalid_target', 'Use an SSH host alias or user@host');
+    }
+    const host = String(body.host || (transport === 'local' ? 'local' : target));
+    const cwd = String(body.cwd || (transport === 'local' ? os.homedir() : '~'));
+    if (cwd.includes('\0')) throw new ApiError(400, 'invalid_directory', 'Invalid terminal directory');
+    let session = this.sessions.get(id);
+    if (session && (session.host !== host || session.target !== target || session.transport !== transport)) {
+      throw new ApiError(409, 'session_conflict', 'Session belongs to another machine');
+    }
+    if (session?.connected) return this.describe(session);
+    if (session && transport === 'local') throw new ApiError(409, 'session_exited', 'Local terminal has exited; create a new terminal');
+    const cols = boundedInteger(body.cols, session?.cols || 100, 20, 500);
+    const rows = boundedInteger(body.rows, session?.rows || 30, 5, 200);
+    if (!session) {
+      const terminal = new Terminal({ cols, rows, scrollback: 5000, allowProposedApi: true });
+      const serializer = new SerializeAddon();
+      terminal.loadAddon(serializer);
+      session = {
+        id, host, transport, target, cwd, title: String(body.title || 'Terminal').slice(0, 200),
+        cols, rows, terminal, serializer, connected: false, state: 'unknown', command: '',
+        seq: 0, ring: [], ringSize: 0, rendered: Promise.resolve(), writeQueue: Promise.resolve(),
+        humanLeaseUntil: 0, humanLineLength: 0, humanPaste: false, inputEscape: '', requests: new Map(), lastProbe: 0,
+        createdAt: new Date().toISOString(),
+      };
+      // Codex and tmux query cursor position/device attributes during startup.
+      // The broker answers even when no browser is open. These are terminal
+      // protocol replies, not human keystrokes and must not take a typing lease.
+      terminal.onData(data => {
+        if (session.connected) this.serializeWrite(session, () => { if (session.connected) session.pty.write(data); }).catch(() => {});
+      });
+      this.sessions.set(id, session);
+    }
+    let file, args, localCwd, bridgeId;
+    if (transport === 'local') {
+      if (!fs.statSync(cwd, { throwIfNoEntry: false })?.isDirectory()) {
+        throw new ApiError(400, 'invalid_directory', 'Local directory does not exist');
+      }
+      file = process.env.CEO_HUB_SHELL || (process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || '/bin/bash');
+      args = process.platform === 'win32' && /(?:powershell|pwsh)(?:\.exe)?$/i.test(file) ? ['-NoLogo'] : ['-l'];
+      localCwd = cwd;
+      session.state = 'shell';
+      session.command = path.basename(file);
+    } else {
+      file = sshExecutable();
+      // tmux starts the user's normal login shell and keeps it alive when the
+      // SSH transport disconnects. No model config, credentials or task text is
+      // rewritten, and the tmux namespace is restricted to our generated IDs.
+      bridgeId = crypto.randomBytes(12).toString('hex');
+      const remote = remoteBridgeCommand('attach', { sessionId: id, bridgeId, cols, rows, cwd: cwd === '~' ? '' : cwd });
+      args = ['-tt', '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=3', target, remote];
+      localCwd = os.homedir();
+    }
+    try {
+      const spawn = transport === 'ssh' ? this.spawnRemote : this.spawn;
+      const child = spawn(file, args, {
+        name: 'xterm-256color', cols, rows, cwd: localCwd, env: { ...process.env, TERM: 'xterm-256color' },
+        useConpty: true, ...(process.platform === 'win32' ? { useConptyDll: true } : { encoding: 'utf8' }),
+        target, sessionId: id, bridgeId,
+      });
+      if (child.ready) await child.ready;
+      session.pty = child;
+      session.connected = true;
+      session.geometryUnknown = false;
+      session.exitCode = null;
+      session.cols = cols; session.rows = rows;
+      child.onData(data => this.acceptOutput(session, data));
+      child.onExit(({ exitCode }) => { session.connected = false; session.exitCode = exitCode; session.state = 'exited'; });
+    } catch (error) {
+      session.connected = false;
+      throw new ApiError(500, 'spawn_failed', `Could not start ${transport} terminal: ${error.message}`);
+    }
+    return this.describe(session);
+  }
+
+  acceptOutput(session, data) {
+    const seq = ++session.seq;
+    session.ring.push({ seq, data });
+    session.ringSize += Buffer.byteLength(data);
+    while (session.ringSize > this.maxOutput && session.ring.length > 1) {
+      session.ringSize -= Buffer.byteLength(session.ring.shift().data);
+    }
+    session.rendered = session.rendered.then(() => new Promise(resolve => session.terminal.write(data, resolve)));
+  }
+
+  get(id) {
+    const session = this.sessions.get(id);
+    if (!session) throw new ApiError(404, 'terminal_not_found', 'Terminal not found');
+    return session;
+  }
+
+  async flushScreen(session) {
+    // Output may arrive while xterm parses the pending frame. Snapshot sequence
+    // must correspond to the rendered screen, never to an unrendered byte tail.
+    let pending;
+    do { pending = session.rendered; await pending; } while (pending !== session.rendered);
+  }
+
+  async snapshot(id, lines = 120) {
+    const session = this.get(id);
+    lines = boundedInteger(lines, 120, 1, 5000);
+    await this.refreshForeground(session);
+    await this.flushScreen(session);
+    const buffer = session.terminal.buffer.active;
+    const screen = [];
+    for (let index = Math.max(0, buffer.length - lines); index < buffer.length; index++) {
+      screen.push(buffer.getLine(index)?.translateToString(true) || '');
+    }
+    return { ...this.describe(session), screen: screen.join('\n').trimEnd(), ansi: session.serializer.serialize({ scrollback: lines }) };
+  }
+
+  async output(id, after = 0) {
+    const session = this.get(id);
+    after = boundedInteger(after, 0, 0, Number.MAX_SAFE_INTEGER);
+    // Only a terminal being polled is sampled. The cached/coalesced probe keeps
+    // frontend delta polling from making a new SSH/process query every frame.
+    await this.refreshForeground(session);
+    const metadata = () => {
+      const view = this.describe(session);
+      return {
+        connected: view.connected, state: view.state, status: view.state,
+        command: view.command, agent_ready: view.agent_ready,
+        blocked_reason: view.blocked_reason, geometry_unknown: view.geometry_unknown, cols: view.cols, rows: view.rows,
+        ...(view.exit_code == null ? {} : { exit_code: view.exit_code }),
+      };
+    };
+    const earliest = session.ring[0]?.seq || session.seq + 1;
+    if (after < earliest - 1 || after > session.seq) {
+      await this.flushScreen(session);
+      return { ...metadata(), data: '', seq: session.seq, reset: true, ansi: session.serializer.serialize({ scrollback: 5000 }) };
+    }
+    return { ...metadata(), data: session.ring.filter(chunk => chunk.seq > after).map(chunk => chunk.data).join(''), seq: session.seq, reset: false };
+  }
+
+  serializeWrite(session, action) {
+    const result = session.writeQueue.then(action);
+    session.writeQueue = result.catch(() => {});
+    return result;
+  }
+
+  async input(id, body) {
+    const session = this.get(id);
+    if (typeof body.data !== 'string' || Buffer.byteLength(body.data) > 256 * 1024) throw new ApiError(400, 'invalid_input', 'Expected terminal data up to 256 KiB');
+    const origin = body.origin || 'ui';
+    if (!['ui', 'plugin'].includes(origin)) throw new ApiError(400, 'invalid_origin', 'Invalid input origin');
+    if (origin === 'plugin' && (typeof body.request_key !== 'string' || !body.request_key || body.request_key.length > 200)) {
+      throw new ApiError(400, 'missing_request_key', 'Plugin input requires a request_key for safe delivery');
+    }
+    if (origin === 'ui') updateHumanInput(session, body.data);
+    return this.serializeWrite(session, () => {
+      const digest = crypto.createHash('sha256').update(`input:${body.data}`).digest('hex');
+      if (body.request_key) {
+        const prior = session.requests.get(body.request_key);
+        if (prior) {
+          if (prior.digest !== digest) throw new ApiError(409, 'request_conflict', 'request_key was already used with different input');
+          return { ...prior.result, deduplicated: true };
+        }
+      }
+      if (!session.connected) throw new ApiError(409, 'terminal_exited', 'Terminal is disconnected');
+      if (session.geometryUnknown) throw new ApiError(409, 'geometry_unknown', 'Display geometry is not synchronized; retry resizing before entering input');
+      if (origin === 'plugin' && (session.humanLineLength || Date.now() < session.humanLeaseUntil)) {
+        throw new ApiError(409, 'human_busy', 'User is typing in this terminal; retry after the user submits or clears their input');
+      }
+      session.pty.write(body.data);
+      const result = { id, accepted: true, state: 'submitted', origin, ...(body.request_key ? { request_key: body.request_key } : {}) };
+      if (body.request_key) {
+        session.requests.set(body.request_key, { digest, result });
+        if (session.requests.size > 500) session.requests.delete(session.requests.keys().next().value);
+      }
+      return result;
+    });
+  }
+
+  async prompt(id, body) {
+    const session = this.get(id);
+    if (typeof body.text !== 'string' || !body.text.trim() || Buffer.byteLength(body.text) > 256 * 1024 || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/.test(body.text)) {
+      throw new ApiError(400, 'invalid_prompt', 'Expected nonempty task text, without terminal escape sequences, up to 256 KiB');
+    }
+    if (typeof body.request_key !== 'string' || !body.request_key || body.request_key.length > 200) throw new ApiError(400, 'missing_request_key', 'A request_key is required for safe delivery');
+    const origin = body.origin || 'plugin';
+    if (!['ui', 'plugin'].includes(origin)) throw new ApiError(400, 'invalid_origin', 'Invalid prompt origin');
+    return this.serializeWrite(session, async () => {
+      const digest = crypto.createHash('sha256').update(`prompt:${body.text}`).digest('hex');
+      const prior = session.requests.get(body.request_key);
+      if (prior) {
+        if (prior.digest !== digest) throw new ApiError(409, 'request_conflict', 'request_key was already used with different text');
+        return { ...prior.result, deduplicated: true };
+      }
+      if (!session.connected) throw new ApiError(409, 'terminal_exited', 'Terminal is disconnected');
+      if (session.geometryUnknown) throw new ApiError(409, 'geometry_unknown', 'Display geometry is not synchronized; retry resizing before sending a task');
+      if (session.humanLineLength || Date.now() < session.humanLeaseUntil) {
+        throw new ApiError(409, 'human_busy', 'User is typing in this terminal; retry after the user submits or clears their input');
+      }
+      await this.refreshForeground(session, true);
+      if (session.state !== 'agent') throw new ApiError(409, session.state === 'shell' ? 'agent_not_started' : 'agent_not_confirmed', 'Start Codex or another coding agent in this terminal first');
+      const expectedIdentity = session.agentIdentity;
+      if (session.transport === 'ssh' && !expectedIdentity) throw new ApiError(409, 'agent_not_confirmed', 'Foreground agent identity was not confirmed; task was not sent');
+      await this.flushScreen(session);
+      const blocked = blockedScreen(session);
+      if (blocked) throw new ApiError(409, 'waiting_for_agent', `The terminal is showing an ${blocked} prompt; the user must handle it in the terminal first`);
+      if (session.humanLineLength || Date.now() < session.humanLeaseUntil) throw new ApiError(409, 'human_busy', 'User started typing; task was not sent');
+      if (expectedIdentity) {
+        // A launcher can exit, replace its child, or return to a shell while
+        // screen parsing/readiness checks are running. Reconfirm the exact
+        // native identity close to the write, rather than trusting an old name.
+        await this.refreshForeground(session, true);
+        if (session.state !== 'agent' || !sameIdentity(expectedIdentity, session.agentIdentity)) {
+          throw new ApiError(409, 'agent_not_confirmed', 'Foreground agent identity changed; task was not sent');
+        }
+        await this.flushScreen(session);
+        if (!session.connected) throw new ApiError(409, 'terminal_exited', 'Terminal disconnected; task was not sent');
+        if (session.geometryUnknown) throw new ApiError(409, 'geometry_unknown', 'Display geometry is not synchronized; task was not sent');
+        const latestBlocked = blockedScreen(session);
+        if (latestBlocked) throw new ApiError(409, 'waiting_for_agent', `The terminal is showing an ${latestBlocked} prompt; task was not sent`);
+        if (session.humanLineLength || Date.now() < session.humanLeaseUntil) throw new ApiError(409, 'human_busy', 'User started typing; task was not sent');
+      }
+      if (session.state !== 'agent' || expectedIdentity && !sameIdentity(expectedIdentity, session.agentIdentity)) {
+        throw new ApiError(409, 'agent_not_confirmed', 'Foreground agent identity changed; task was not sent');
+      }
+      // One PTY write prevents user input interleaving between multiline paste
+      // and Enter. Codex's bracketed paste handles multiline task text safely.
+      const normalized = body.text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      session.pty.write(`\x1b[200~${normalized}\x1b[201~\r`);
+      const result = { id, accepted: true, state: 'submitted', request_key: body.request_key, origin, delivered_at: new Date().toISOString() };
+      session.requests.set(body.request_key, { digest, result });
+      if (session.requests.size > 500) session.requests.delete(session.requests.keys().next().value);
+      return result;
+    });
+  }
+
+  async refreshForeground(session, force = false) {
+    if (!session.connected || (!force && Date.now() - session.lastProbe < 1500)) return;
+    if (session.probing) { await session.probing; if (!force) return; }
+    session.probing = (async () => {
+      try {
+        const result = await this.probe(session);
+        if (session.connected) {
+          session.command = result.command || ''; session.state = result.state || classifyCommand(session.command);
+          session.agentIdentity = verifiedIdentity(result);
+        }
+      } catch { if (session.connected) { session.state = 'unknown'; session.agentIdentity = null; } }
+      finally { session.lastProbe = Date.now(); }
+    })();
+    try { await session.probing; } finally { session.probing = null; }
+  }
+
+  async probeForeground(session) {
+    if (session.transport === 'ssh') {
+      const result = await commandResult(sshExecutable(), ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', session.target,
+        remoteForegroundCommand(session.id)]);
+      const marker = 'CEO_HUB_FOREGROUND_RESULT=';
+      const line = String(result.stdout || '').split(/\r?\n/).reverse().find(line => line.startsWith(marker));
+      let identity;
+      try { identity = line ? JSON.parse(line.slice(marker.length)) : null; } catch {}
+      const reasons = ['agent_identity_unresolved', 'foreground_shell', 'process_changed', 'verified_foreground_codex', 'verified_foreground_agent'];
+      if (!identity || !['shell', 'agent', 'unknown'].includes(identity.state) || typeof identity.command !== 'string'
+          || !/^[A-Za-z0-9_.+-]{0,64}$/.test(identity.command) || !reasons.includes(identity.reason)
+          || (identity.state === 'agent' && !verifiedIdentity(identity))) {
+        return { command: '', state: 'unknown' };
+      }
+      // Only whitelisted identity metadata crosses the API. No executable paths,
+      // command-line arguments, environment, credentials or startup output.
+      return { command: identity.command, state: identity.state, reason: identity.reason,
+        ...(identity.state === 'agent' ? { identity_verified: true, agent_kind: identity.agent_kind,
+          agent_pid: identity.agent_pid, agent_start_ticks: identity.agent_start_ticks, foreground_pgid: identity.foreground_pgid } : {}) };
+    }
+    if (process.platform === 'win32') {
+      // Only return names, never command lines (which may contain credentials).
+      const script = `$all=Get-CimInstance Win32_Process; $ids=@(${Number(session.pty.pid)}); $names=@(); for($i=0;$i -lt 12;$i++){ $children=@($all | Where-Object {$ids -contains $_.ParentProcessId}); if($children.Count -eq 0){break}; $names+=@($children | ForEach-Object {$_.Name}); $ids+=@($children | ForEach-Object {$_.ProcessId}) }; $names | ConvertTo-Json -Compress`;
+      const result = await commandResult('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], 8000);
+      const parsed = result.stdout.trim() ? JSON.parse(result.stdout) : [];
+      const names = Array.isArray(parsed) ? parsed : [parsed];
+      const agent = names.find(name => classifyCommand(name) === 'agent');
+      if (agent) {
+        await this.flushScreen(session);
+        const buffer = session.terminal.buffer.active;
+        const cursor = buffer.getLine(buffer.baseY + buffer.cursorY)?.translateToString(true) || '';
+        const visible = Array.from({ length: session.rows }, (_, i) => buffer.getLine(buffer.baseY + i)?.translateToString(true) || '').join('\n');
+        // Windows has no POSIX foreground process group. A background Codex
+        // descendant is not sufficient: require its visible input UI, and refuse
+        // when the actual cursor has returned to a shell prompt.
+        if (/^\s*(?:PS\s+.+>|[A-Za-z]:\\[^>]*>|[$#])\s*/.test(cursor)) return { command: 'powershell.exe', state: 'shell' };
+        const inputUi = /^\s*[›❯]\s/m.test(visible) || (session.terminal.buffer.active.type === 'alternate' && /codex|claude|aider|opencode|gemini/i.test(visible));
+        return { command: agent, state: inputUi || blockedScreen(session) ? 'agent' : 'unknown' };
+      }
+      if (names.some(name => !['conhost.exe', 'openconsole.exe'].includes(String(name).toLowerCase()))) return { command: names[names.length - 1], state: 'unknown' };
+      return { command: session.pty.process || 'powershell.exe', state: 'shell' };
+    }
+    const result = await commandResult('ps', ['-eo', 'pid=,ppid=,pgid=,tpgid=,comm=']);
+    const rows = result.stdout.split('\n').map(line => /^\s*(\d+)\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(.+)$/.exec(line)).filter(Boolean);
+    const ids = new Set([session.pty.pid]);
+    const names = [];
+    const foreground = Number(rows.find(row => Number(row[1]) === session.pty.pid)?.[4]);
+    for (let i = 0; i < 12; i++) for (const row of rows) if (ids.has(Number(row[2])) && !ids.has(Number(row[1]))) {
+      ids.add(Number(row[1]));
+      if (Number(row[3]) === foreground) names.push(row[5]);
+    }
+    const agent = names.find(name => classifyCommand(name) === 'agent');
+    return { command: agent || names.at(-1) || session.pty.process, state: agent ? 'agent' : classifyCommand(names.at(-1) || session.pty.process) };
+  }
+
+  async resize(id, body) {
+    const session = this.get(id);
+    const cols = boundedInteger(body.cols, session.cols, 20, 500);
+    const rows = boundedInteger(body.rows, session.rows, 5, 200);
+    return this.serializeWrite(session, async () => {
+      if (!session.connected) throw new ApiError(409, 'terminal_exited', 'Terminal is disconnected');
+      await this.flushScreen(session);
+      const previous = { cols: session.cols, rows: session.rows };
+      // A remote resize emits its newly wrapped/reflowed frame while SSH is
+      // still in flight. Parse that frame at the new geometry, not the old one.
+      session.terminal.resize(cols, rows);
+      session.cols = cols; session.rows = rows;
+      try { await session.pty.resize(cols, rows); }
+      catch (error) {
+        await this.flushScreen(session);
+        if (session.transport === 'ssh') {
+          // An operation can fail after changing the original PTY. Only restore
+          // a confirmed geometry; never pretend that an uncertain old size won.
+          if (error.geometryConfirmed && Number.isInteger(error.actualCols) && Number.isInteger(error.actualRows)
+              && error.actualCols >= 20 && error.actualCols <= 500 && error.actualRows >= 5 && error.actualRows <= 200) {
+            session.terminal.resize(error.actualCols, error.actualRows);
+            session.cols = error.actualCols; session.rows = error.actualRows;
+          }
+          // Even confirmed rollback may have delivered frames at two sizes.
+          // A subsequent successful resize/full redraw is needed before input.
+          session.geometryUnknown = true;
+        } else {
+          session.terminal.resize(previous.cols, previous.rows);
+          session.cols = previous.cols; session.rows = previous.rows;
+        }
+        throw error;
+      }
+      session.geometryUnknown = false;
+      return this.describe(session);
+    });
+  }
+
+  async close(id) {
+    const session = this.get(id);
+    return this.serializeWrite(session, async () => {
+      if (session.transport === 'ssh') {
+        await commandResult(sshExecutable(), ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', session.target,
+          `tmux kill-session -t ${shellQuote(session.id)} 2>/dev/null || ! tmux has-session -t ${shellQuote(session.id)} 2>/dev/null`]);
+      }
+      if (session.connected) session.pty.kill();
+      session.connected = false; session.state = 'exited';
+      return { id, closed: true };
+    });
+  }
+}
+
+async function readBody(request) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > 1024 * 1024) throw new ApiError(413, 'body_too_large', 'Request body too large');
+    chunks.push(chunk);
+  }
+  try { return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); }
+  catch { throw new ApiError(400, 'invalid_json', 'Expected a JSON object'); }
+}
+
+function createServer(broker, token) {
+  return http.createServer(async (request, response) => {
+    response.setHeader('Content-Type', 'application/json; charset=utf-8');
+    response.setHeader('Cache-Control', 'no-store');
+    response.setHeader('X-Content-Type-Options', 'nosniff');
+    try {
+      // This endpoint is backend-to-backend only. Browser requests must pass
+      // through the Hub's existing origin/CSRF boundary, never this bearer token.
+      if (request.headers.origin) throw new ApiError(403, 'browser_origin_denied', 'Use the Hub terminal API');
+      const auth = String(request.headers.authorization || '');
+      const expected = `Bearer ${token}`;
+      if (auth.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) throw new ApiError(401, 'unauthorized', 'Authentication required');
+      const url = new URL(request.url, 'http://127.0.0.1');
+      let result;
+      if (request.method === 'GET' && url.pathname === '/health') result = { ok: true, version: VERSION, pid: process.pid };
+      else if (request.method === 'GET' && url.pathname === '/sessions') result = { sessions: [...broker.sessions.values()].map(session => broker.describe(session)) };
+      else if (request.method === 'POST' && url.pathname === '/sessions/create') result = await broker.create(await readBody(request));
+      else {
+        const match = /^\/sessions\/(ceohub-[a-f0-9]{16,48})\/(snapshot|output|input|prompt|resize|close)$/.exec(url.pathname);
+        if (!match) throw new ApiError(404, 'not_found', 'Endpoint not found');
+        const [, id, action] = match;
+        if (request.method === 'GET' && action === 'snapshot') result = await broker.snapshot(id, url.searchParams.get('lines') || 120);
+        else if (request.method === 'GET' && action === 'output') result = await broker.output(id, url.searchParams.get('after') || 0);
+        else if (request.method === 'POST' && ['input', 'prompt', 'resize', 'close'].includes(action)) {
+          const body = await readBody(request);
+          result = await broker[action](id, body);
+        } else throw new ApiError(405, 'method_not_allowed', 'Invalid request method');
+      }
+      response.end(JSON.stringify(result));
+    } catch (error) {
+      response.statusCode = error.status || 500;
+      response.end(JSON.stringify({ error: error.code || 'terminal_error', message: error.status ? error.message : 'Terminal request failed' }));
+    }
+  });
+}
+
+async function main() {
+  const filename = descriptorPath();
+  fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
+  try {
+    const existing = JSON.parse(fs.readFileSync(filename, 'utf8'));
+    if (/^http:\/\/127\.0\.0\.1:\d+$/.test(existing.url)) {
+      const result = await fetch(`${existing.url}/health`, { headers: { Authorization: `Bearer ${existing.token}` }, signal: AbortSignal.timeout(1000) });
+      if (result.ok) { process.stdout.write('CEO Hub terminal broker is already running.\n'); return; }
+    }
+  } catch {}
+  const lockfile = `${filename}.lock`;
+  let lock;
+  try { lock = fs.openSync(lockfile, 'wx', 0o600); }
+  catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    let alive = false;
+    try { const owner = Number(fs.readFileSync(lockfile, 'utf8')); if (owner > 0) { process.kill(owner, 0); alive = true; } } catch {}
+    if (alive) { process.stdout.write('CEO Hub terminal broker is already starting.\n'); return; }
+    fs.unlinkSync(lockfile);
+    lock = fs.openSync(lockfile, 'wx', 0o600);
+  }
+  fs.writeFileSync(lock, String(process.pid));
+  fs.closeSync(lock);
+  const token = crypto.randomBytes(32).toString('hex');
+  const broker = new TerminalBroker();
+  const server = createServer(broker, token);
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  const descriptor = { url: `http://127.0.0.1:${server.address().port}`, token, pid: process.pid, version: VERSION };
+  const temp = `${filename}.${process.pid}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify(descriptor), { mode: 0o600 });
+  fs.renameSync(temp, filename);
+  process.stdout.write(`CEO Hub terminal broker listening on ${descriptor.url}\n`);
+  for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => {
+    for (const session of broker.sessions.values()) if (session.connected) try { session.pty.kill(); } catch {}
+    try { if (JSON.parse(fs.readFileSync(filename, 'utf8')).pid === process.pid) fs.unlinkSync(filename); } catch {}
+    try { if (Number(fs.readFileSync(lockfile, 'utf8')) === process.pid) fs.unlinkSync(lockfile); } catch {}
+    server.close(() => process.exit(0));
+  });
+}
+
+module.exports = { TerminalBroker, ApiError, createServer, descriptorPath, shellQuote, classifyCommand, updateHumanInput, blockedScreen, spawnSshPipe, remoteBridgeCommand };
+if (require.main === module) main().catch(error => { process.stderr.write(`Terminal broker failed: ${error.message}\n`); process.exitCode = 1; });
