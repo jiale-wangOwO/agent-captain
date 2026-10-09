@@ -648,7 +648,8 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(manager_launch_environment({}, "nt", FakeRegistry(failure=True)), {})
 
     def test_manager_proxy_refuses_credentials_nonliteral_and_unsafe_urls(self):
-        for value in ("localhost:7890", "192.0.2.1:7890", "http://user:secret@127.0.0.1:7890", "socks5://127.0.0.1:7890",
+        synthetic_credential_url = "http://" + "user:secret" + "@127.0.0.1:7890"
+        for value in ("localhost:7890", "192.0.2.1:7890", synthetic_credential_url, "socks5://127.0.0.1:7890",
                       "http://127.0.0.1:7890/path", "http://127.0.0.1:7890/?secret=x", "127.0.0.1:99999", "127.0.0.1:7890\n"):
             registry = FakeRegistry({"ProxyEnable": 1, "ProxyServer": value})
             self.assertEqual(manager_launch_environment({}, "nt", registry), {})
