@@ -156,7 +156,7 @@ function nativeRootKind(program, platform) {
 }
 
 function directRootIdentity(session, metadata, platform) {
-  // Exact kernel/CIM identity, not argv text, a matching filename in a process
+  // Exact kernel process identity, not argv text, a matching filename in a process
   // tree, or a UI title. Only an owned directly launched native agent qualifies.
   const kind = nativeRootKind(session.program, platform);
   if (!kind || session.transport !== 'local' || !metadata || metadata.pid !== session.pty?.pid
@@ -552,9 +552,10 @@ class TerminalBroker {
       if (rootKind) {
         const pid = session.pty.pid;
         if (!Number.isSafeInteger(pid) || pid <= 0) return { command: '', state: 'unknown' };
-        // This is a bounded exact-PID query. Never return command lines, the
-        // environment, or unrelated executable paths from the machine.
-        const script = `$r=Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -Property ProcessId,Name,ExecutablePath,CreationDate; if($r){ [pscustomobject]@{pid=[int]$r.ProcessId;name=$r.Name;executable=$r.ExecutablePath;startTicks=[long](($r.CreationDate.ToUniversalTime()-([datetime]'1970-01-01T00:00:00Z').ToUniversalTime()).Ticks/10)} | ConvertTo-Json -Compress }`;
+        // This is a bounded exact-PID query. Get-Process reads local process
+        // metadata directly instead of paying CIM provider startup latency.
+        // Never return command lines, environment, or unrelated process paths.
+        const script = `$r=Get-Process -Id ${pid} -ErrorAction Stop; [pscustomobject]@{pid=[int]$r.Id;name=$r.ProcessName+'.exe';executable=$r.Path;startTicks=[long](($r.StartTime.ToUniversalTime()-([datetime]'1970-01-01T00:00:00Z').ToUniversalTime()).Ticks/10)} | ConvertTo-Json -Compress`;
         try {
           const result = await this.runCommand('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], 8000);
           const metadata = result.stdout.trim() ? JSON.parse(result.stdout) : null;

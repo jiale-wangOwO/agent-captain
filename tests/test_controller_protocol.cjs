@@ -129,16 +129,17 @@ async function nativeFixture(platform, options = {}) {
   return { broker, metadata, calls, writes, id: created.id, current: broker.get(created.id), output: data => output(data) };
 }
 
-test('Windows direct native root is proven by filtered exact executable/PID/creation-time and accepts new » input UI', async () => {
+test('Windows direct native root uses only exact PID Get-Process metadata and accepts new » input UI', async () => {
   const f = await nativeFixture('win32');
   f.output('Codex\r\n» Ask Codex to do anything');
   const snapshot = await f.broker.snapshot(f.id);
   assert.equal(snapshot.agent_ready, true);
   assert.equal(snapshot.command, 'codex.exe');
   assert.equal(f.calls.length, 1);
-  assert.match(f.calls[0].args.at(-1), /-Filter "ProcessId=123"/);
-  assert.match(f.calls[0].args.at(-1), /-Property ProcessId,Name,ExecutablePath,CreationDate/);
-  assert.doesNotMatch(f.calls[0].args.at(-1), /CommandLine|ParentProcessId|\$all/);
+  assert.match(f.calls[0].args.at(-1), /Get-Process -Id 123 -ErrorAction Stop/);
+  assert.match(f.calls[0].args.at(-1), /pid=\[int\]\$r\.Id;name=\$r\.ProcessName\+'\.exe';executable=\$r\.Path;startTicks=\[long\]/);
+  assert.match(f.calls[0].args.at(-1), /\$r\.StartTime\.ToUniversalTime\(\)/);
+  assert.doesNotMatch(f.calls[0].args.at(-1), /Get-CimInstance|Win32_Process|CommandLine|ParentProcessId|\$all/);
   assert.equal(JSON.stringify(snapshot).includes(f.metadata.executable), false, 'Proof executable remains internal metadata');
   assert.equal((await f.broker.prompt(f.id, { text: 'authorized test', request_key: 'native-root' })).state, 'submitted');
   assert.equal(f.calls.length, 3, 'Task delivery uses two additional fresh identity probes');
