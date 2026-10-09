@@ -75,8 +75,10 @@ class BindingTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.home = Path(self.temp.name) / ".codex"
-        self.cwd = Path(self.temp.name) / "project"
+        # Normalize the existing temporary root, including Windows 8.3 aliases.
+        self.base = Path(self.temp.name).resolve()
+        self.home = self.base / ".codex"
+        self.cwd = self.base / "project"
         self.cwd.mkdir()
         (self.home / "sessions" / "2026" / "10" / "07").mkdir(parents=True)
         self.path = self.rollout(THREAD)
@@ -314,12 +316,39 @@ class BindingTests(unittest.TestCase):
         self.assertTrue(Path(home).is_absolute())
         self.assertIsInstance(reader.held_rollouts(os.getpid(), home), list)
 
+    def test_held_rollout_scope_accepts_mixed_short_and_long_path_aliases(self):
+        # Simulate 8.3 resolution on every platform rather than requiring a
+        # volume with short-name creation enabled or skipping the regression.
+        short_home = self.base / "CODEX~1"
+        short_rollout = short_home / self.path.relative_to(self.home)
+        outside = self.base / "outside.jsonl"
+        misleading = self.home / "sessions" / "OUTSID~1.jsonl"
+        aliases = {short_home: self.home, short_rollout: self.path, misleading: outside}
+        resolve = Path.resolve
+
+        def canonicalize(path, *args, **kwargs):
+            if path in aliases:
+                return aliases[path]
+            return resolve(path, *args, **kwargs)
+
+        with patch.object(binding.Path, "resolve", autospec=True, side_effect=canonicalize):
+            for value, home in ((self.path, short_home), (short_rollout, self.home),
+                                (short_rollout, short_home)):
+                with self.subTest(value=value, home=home):
+                    self.assertEqual(binding._held_rollout_candidate(str(value), str(home)), str(self.path))
+            self.assertIsNone(binding._held_rollout_candidate(str(outside), str(short_home)))
+            self.assertIsNone(binding._held_rollout_candidate(str(misleading), str(short_home)))
+            self.assertIsNone(binding._held_rollout_candidate(str(short_home / "auth.json"), str(short_home)))
+
     def test_windows_native_per_process_handles_find_only_owned_fixture_rollout(self):
         if os.name != "nt":
             self.skipTest("Windows native handles fixture")
         reader = binding.WindowsProc()
         with self.path.open("rb"):
-            paths = reader.held_rollouts(os.getpid(), str(self.home))
+            # Keep the original TEMP spelling here so Windows CI exercises the
+            # real short-home/long-handle case, not only a normalized fixture.
+            original_home = Path(self.temp.name) / ".codex"
+            paths = reader.held_rollouts(os.getpid(), str(original_home))
         self.assertEqual(paths, [str(self.path)])
 
     def test_windows_unbound_keeps_process_identity_without_private_owner(self):

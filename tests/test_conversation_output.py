@@ -23,7 +23,7 @@ class ConversationOutputTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.home = Path(self.temp.name) / "codex"
+        self.home = Path(self.temp.name).resolve() / "codex"
         self.path = self.home / "sessions" / "2026" / "selected.jsonl"
         self.path.parent.mkdir(parents=True)
         self.meta = event("session_meta", {"id": "selected-session", "cwd": "/work/selected"})

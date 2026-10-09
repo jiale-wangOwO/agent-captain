@@ -386,6 +386,22 @@ def _bind_windows_native(root_pid):
         return _unbound("windows_process_metadata_unavailable")
 
 
+def _held_rollout_candidate(value, home):
+    """Scope a held file using canonical paths on both sides of containment.
+
+    Windows handle paths and process CODEX_HOME can use different long/8.3
+    spellings. Resolve both without broadening the allowed rollout roots.
+    """
+    if not value.endswith(".jsonl"):
+        return None
+    canonical_home = Path(home).resolve()
+    candidate = Path(value).resolve()
+    if any(candidate.is_relative_to(canonical_home / directory)
+           for directory in ("sessions", "archived_sessions")):
+        return str(candidate)
+    return None
+
+
 class WindowsProc:
     """Native process-local inspection; private env/path data stays private."""
     def __init__(self):
@@ -594,10 +610,9 @@ class WindowsProc:
                         value = "\\\\" + value[8:]
                     elif value.startswith("\\\\?\\"):
                         value = value[4:]
-                    if value.endswith(".jsonl"):
-                        candidate = Path(value).resolve()
-                        if any(candidate.is_relative_to(Path(home) / directory) for directory in ("sessions", "archived_sessions")):
-                            paths.add(str(candidate))
+                    candidate = _held_rollout_candidate(value, home)
+                    if candidate is not None:
+                        paths.add(candidate)
                 finally:
                     self.kernel.CloseHandle(duplicate)
             return sorted(paths)

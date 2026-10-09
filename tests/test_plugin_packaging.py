@@ -20,7 +20,7 @@ SPEC.loader.exec_module(configure)
 class PluginPackagingTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="pron-plugin-")
-        self.base = Path(self.temp.name)
+        self.base = Path(self.temp.name).resolve()
         self.clone = self.base / "clone with spaces"
         self.clone.mkdir()
         self.source_plugin = self.clone / "plugins" / "pron-hub"

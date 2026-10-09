@@ -14,7 +14,8 @@ from directory_browser import DirectoryBrowser, list_local, _bounded_ssh
 class DirectoryBrowserTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        # TEMP may contain an 8.3 alias on Windows; APIs return canonical paths.
+        self.root = Path(self.temp.name).resolve()
         (self.root / "B-project").mkdir()
         (self.root / "a-project").mkdir()
         (self.root / "a-project" / "nested-secret-name").mkdir()
