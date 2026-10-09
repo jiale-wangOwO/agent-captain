@@ -36,12 +36,14 @@ def descriptor_path():
 
 
 class TerminalClient:
-    def __init__(self):
+    def __init__(self, descriptor_file=None, runtime=None):
         self.lock = threading.RLock()
+        self.descriptor_file = Path(descriptor_file) if descriptor_file is not None else None
+        self.runtime = Path(runtime) if runtime is not None else ROOT / ".runtime"
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
     def descriptor(self):
-        data = json.loads(descriptor_path().read_text(encoding="utf-8"))
+        data = json.loads((self.descriptor_file or descriptor_path()).read_text(encoding="utf-8"))
         url = data.get("url", "")
         parsed = urlparse(url)
         if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or not parsed.port or parsed.username or parsed.password or parsed.path not in ("", "/") or parsed.query or parsed.fragment:
@@ -83,12 +85,15 @@ class TerminalClient:
                 raise RuntimeError("需要 Node.js；请安装 Node.js 后执行 npm ci。")
             if not (ROOT / "node_modules/node-pty").exists():
                 raise RuntimeError("终端依赖未安装；请在 PRON Hub 目录执行 npm ci。")
-            logs = ROOT / ".runtime"
-            logs.mkdir(exist_ok=True)
+            logs = self.runtime
+            logs.mkdir(parents=True, exist_ok=True)
+            environment = os.environ.copy()
+            if self.descriptor_file is not None:
+                environment["CEO_HUB_TERMINAL_FILE"] = str(self.descriptor_file.resolve())
             with (logs / "terminal.out.log").open("ab") as output, (logs / "terminal.err.log").open("ab") as error:
                 process = subprocess.Popen([node, str(ROOT / "terminal_broker.cjs")], cwd=ROOT,
                     stdin=subprocess.DEVNULL, stdout=output, stderr=error,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), start_new_session=os.name != "nt")
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), start_new_session=os.name != "nt", env=environment)
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 if process.poll() is not None:
@@ -118,7 +123,8 @@ class TerminalClient:
             return {"data": "", "reset": True, "ansi": snapshot["ansi"], "seq": snapshot["current_seq"],
                     "connected": snapshot["connected"], "state": snapshot["state"], "status": snapshot["state"],
                     "command": snapshot.get("command", ""), "agent_ready": snapshot.get("agent_ready", False),
-                    "blocked_reason": snapshot.get("blocked_reason"), "cols": snapshot["cols"], "rows": snapshot["rows"]}
+                    "blocked_reason": snapshot.get("blocked_reason"), "human_busy": snapshot.get("human_busy", False),
+                    "cols": snapshot["cols"], "rows": snapshot["rows"]}
         return self.request(f"/sessions/{quote(terminal_id, safe='')}/output?after={max(0, int(after))}")
 
     def write(self, terminal_id, action, body):

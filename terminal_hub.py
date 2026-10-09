@@ -16,9 +16,10 @@ import catalog
 from directory_browser import DirectoryBrowser
 from store import Store
 from terminal_client import BrokerError, TerminalClient
+from controllers import ControllerService, default_workspace_root
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 RETRYABLE = ("queued", "waiting_for_agent", "human_busy", "awaiting_connection", "blocked")
 MANAGEMENT_EVENTS = ("host_configured", "host_connected", "host_unavailable", "agent_attached",
                      "agent_created", "agent_activated", "agent_deactivated", "message_submitted",
@@ -40,6 +41,10 @@ class Hub:
         self.event_condition = threading.Condition()
         self.stopping = False
         self._stop = threading.Event()
+        # Real management workspaces live outside this checkout: Codex folder
+        # trust must not implicitly grant access to the entire Hub repository.
+        # Explicit runtimes (including tests) keep all state in that namespace.
+        self.controllers = ControllerService(self, workspace_root=default_workspace_root(runtime))
         self._watcher = threading.Thread(target=self._watch_terminals, name="ceo-terminal-events", daemon=True)
         # Metadata reads never start the broker, SSH, a model, or a conversation.
         self._watcher.start()
@@ -116,7 +121,12 @@ class Hub:
         return {"host": host, **state}
 
     def discover(self, host, query="", cwd="", limit=20):
-        return {"host": host, **self.history(host, {"op": "find", "query": query, "cwd": cwd, "limit": limit})}
+        if self.controllers.is_controller_reference(host, query, cwd=cwd or None):
+            raise PermissionError("管理会话不能作为工作 agent 登记。")
+        result = self.history(host, {"op": "find", "query": query, "cwd": cwd, "limit": limit})
+        result["threads"] = [row for row in result.get("threads", [])
+                             if not self.controllers.is_controller_reference(host, row.get("id", ""), cwd=row.get("cwd"))]
+        return {"host": host, **result}
 
     def list_directories(self, host, path=""):
         return {"host": host, **self.directories.list(self.host(host), path)}
@@ -138,9 +148,13 @@ class Hub:
             raise ValueError("此终端已关闭或关闭结果尚未确认，不能再输入或重新连接。请新建终端；需要原对话时可在新终端运行 codex resume。")
 
     def get_agent(self, host, thread_id, plugin=False, sessions=None):
+        if self.controllers.is_controller_reference(host, thread_id):
+            raise PermissionError("管理会话不是工作 agent；请使用主控专用入口。")
         row = self.store.agent(host, thread_id)
         if not row:
             raise ValueError("未登记的工作终端；请先在 UI 打开或连接。")
+        if self.controllers.is_controller_reference(host, thread_id, cwd=row.get("cwd")):
+            raise PermissionError("管理工作区不能作为工作 agent 读取。")
         if plugin and not row["active"]:
             raise PermissionError("该终端未激活；请在 UI 纳入 CEO 管理范围。")
         safe = {key: value for key, value in row.items() if key not in ("access", "owned")}
@@ -189,8 +203,10 @@ class Hub:
         combined = request_key + suffix
         return combined if len(combined) <= 200 else hashlib.sha256(request_key.encode()).hexdigest() + suffix
 
-    def create_terminal(self, host, cwd, title, thread_id=None, cols=100, rows=30, active=False, request_key=None):
+    def create_terminal(self, host, cwd, title, thread_id=None, cols=100, rows=30, active=False, request_key=None, controller_id=None):
         config = self.host(host)
+        if self.controllers.is_controller_reference(host, thread_id, cwd=cwd or None):
+            raise PermissionError("管理会话不能作为工作终端创建或连接。")
         self._request_key(request_key)
         if not isinstance(cwd, str):
             raise ValueError("工作目录必须为路径字符串；留空可使用机器主目录。")
@@ -214,6 +230,10 @@ class Hub:
                     raise ValueError("已有终端仍在原工作目录；请新建终端使用其他目录。")
                 cwd = previous["cwd"]
             self._directory(config, cwd)
+            if self.controllers.is_controller_reference(host, thread_id, cwd=cwd):
+                raise PermissionError("管理工作区不能登记为工作 agent。")
+            if controller_id is not None:
+                self._require_creation_scope(controller_id, host, cwd)
             if not isinstance(title, str) or not title.strip() or len(title.strip()) > 200 or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in title):
                 raise ValueError("工作名称不能为空，最长 200 字符。")
             title = title.strip()
@@ -233,6 +253,8 @@ class Hub:
             self.store.remember(host, thread_id, title or thread_id, active=active if previous is None else None,
                                 mode="terminal", terminal_id=terminal_id, cwd=cwd)
             try:
+                if controller_id is not None:
+                    self._require_creation_scope(controller_id, host, cwd)
                 runtime = self.terminals.create({"session_id": terminal_id, "host": host, "transport": config["transport"],
                     "target": config.get("target", ""), "cwd": cwd, "title": title, "cols": cols, "rows": rows})
                 result = {"created": True, **self.get_agent(host, thread_id, sessions=[runtime]), **runtime,
@@ -290,6 +312,8 @@ class Hub:
         if not isinstance(session_id, str) or not re.fullmatch(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}", session_id):
             raise ValueError("请输入当前 Codex /status 显示的完整 Session ID。")
         session_id = session_id.lower()
+        if self.controllers.is_controller_reference(host, session_id):
+            raise PermissionError("不能将管理会话输出关联为工作 agent。")
         agent = self.get_agent(host, thread_id)
         self._require_open(agent)
         if not agent.get("terminal_id"):
@@ -339,6 +363,8 @@ class Hub:
                 return {"output_binding": {"state": "unbound", "reason": probe.get("reason", "session_identity_unavailable")},
                         "messages": [], "content_complete": False,
                         "note": "尚未准确关联 Codex 会话输出。请用当前终端 /status 的 Session ID 在 UI「关联会话」。屏幕不是完整回复。"}
+            if self.controllers.is_controller_reference(host, binding["session_id"]):
+                raise PermissionError("管理会话输出不能作为工作 agent 读取。")
             self.store.setting(key, binding)
             output = self.history(host, {"op": "read_output", "session_id": binding["session_id"],
                 "rollout_path": binding["rollout_path"], "codex_home": binding["codex_home"], "limit": limit,
@@ -398,12 +424,14 @@ class Hub:
     def _delivery(row):
         return {**row, "request_id": row["id"], "delivery": row["state"]}
 
-    def _submit(self, host, thread_id, data, kind, origin, request_key):
+    def _submit(self, host, thread_id, data, kind, origin, request_key, controller_id=None):
         self._request_key(request_key)
         if origin not in ("ui", "plugin"):
             raise ValueError("输入来源必须为 ui 或 plugin。")
         with self.registry_lock:
             agent = self.get_agent(host, thread_id, plugin=origin == "plugin")
+            if controller_id is not None:
+                self._require_controller_scope(controller_id, host, thread_id)
             self._require_open(agent)
             request_id = self.store.enqueue(host, thread_id, data, origin=origin, request_key=request_key, kind=kind)
             row = self.store.delivery(request_id)
@@ -412,8 +440,13 @@ class Hub:
             if not agent.get("terminal_id"):
                 self.store.update_outbox(request_id, "awaiting_connection", error="请先在 UI 连接共享终端。")
                 return self._delivery(self.store.delivery(request_id))
-            self.store.update_outbox(request_id, "submitting")
             try:
+                # Last check under the same lock used by scope revocation; an
+                # earlier queued/human_busy delivery is never a future grant.
+                self.get_agent(host, thread_id, plugin=origin == "plugin")
+                if controller_id is not None:
+                    self._require_controller_scope(controller_id, host, thread_id)
+                self.store.update_outbox(request_id, "submitting")
                 body = {"text" if kind == "prompt" else "data": data, "origin": origin, "request_key": request_key or request_id}
                 reply = self.terminals.write(agent["terminal_id"], "prompt" if kind == "prompt" else "input", body)
                 state = reply.get("state", "submitted" if reply.get("accepted") else "unknown")
@@ -421,6 +454,8 @@ class Hub:
                 if state == "submitted":
                     self.record_event("message_submitted" if kind == "prompt" else "terminal_input_submitted",
                                       host=host, thread_id=thread_id, request_id=request_id, origin=origin)
+            except PermissionError:
+                self.store.update_outbox(request_id, "scope_revoked", error="输入提交前授权已失效；未提交输入不会执行。")
             except BrokerError as error:
                 state = {"human_busy": "human_busy", "waiting_for_agent": "waiting_for_agent", "agent_not_started": "waiting_for_agent",
                          "agent_not_confirmed": "waiting_for_agent", "terminal_exited": "awaiting_connection", "terminal_not_found": "awaiting_connection",
@@ -434,18 +469,18 @@ class Hub:
                 self.store.update_outbox(request_id, "unknown", error=str(error))
             return self._delivery(self.store.delivery(request_id))
 
-    def send(self, host, thread_id, text, origin="ui", request_key=None):
+    def send(self, host, thread_id, text, origin="ui", request_key=None, controller_id=None):
         if not isinstance(text, str) or not text.strip() or len(text) > 30000 or any((ord(c) < 32 and c not in "\r\n\t") or 127 <= ord(c) <= 159 for c in text):
             raise ValueError("消息不能为空，最长 30000 字符，不接受终端控制字符。")
-        return self._submit(host, thread_id, text, "prompt", origin, request_key)
+        return self._submit(host, thread_id, text, "prompt", origin, request_key, controller_id=controller_id)
 
-    def terminal_input(self, host, thread_id, data, origin="ui", request_key=None):
+    def terminal_input(self, host, thread_id, data, origin="ui", request_key=None, controller_id=None):
         if not isinstance(data, str) or not data or len(data) > 30000:
             raise ValueError("终端输入不能为空，最长 30000 字符。")
         if origin == "plugin":
             if not request_key:
                 raise ValueError("插件输入必须提供稳定 request_key。")
-            return self._submit(host, thread_id, data, "input", origin, request_key)
+            return self._submit(host, thread_id, data, "input", origin, request_key, controller_id=controller_id)
         # User keystrokes can contain login secrets: forward without persisting.
         if origin != "ui":
             raise ValueError("输入来源必须为 ui 或 plugin。")
@@ -513,7 +548,7 @@ class Hub:
             self.store.finish_operation(operation, result)
         return result
 
-    def create_agent(self, host, cwd, title, text="", active=True, request_key=None, origin="ui", command=""):
+    def create_agent(self, host, cwd, title, text="", active=True, request_key=None, origin="ui", command="", controller_id=None):
         config = self.host(host)
         if not isinstance(text, str) or len(text) > 30000 or any((ord(c) < 32 and c not in "\r\n\t") or 127 <= ord(c) <= 159 for c in text):
             raise ValueError("任务文本最长 30000 字符，不接受终端控制字符。")
@@ -524,15 +559,30 @@ class Hub:
         self._directory(config, cwd)
         if not isinstance(command, str) or len(command) > 30000 or "\0" in command:
             raise ValueError("启动指令最长 30000 字符，不能含空字符。")
+        if controller_id is not None:
+            if command:
+                raise PermissionError("管理会话创建只打开 shell；启动命令需用户在终端自行执行。")
+            self._require_creation_scope(controller_id, host, cwd)
+            # Canonicalize on the selected host before creating, then check the
+            # resolved path as well. A symlink/.. cannot escape granted roots.
+            try:
+                cwd = self.directories.list(config, cwd)["path"]
+            except Exception:
+                raise PermissionError("无法核验所选授权目录，未创建终端。") from None
+            self._require_creation_scope(controller_id, host, cwd)
         request_key = request_key or "ui-create-" + str(uuid.uuid4())
         self._request_key(request_key)
         fingerprint = hashlib.sha256(json.dumps([host, cwd, title, text, bool(active), command, origin], ensure_ascii=False).encode()).hexdigest()
         with self.registry_lock:
+            if controller_id is not None:
+                self._require_creation_scope(controller_id, host, cwd)
             previous = self.store.begin_operation(request_key, fingerprint)
             if previous is None:
                 try:
-                    result = {"created": True, **self.create_terminal(host, cwd, title, active=active, request_key=request_key)}
+                    result = {"created": True, **self.create_terminal(host, cwd, title, active=active, request_key=request_key, controller_id=controller_id)}
                     if result["created"]:
+                        if controller_id is not None:
+                            self.controllers.add_created_agent(controller_id, host, result["thread_id"])
                         self.record_event("agent_created", host=host, thread_id=result["thread_id"], origin=origin)
                     else:
                         self.store.finish_operation(request_key, result)
@@ -546,11 +596,13 @@ class Hub:
                 if not result.get("created"):
                     return result
                 self.get_agent(host, result["thread_id"], plugin=origin == "plugin")
+                if controller_id is not None:
+                    self._require_controller_scope(controller_id, host, result["thread_id"])
             try:
                 if command:
-                    result["startup_delivery"] = self._submit(host, result["thread_id"], command.rstrip("\r\n") + "\r", "input", origin, self._child_key(request_key, ":startup"))
+                    result["startup_delivery"] = self._submit(host, result["thread_id"], command.rstrip("\r\n") + "\r", "input", origin, self._child_key(request_key, ":startup"), controller_id=controller_id)
                 if text.strip() and (not command or result["startup_delivery"]["state"] == "submitted"):
-                    result["delivery"] = self.send(host, result["thread_id"], text, origin=origin, request_key=self._child_key(request_key, ":message"))
+                    result["delivery"] = self.send(host, result["thread_id"], text, origin=origin, request_key=self._child_key(request_key, ":message"), controller_id=controller_id)
                 elif command:
                     result["delivery"] = result["startup_delivery"]
             except Exception as error:
@@ -558,7 +610,41 @@ class Hub:
             self.store.finish_operation(request_key, result)
             return result
 
-    def plugin_events(self, after=0, timeout_seconds=0):
+    def _require_controller_scope(self, controller_id, host, thread_id):
+        row = self.store.agent(host, thread_id)
+        if not row or not row["active"] or not self.controllers.authorize(controller_id, host, thread_id):
+            raise PermissionError("此工作终端不在该管理会话的当前授权范围内。")
+        if self.controllers.is_controller_reference(host, thread_id, cwd=row.get("cwd")):
+            raise PermissionError("管理会话不能管理自身或其他管理会话。")
+
+    def _require_creation_scope(self, controller_id, host, cwd):
+        if not self.controllers.authorize_creation(controller_id, host, cwd):
+            raise PermissionError("该管理会话未获得此机器和项目目录的新建授权。")
+        if self.controllers.is_controller_reference(host, None, cwd=cwd):
+            raise PermissionError("管理工作区不能作为工作 agent 新建。")
+
+    @staticmethod
+    def _controller_prefix(controller_id):
+        return "controller:" + controller_id + ":"
+
+    def _controller_key(self, controller_id, request_key):
+        self._request_key(request_key)
+        if not request_key:
+            raise ValueError("管理操作必须提供稳定 request_key。")
+        return self._controller_prefix(controller_id) + hashlib.sha256(request_key.encode("utf-8")).hexdigest()
+
+    def scope_revoking(self, controller_id, removed_agent_ids):
+        """Called under registry_lock; revoke only this controller's pending work."""
+        prefix = self._controller_prefix(controller_id)
+        with self.registry_lock, self.store.lock, self.store.db:
+            for agent_id in removed_agent_ids:
+                host, thread_id = self.split_agent_id(agent_id)
+                placeholders = ",".join("?" for _ in RETRYABLE)
+                self.store.db.execute("update outbox set state='scope_revoked',error=? where host=? and thread_id=? "
+                    "and origin='plugin' and substr(request_key,1,?)=? and state in (" + placeholders + ")",
+                    ("已撤销此管理会话的授权；未提交输入不会执行。", host, thread_id, len(prefix), prefix, *RETRYABLE))
+
+    def plugin_events(self, after=0, timeout_seconds=0, controller_id=None):
         deadline, cursor = time.monotonic() + min(30, max(0, float(timeout_seconds))), max(0, int(after))
         while True:
             selected = []
@@ -566,44 +652,90 @@ class Hub:
                 cursor = event["id"]
                 data = event["data"]
                 agent = self.store.agent(data.get("host"), data.get("thread_id"))
-                if agent and agent["active"]:
+                if agent and agent["active"] and (controller_id is None or self.controllers.authorize(controller_id, agent["host"], agent["thread_id"])):
                     selected.append(event)
             if selected or time.monotonic() >= deadline:
                 return {"events": selected, "cursor": cursor}
             with self.event_condition:
                 self.event_condition.wait(min(1, max(0, deadline - time.monotonic())))
 
-    def plugin_call(self, tool, arguments):
+    def plugin_call(self, tool, arguments, controller_id=None):
+        if not isinstance(arguments, dict):
+            raise ValueError("工具参数必须为对象。")
+        if controller_id is not None:
+            # Authoritative identity comes from HTTP authentication, never from
+            # arguments or a descriptor ID repeated by the model.
+            context = self.controllers.view_context(controller_id)
+            if tool != "get_controller_context":
+                controller = context.get("controller", {})
+                if (controller.get("state") in ("prepared", "bootstrapping", "initializing", "attaching", "unknown", "closed")
+                        or not controller.get("session_id") or not controller.get("tools_ready")):
+                    raise PermissionError("管理初始化仅允许核验自身工具；会话身份与工具就绪后才能访问工作 agent。")
+        if tool == "get_controller_context":
+            if controller_id is None:
+                return {"mode": "legacy", "controller_id": None, "legacy_scope_shared": True,
+                        "scope_note": "旧插件使用全局 UI 激活范围，不是独立管理会话身份。"}
+            self.controllers.mark_tool_seen(controller_id)
+            return self.controllers.view_context(controller_id)
         if tool == "list_active_agents":
-            agents = self.attached_agents()
+            if controller_id is None:
+                agents = self.attached_agents()
+            else:
+                with self.registry_lock:
+                    sessions = self.terminals.sessions()
+                    agents = []
+                    for agent_id in self.controllers.allowed_agents(controller_id):
+                        host, thread_id = self.split_agent_id(agent_id)
+                        row = self.store.agent(host, thread_id)
+                        if row and row["active"] and self.controllers.authorize(controller_id, host, thread_id):
+                            agents.append(self.get_agent(host, thread_id, plugin=True, sessions=sessions))
+            connected = self.connected_hosts(agents)
+            if controller_id is not None:
+                connected &= set(self.controllers.allowed_hosts(controller_id)) | {a["host"] for a in agents}
             return {"agents": [a for a in agents if a["active"]], "controller": "current_codex_conversation",
-                    "connected_hosts": sorted(self.connected_hosts(agents)), "scope_note": "只列 UI 已激活共享终端，无全盘扫描或独立 CEO 模型。"}
+                    "connected_hosts": sorted(connected), "legacy_scope_shared": controller_id is None,
+                    "scope_note": "只列本管理会话已获授权且 UI 激活的终端。" if controller_id is not None else "只列 UI 已激活共享终端，无全盘扫描或独立 CEO 模型。"}
         if tool == "poll_events":
-            return self.plugin_events(arguments.get("after", 0), arguments.get("timeout_seconds", 0))
+            return self.plugin_events(arguments.get("after", 0), arguments.get("timeout_seconds", 0), controller_id=controller_id)
         if tool == "create_agent":
             if not arguments.get("request_key"):
                 raise ValueError("创建必须提供稳定 request_key。")
             return self.create_agent(arguments["host"], arguments["cwd"], arguments["title"], arguments.get("text", ""),
-                active=True, request_key=arguments["request_key"], origin="plugin", command=arguments.get("command", ""))
+                active=True, request_key=self._controller_key(controller_id, arguments["request_key"]) if controller_id is not None else arguments["request_key"],
+                origin="plugin", command=arguments.get("command", ""), controller_id=controller_id)
         if tool == "get_delivery":
             row = self.store.delivery(arguments["request_id"])
             if not row:
                 raise ValueError("没有此送达记录。")
             self.get_agent(row["host"], row["thread_id"], plugin=True)
+            if controller_id is not None:
+                self._require_controller_scope(controller_id, row["host"], row["thread_id"])
+                if row["origin"] != "plugin" or not str(row.get("request_key") or "").startswith(self._controller_prefix(controller_id)):
+                    raise PermissionError("此送达记录不属于当前管理会话。")
             return self._delivery(row)
         host, thread_id = self.split_agent_id(arguments["agent_id"])
+        if controller_id is not None:
+            self._require_controller_scope(controller_id, host, thread_id)
         if tool == "get_agent":
-            return self.get_agent(host, thread_id, plugin=True)
+            result = self.get_agent(host, thread_id, plugin=True)
+            if controller_id is not None:
+                self._require_controller_scope(controller_id, host, thread_id)
+            return result
         if tool == "read_agent":
-            return self.read_agent(host, thread_id, arguments.get("limit", 18), plugin=True,
+            result = self.read_agent(host, thread_id, arguments.get("limit", 18), plugin=True,
                                    cursor=arguments.get("cursor"), after_cursor=arguments.get("after_cursor"),
                                    include_tools=arguments.get("include_tools", False))
+            if controller_id is not None:
+                self._require_controller_scope(controller_id, host, thread_id)
+            return result
         if tool in ("send_agent_message", "send_terminal_input"):
             if not arguments.get("request_key"):
                 raise ValueError("发送必须提供稳定 request_key。")
             if tool == "send_agent_message":
-                return self.send(host, thread_id, arguments["text"], origin="plugin", request_key=arguments["request_key"])
-            return self.terminal_input(host, thread_id, arguments["data"], origin="plugin", request_key=arguments["request_key"])
+                return self.send(host, thread_id, arguments["text"], origin="plugin", controller_id=controller_id,
+                    request_key=self._controller_key(controller_id, arguments["request_key"]) if controller_id is not None else arguments["request_key"])
+            return self.terminal_input(host, thread_id, arguments["data"], origin="plugin", controller_id=controller_id,
+                request_key=self._controller_key(controller_id, arguments["request_key"]) if controller_id is not None else arguments["request_key"])
         raise ValueError("Unsupported plugin tool")
 
     def _watch_terminals(self):
@@ -632,7 +764,7 @@ class Hub:
     def state(self, after=0):
         agents = self.attached_agents()
         connected = self.connected_hosts(agents)
-        return {"version": VERSION, "controller": "codex-plugin", "hosts": [{"id": h, **c, **self.connections.get(h, {}), "connected": h in connected} for h, c in self.hosts.items()],
+        return {"version": VERSION, "controller": "codex-plugin", "legacy_scope_shared": True, "hosts": [{"id": h, **c, **self.connections.get(h, {}), "connected": h in connected} for h, c in self.hosts.items()],
                 "agents": agents, "events": self.store.events(after, kinds=MANAGEMENT_EVENTS), "outbox": self.store.outbox(), "approvals": []}
 
     def close(self):
@@ -641,6 +773,7 @@ class Hub:
         self.stopping = True
         self._stop.set()
         self._watcher.join(timeout=5)
+        self.controllers.shutdown()
         with self.registry_lock:
             self.store.close()
         # Deliberately leave independent broker/PTY/tmux processes running.

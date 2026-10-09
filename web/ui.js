@@ -127,6 +127,7 @@ function renderDetail() {
 }
 function showTerminalError(text) { $('#terminal-error').textContent = text; $('#terminal-error').hidden = !text; }
 function renderTerminalErrors(session) {
+  if (session.kind === 'controller') { window.PronController?.renderTerminalErrors(session); return; }
   if (session.disposed || terminalSession !== session) return;
   showTerminalError(session.inputError || session.resizeError || session.pollError || '');
 }
@@ -138,10 +139,16 @@ function disposeTerminal() {
   hideTerminalContext();
 }
 function isCurrentTerminal(session) {
+  if (session?.kind === 'controller') return !!window.PronController?.isTerminalCurrent(session) && session.initialized && !session.closing && !session.closed;
   return !!session && terminalSession === session && selectedAgent === session.key && !session.disposed && !session.closing && !session.closed && session.initialized;
 }
-function canWriteTerminal(session) { return isCurrentTerminal(session) && sessionConnected(session); }
+function isTerminalDisplayCurrent(session) { return session?.kind === 'controller' ? !!window.PronController?.isTerminalCurrent(session) : terminalSession === session; }
+function canWriteTerminal(session) { return isCurrentTerminal(session) && sessionConnected(session) && (session.kind !== 'controller' || window.PronController?.canWriteTerminal(session)); }
+function terminalApiPath(session, operation) { return `/api/${session.kind === 'controller' ? 'controllers' : 'terminals'}/${operation}`; }
+function terminalApiIdentity(session) { return session.kind === 'controller' ? {id: session.controllerId} : {host: session.agent.host, thread_id: session.agent.thread_id}; }
+function terminalStatusElement(session) { return $(session.kind === 'controller' ? '#controller-terminal-status' : '#terminal-status'); }
 function updateDisplayConnection(session, connected) {
+  if (session.kind === 'controller') { window.PronController?.updateDisplayConnection(session, connected); return; }
   const changed = session.displayConnected !== connected;
   session.displayConnected = connected;
   if (!connected) {
@@ -183,7 +190,7 @@ function handleTerminalWheel(session, event) {
   // xterm otherwise turns wheels in alternate buffers into cursor-key input,
   // or into mouse/SGR reports. Wheels here only change the local display.
   event.stopImmediatePropagation();
-  if (!session || session.disposed || terminalSession !== session || event.ctrlKey) return;
+  if (!session || session.disposed || !isTerminalDisplayCurrent(session) || event.ctrlKey) return;
   const delta = Number(event.deltaY); if (!Number.isFinite(delta) || delta === 0) return;
   const buffer = session.term.buffer?.active; if (!buffer) return;
   if (session.wheelBuffer !== buffer) { session.wheelBuffer = buffer; session.wheelRemainder = 0; }
@@ -244,7 +251,8 @@ function showTerminalContext(event) {
   menu.style.top = `${Math.max(6, Math.min(event.clientY, window.innerHeight - menu.offsetHeight - 6))}px`;
 }
 function safeFit(session) {
-  if (session.disposed || terminalSession !== session || !sessionConnected(session)) return;
+  if (session.disposed || !isTerminalDisplayCurrent(session) || !sessionConnected(session)) return;
+  if (session.kind === 'controller' && !window.PronController?.isDisplayVisible(session)) return;
   if (session.writingFrame) { session.fitPending = true; return; }
   session.fitPending = false;
   session.fit.fit();
@@ -288,8 +296,8 @@ async function openTerminal(agent) {
 function flushTerminalInput(session) {
   clearTimeout(session.inputTimer); session.inputTimer = null;
   const data = session.input; session.input = ''; if (!data || session.disposed || session.closing || session.closed || !sessionConnected(session)) return;
-  const body = {host: session.agent.host, thread_id: session.agent.thread_id, data, request_key: crypto.randomUUID()};
-  session.inputChain = session.inputChain.then(() => session.closing || session.closed || !sessionConnected(session) ? undefined : request('/api/terminals/input', body)).then(() => { session.inputError = ''; renderTerminalErrors(session); }).catch(error => {
+  const body = {...terminalApiIdentity(session), data, request_key: crypto.randomUUID()};
+  session.inputChain = session.inputChain.then(() => session.closing || session.closed || !sessionConnected(session) || session.kind === 'controller' && !canWriteTerminal(session) ? undefined : request(terminalApiPath(session, 'input'), body)).then(() => { session.inputError = ''; renderTerminalErrors(session); }).catch(error => {
     if (isDisconnectedError(error)) updateDisplayConnection(session, false);
     session.inputError = `输入未确认送达：${error.message}。请核对终端后再操作，避免重复输入。`;
     renderTerminalErrors(session);
@@ -304,6 +312,7 @@ function cancelPendingResize(session) {
 }
 function scheduleResize(session, cols, rows) {
   if (session.disposed || session.closing || session.closed || session.restoringFrame || !session.initialized || !sessionConnected(session) || cols < 2 || rows < 2) return;
+  if (session.kind === 'controller' && !window.PronController?.isDisplayVisible(session)) return;
   const size = `${cols}:${rows}`;
   if ((session.resizePending && session.targetSize === size) || (!session.resizePending && session.size === size)) return;
   session.targetSize = size;
@@ -311,17 +320,17 @@ function scheduleResize(session, cols, rows) {
   session.frameGeneration = (session.frameGeneration || 0) + 1;
   session.resizePending = true;
   clearTimeout(session.resizeTimer); session.resizeTimer = setTimeout(async () => {
-    if (session.disposed || terminalSession !== session || generation !== session.resizeGeneration) return;
+    if (session.disposed || !isTerminalDisplayCurrent(session) || generation !== session.resizeGeneration) return;
     session.resizeTimer = null;
     if (session.closing || session.closed || !sessionConnected(session)) { cancelPendingResize(session); return; }
     try {
-      await request('/api/terminals/resize', {host: session.agent.host, thread_id: session.agent.thread_id, cols, rows});
-      if (session.disposed || terminalSession !== session || generation !== session.resizeGeneration) return;
+      await request(terminalApiPath(session, 'resize'), {...terminalApiIdentity(session), cols, rows});
+      if (session.disposed || !isTerminalDisplayCurrent(session) || generation !== session.resizeGeneration) return;
       session.size = size; session.resizePending = false; session.resizeError = '';
       session.frameGeneration = (session.frameGeneration || 0) + 1;
       session.forceSnapshot = true; renderTerminalErrors(session);
     } catch (error) {
-      if (session.disposed || terminalSession !== session || generation !== session.resizeGeneration) return;
+      if (session.disposed || !isTerminalDisplayCurrent(session) || generation !== session.resizeGeneration) return;
       session.resizePending = false; session.targetSize = ''; session.forceSnapshot = true;
       if (isDisconnectedError(error)) { updateDisplayConnection(session, false); renderTerminalErrors(session); return; }
       session.resizeError = `调整终端尺寸失败：${error.message}`; renderTerminalErrors(session);
@@ -330,13 +339,14 @@ function scheduleResize(session, cols, rows) {
 }
 async function pollTerminal(session) {
   if (session.disposed) return;
+  if (session.kind === 'controller' && !window.PronController?.canReadDisplay(session)) return;
   if (session.resizePending) { session.timer = setTimeout(() => pollTerminal(session), 200); return; }
   let delay = 350;
   const generation = session.frameGeneration || 0, snapshot = !!session.forceSnapshot || !session.initialized;
   try {
-    const query = new URLSearchParams({host: session.agent.host, thread_id: session.agent.thread_id, after: String(snapshot ? 0 : session.seq)});
-    const result = await request('/api/terminals/output?' + query);
-    if (session.disposed || terminalSession !== session || generation !== (session.frameGeneration || 0) || session.resizePending) return;
+    const query = new URLSearchParams({...terminalApiIdentity(session), after: String(snapshot ? 0 : session.seq)});
+    const result = await request(terminalApiPath(session, 'output') + '?' + query);
+    if (session.disposed || !isTerminalDisplayCurrent(session) || generation !== (session.frameGeneration || 0) || session.resizePending) return;
     const reset = result.reset || snapshot;
     if (!reset && result.cols >= 2 && result.rows >= 2 && session.size && session.size !== `${result.cols}:${result.rows}`) {
       session.frameGeneration = (session.frameGeneration || 0) + 1; session.forceSnapshot = true;
@@ -344,7 +354,7 @@ async function pollTerminal(session) {
     }
     const data = result.reset && result.ansi != null ? result.ansi : result.data ?? result.ansi ?? '';
     await writeTerminalFrame(session, data, reset, result.cols, result.rows);
-    if (session.disposed || terminalSession !== session || generation !== (session.frameGeneration || 0) || session.resizePending) return;
+    if (session.disposed || !isTerminalDisplayCurrent(session) || generation !== (session.frameGeneration || 0) || session.resizePending) return;
     session.seq = Number(result.seq ?? result.current_seq ?? session.seq);
     session.forceSnapshot = false;
     if (reset && result.cols >= 2 && result.rows >= 2) session.size = `${result.cols}:${result.rows}`;
@@ -353,20 +363,20 @@ async function pollTerminal(session) {
     if (typeof result.connected === 'boolean') updateDisplayConnection(session, result.connected);
     if (['exited', 'disconnected', 'not_connected'].includes(outputState)) updateDisplayConnection(session, false);
     if (['closed', 'closing', 'close_unknown'].includes(outputState) || ['closed', 'closing', 'unknown'].includes(result.close_state)) {
-      session.closed = outputState === 'closed' || result.close_state === 'closed'; session.closing = true; session.term.blur(); renderDetail();
+      session.closed = outputState === 'closed' || result.close_state === 'closed'; session.closing = true; session.term.blur(); if (session.kind === 'controller') window.PronController?.render(); else renderDetail();
     }
     if (result.connected === false || ['exited', 'closed', 'disconnected', 'closing', 'close_unknown'].includes(outputState)) {
-      $('#terminal-status').textContent = ['closed', 'closing', 'close_unknown'].includes(outputState) ? statusLabels[outputState] : disconnectedLabel; delay = 1500;
-    } else $('#terminal-status').textContent = result.command ? `终端已连接 · ${result.command}` : '终端已连接 · 可以直接输入';
+      terminalStatusElement(session).textContent = ['closed', 'closing', 'close_unknown'].includes(outputState) ? statusLabels[outputState] : disconnectedLabel; delay = 1500;
+    } else terminalStatusElement(session).textContent = result.command ? `终端已连接 · ${result.command}` : '终端已连接';
     session.pollError = result.error || ''; renderTerminalErrors(session);
     if (sessionConnected(session)) { safeFit(session); scheduleResize(session, session.term.cols, session.term.rows); }
   } catch (error) {
-    if (session.disposed || terminalSession !== session) return;
-    $('#terminal-status').textContent = '终端连接暂时不可用';
+    if (session.disposed || !isTerminalDisplayCurrent(session)) return;
+    terminalStatusElement(session).textContent = '终端连接暂时不可用';
     session.pollError = `${error.message}。可尝试「重新连接」；重新连接不会自动创建第二个终端。`;
     renderTerminalErrors(session); delay = 2000;
   } finally {
-    if (!session.disposed && terminalSession === session) session.timer = setTimeout(() => pollTerminal(session), delay);
+    if (!session.disposed && isTerminalDisplayCurrent(session) && (session.kind !== 'controller' || window.PronController?.canReadDisplay(session))) session.timer = setTimeout(() => pollTerminal(session), delay);
   }
 }
 async function reconnectTerminal() {

@@ -88,13 +88,17 @@ function blockedScreen(session) {
   // A foreground Codex process can still be choosing its startup mode. Require
   // the compatibility heading and a numbered action, not daemon prose alone.
   if (/background\s+server\s+has\s+incompatible\s+feature\s+settings/i.test(bottom)
-      && /(?:^|\n)\s*(?:[›❯>]\s*)?(?:1\.\s*run\s+without\s+(?:the\s+)?daemon\s+this\s+time|2\.\s*restart\s+with\s+these\s+settings)/i.test(bottom)) return 'setup_menu';
+      && /(?:^|\n)\s*(?:[›❯»>]\s*)?(?:1\.\s*run\s+without\s+(?:the\s+)?daemon\s+this\s+time|2\.\s*restart\s+with\s+these\s+settings)/i.test(bottom)) return 'setup_menu';
   // An upgrade choice is also startup UI, never an ordinary task prompt. The
   // title and both kinds of numbered choices avoid matching update prose.
   if (/update\s+available\b/i.test(bottom)
-      && /(?:^|\n)\s*(?:[›❯>]\s*)?1\.\s*update\s+now\b/i.test(bottom)
-      && /(?:^|\n)\s*(?:[›❯>]\s*)?[23]\.\s*skip\b/i.test(bottom)) return 'setup_menu';
+      && /(?:^|\n)\s*(?:[›❯»>]\s*)?1\.\s*update\s+now\b/i.test(bottom)
+      && /(?:^|\n)\s*(?:[›❯»>]\s*)?[23]\.\s*skip\b/i.test(bottom)) return 'setup_menu';
   if (/choose (?:a |your )?(?:model|provider|account)|select (?:a |your )?(?:model|provider|account)|how would you like to sign in/i.test(bottom)) return 'setup_menu';
+  if (/this conversation is open in another app/i.test(bottom)
+      && /(?:press\s+r\b|close it there|retry|fork)/i.test(bottom)) return 'session_locked';
+  if (/(?:resume (?:a |an |previous )?(?:session|conversation)|select (?:a |an )?(?:session|conversation))/i.test(bottom)
+      && /(?:search|enter|esc|↑|↓|up.*down)/i.test(bottom)) return 'setup_menu';
   return null;
 }
 
@@ -142,6 +146,47 @@ function verifiedIdentity(result) {
 
 function sameIdentity(one, two) {
   return !!one && !!two && one.kind === two.kind && one.pid === two.pid && one.startTicks === two.startTicks && one.pgid === two.pgid;
+}
+
+function nativeRootKind(program, platform) {
+  if (typeof program !== 'string') return null;
+  const name = (platform === 'win32' ? path.win32 : path.posix).basename(program);
+  const match = (platform === 'win32' ? /^(codex|claude|aider|opencode|gemini)\.exe$/i : /^(codex|claude|aider|opencode|gemini)$/).exec(name);
+  return match ? match[1].toLowerCase() : null;
+}
+
+function directRootIdentity(session, metadata, platform) {
+  // Exact kernel/CIM identity, not argv text, a matching filename in a process
+  // tree, or a UI title. Only an owned directly launched native agent qualifies.
+  const kind = nativeRootKind(session.program, platform);
+  if (!kind || session.transport !== 'local' || !metadata || metadata.pid !== session.pty?.pid
+      || !Number.isSafeInteger(metadata.pid) || metadata.pid <= 0
+      || !Number.isSafeInteger(metadata.startTicks) || metadata.startTicks <= 0
+      || typeof metadata.executable !== 'string' || typeof metadata.expectedExecutable !== 'string'
+      || metadata.executable.length > 4096 || metadata.expectedExecutable.length > 4096
+      || metadata.executable.includes('\0') || metadata.expectedExecutable.includes('\0')) return null;
+  const normalize = value => platform === 'win32' ? path.win32.normalize(value).toLowerCase() : path.posix.normalize(value);
+  if (!metadata.executable || normalize(metadata.executable) !== normalize(metadata.expectedExecutable)
+      || nativeRootKind(metadata.expectedExecutable, platform) !== kind) return null;
+  if (platform === 'win32' && nativeRootKind(metadata.name || '', platform) !== kind) return null;
+  const pgid = platform === 'win32' ? metadata.pid : metadata.pgid;
+  if (!Number.isSafeInteger(pgid) || pgid <= 0 || platform !== 'win32' && metadata.tpgid !== pgid) return null;
+  const proof = { kind, pid: metadata.pid, startTicks: metadata.startTicks, pgid };
+  if (session.directRootProof && !sameIdentity(session.directRootProof, proof)) return null;
+  return proof;
+}
+
+function linuxRootMetadata(pid, program) {
+  const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+  if (stat.length > 16384 || !stat.startsWith(`${pid} (`)) throw new Error('Invalid owned process identity');
+  const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
+  return { pid, executable: fs.readlinkSync(`/proc/${pid}/exe`), expectedExecutable: fs.realpathSync(program),
+    startTicks: Number(fields[19]), pgid: Number(fields[2]), tpgid: Number(fields[5]) };
+}
+
+function identityResult(command, proof) {
+  return { command, state: 'agent', reason: 'verified_direct_agent_root', identity_verified: true,
+    agent_kind: proof.kind, agent_pid: proof.pid, agent_start_ticks: proof.startTicks, foreground_pgid: proof.pgid };
 }
 
 function spawnSshPipe(file, args, options) {
@@ -195,6 +240,10 @@ class TerminalBroker {
     this.spawn = options.spawn || pty.spawn;
     this.spawnRemote = options.spawnRemote || options.spawn || spawnSshPipe;
     this.probe = options.probe || this.probeForeground.bind(this);
+    this.platform = options.platform || process.platform;
+    this.runCommand = options.runCommand || commandResult;
+    this.resolveProgramPath = options.resolveProgramPath || fs.realpathSync;
+    this.readRootMetadata = options.readRootMetadata || linuxRootMetadata;
     this.maxOutput = options.maxOutput || MAX_OUTPUT;
   }
 
@@ -208,6 +257,7 @@ class TerminalBroker {
       command: session.command, current_seq: session.seq, created_at: session.createdAt,
       agent_ready: session.connected && session.state === 'agent' && !blocked,
       blocked_reason: blocked,
+      human_busy: !!session.humanLineLength || Date.now() < session.humanLeaseUntil,
       geometry_unknown: !!session.geometryUnknown,
       ...(session.exitCode == null ? {} : { exit_code: session.exitCode }),
     };
@@ -216,6 +266,14 @@ class TerminalBroker {
   async create(body) {
     const transport = body.transport || 'local';
     if (!['local', 'ssh'].includes(transport)) throw new ApiError(400, 'invalid_transport', 'Use local or ssh');
+    const direct = Object.hasOwn(body, 'program') || Object.hasOwn(body, 'args');
+    if (direct && (transport !== 'local' || typeof body.program !== 'string' || !path.isAbsolute(body.program)
+        || !body.program || body.program.length > 4096 || /[\x00-\x1f\x7f-\x9f]/.test(body.program)
+        || !Array.isArray(body.args) || body.args.length > 200
+        || body.args.some(arg => typeof arg !== 'string' || arg.includes('\0') || arg.length > 32768)
+        || body.args.reduce((total, arg) => total + Buffer.byteLength(arg), 0) > 128 * 1024)) {
+      throw new ApiError(400, 'invalid_program', 'A direct local program requires an absolute executable and bounded string arguments');
+    }
     const id = body.session_id || `ceohub-${crypto.randomBytes(12).toString('hex')}`;
     if (!SESSION_ID.test(id)) throw new ApiError(400, 'invalid_session_id', 'Invalid owned terminal session ID');
     const target = transport === 'ssh' ? String(body.target || '') : '';
@@ -226,7 +284,9 @@ class TerminalBroker {
     const cwd = String(body.cwd || (transport === 'local' ? os.homedir() : '~'));
     if (cwd.includes('\0')) throw new ApiError(400, 'invalid_directory', 'Invalid terminal directory');
     let session = this.sessions.get(id);
-    if (session && (session.host !== host || session.target !== target || session.transport !== transport)) {
+    if (session && (session.host !== host || session.target !== target || session.transport !== transport
+        || session.program !== (direct ? body.program : null)
+        || JSON.stringify(session.programArgs) !== JSON.stringify(direct ? body.args : []))) {
       throw new ApiError(409, 'session_conflict', 'Session belongs to another machine');
     }
     if (session?.connected) return this.describe(session);
@@ -239,6 +299,7 @@ class TerminalBroker {
       terminal.loadAddon(serializer);
       session = {
         id, host, transport, target, cwd, title: String(body.title || 'Terminal').slice(0, 200),
+        program: direct ? body.program : null, programArgs: direct ? [...body.args] : [],
         cols, rows, terminal, serializer, connected: false, state: 'unknown', command: '',
         seq: 0, ring: [], ringSize: 0, rendered: Promise.resolve(), writeQueue: Promise.resolve(),
         humanLeaseUntil: 0, humanLineLength: 0, humanPaste: false, inputEscape: '', requests: new Map(), lastProbe: 0,
@@ -257,10 +318,10 @@ class TerminalBroker {
       if (!fs.statSync(cwd, { throwIfNoEntry: false })?.isDirectory()) {
         throw new ApiError(400, 'invalid_directory', 'Local directory does not exist');
       }
-      file = process.env.CEO_HUB_SHELL || (process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || '/bin/bash');
-      args = process.platform === 'win32' && /(?:powershell|pwsh)(?:\.exe)?$/i.test(file) ? ['-NoLogo'] : ['-l'];
+      file = direct ? body.program : process.env.CEO_HUB_SHELL || (process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || '/bin/bash');
+      args = direct ? [...body.args] : process.platform === 'win32' && /(?:powershell|pwsh)(?:\.exe)?$/i.test(file) ? ['-NoLogo'] : ['-l'];
       localCwd = cwd;
-      session.state = 'shell';
+      session.state = direct ? classifyCommand(file) : 'shell';
       session.command = path.basename(file);
     } else {
       file = sshExecutable();
@@ -341,7 +402,7 @@ class TerminalBroker {
       return {
         connected: view.connected, state: view.state, status: view.state,
         command: view.command, agent_ready: view.agent_ready,
-        blocked_reason: view.blocked_reason, geometry_unknown: view.geometry_unknown, cols: view.cols, rows: view.rows,
+        blocked_reason: view.blocked_reason, human_busy: view.human_busy, geometry_unknown: view.geometry_unknown, cols: view.cols, rows: view.rows,
         ...(view.exit_code == null ? {} : { exit_code: view.exit_code }),
       };
     };
@@ -485,13 +546,32 @@ class TerminalBroker {
         ...(identity.state === 'agent' ? { identity_verified: true, agent_kind: identity.agent_kind,
           agent_pid: identity.agent_pid, agent_start_ticks: identity.agent_start_ticks, foreground_pgid: identity.foreground_pgid } : {}) };
     }
-    if (process.platform === 'win32') {
+    if (this.platform === 'win32') {
+      const rootKind = nativeRootKind(session.program, 'win32');
+      let rootProof = null;
+      if (rootKind) {
+        const pid = session.pty.pid;
+        if (!Number.isSafeInteger(pid) || pid <= 0) return { command: '', state: 'unknown' };
+        // This is a bounded exact-PID query. Never return command lines, the
+        // environment, or unrelated executable paths from the machine.
+        const script = `$r=Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -Property ProcessId,Name,ExecutablePath,CreationDate; if($r){ [pscustomobject]@{pid=[int]$r.ProcessId;name=$r.Name;executable=$r.ExecutablePath;startTicks=[long](($r.CreationDate.ToUniversalTime()-([datetime]'1970-01-01T00:00:00Z').ToUniversalTime()).Ticks/10)} | ConvertTo-Json -Compress }`;
+        try {
+          const result = await this.runCommand('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], 8000);
+          const metadata = result.stdout.trim() ? JSON.parse(result.stdout) : null;
+          rootProof = directRootIdentity(session, { ...metadata, expectedExecutable: this.resolveProgramPath(session.program) }, 'win32');
+        } catch {}
+        if (!rootProof) return { command: path.win32.basename(session.program), state: 'unknown' };
+        session.directRootProof ||= rootProof;
+      }
       // Only return names, never command lines (which may contain credentials).
-      const script = `$all=Get-CimInstance Win32_Process; $ids=@(${Number(session.pty.pid)}); $names=@(); for($i=0;$i -lt 12;$i++){ $children=@($all | Where-Object {$ids -contains $_.ParentProcessId}); if($children.Count -eq 0){break}; $names+=@($children | ForEach-Object {$_.Name}); $ids+=@($children | ForEach-Object {$_.ProcessId}) }; $names | ConvertTo-Json -Compress`;
-      const result = await commandResult('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], 8000);
-      const parsed = result.stdout.trim() ? JSON.parse(result.stdout) : [];
-      const names = Array.isArray(parsed) ? parsed : [parsed];
-      const agent = names.find(name => classifyCommand(name) === 'agent');
+      let names = [];
+      if (!rootProof) {
+        const script = `$all=Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name; $ids=@(${Number(session.pty.pid)}); $names=@(); for($i=0;$i -lt 12;$i++){ $children=@($all | Where-Object {$ids -contains $_.ParentProcessId}); if($children.Count -eq 0){break}; $names+=@($children | ForEach-Object {$_.Name}); $ids+=@($children | ForEach-Object {$_.ProcessId}) }; $names | ConvertTo-Json -Compress`;
+        const result = await this.runCommand('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], 8000);
+        const parsed = result.stdout.trim() ? JSON.parse(result.stdout) : [];
+        names = Array.isArray(parsed) ? parsed : [parsed];
+      }
+      const agent = rootProof ? path.win32.basename(session.program) : names.find(name => classifyCommand(name) === 'agent');
       if (agent) {
         await this.flushScreen(session);
         const buffer = session.terminal.buffer.active;
@@ -501,17 +581,29 @@ class TerminalBroker {
         // descendant is not sufficient: require its visible input UI, and refuse
         // when the actual cursor has returned to a shell prompt.
         if (/^\s*(?:PS\s+.+>|[A-Za-z]:\\[^>]*>|[$#])\s*/.test(cursor)) return { command: 'powershell.exe', state: 'shell' };
-        const inputUi = /^\s*[›❯]\s/m.test(visible) || (session.terminal.buffer.active.type === 'alternate' && /codex|claude|aider|opencode|gemini/i.test(visible));
-        return { command: agent, state: inputUi || blockedScreen(session) ? 'agent' : 'unknown' };
+        const inputUi = /^\s*[›❯»]\s/m.test(visible) || (session.terminal.buffer.active.type === 'alternate' && /codex|claude|aider|opencode|gemini/i.test(visible));
+        if (!(inputUi || blockedScreen(session))) return { command: agent, state: 'unknown' };
+        return rootProof ? identityResult(agent, rootProof) : { command: agent, state: 'agent' };
       }
       if (names.some(name => !['conhost.exe', 'openconsole.exe'].includes(String(name).toLowerCase()))) return { command: names[names.length - 1], state: 'unknown' };
       return { command: session.pty.process || 'powershell.exe', state: 'shell' };
     }
-    const result = await commandResult('ps', ['-eo', 'pid=,ppid=,pgid=,tpgid=,comm=']);
+    const result = await this.runCommand('ps', ['-eo', 'pid=,ppid=,pgid=,tpgid=,comm=']);
     const rows = result.stdout.split('\n').map(line => /^\s*(\d+)\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(.+)$/.exec(line)).filter(Boolean);
     const ids = new Set([session.pty.pid]);
     const names = [];
-    const foreground = Number(rows.find(row => Number(row[1]) === session.pty.pid)?.[4]);
+    const rootRow = rows.find(row => Number(row[1]) === session.pty.pid);
+    const foreground = Number(rootRow?.[4]);
+    if (nativeRootKind(session.program, this.platform)) {
+      if (this.platform !== 'linux' || !rootRow || Number(rootRow[3]) !== foreground || foreground <= 0) return { command: '', state: 'unknown' };
+      let rootProof;
+      try {
+        rootProof = directRootIdentity(session, this.readRootMetadata(session.pty.pid, session.program), this.platform);
+      } catch {}
+      if (!rootProof || rootProof.pgid !== foreground) return { command: '', state: 'unknown' };
+      session.directRootProof ||= rootProof;
+      return identityResult(path.posix.basename(session.program), rootProof);
+    }
     for (let i = 0; i < 12; i++) for (const row of rows) if (ids.has(Number(row[2])) && !ids.has(Number(row[1]))) {
       ids.add(Number(row[1]));
       if (Number(row[3]) === foreground) names.push(row[5]);
@@ -557,9 +649,17 @@ class TerminalBroker {
     });
   }
 
-  async close(id) {
+  async close(id, body = {}) {
     const session = this.get(id);
     return this.serializeWrite(session, async () => {
+      if (body.require_idle === true) {
+        if (session.transport !== 'local') throw new ApiError(400, 'invalid_close', 'Idle handoff is only supported for local management terminals');
+        await this.refreshForeground(session, true);
+        await this.flushScreen(session);
+        const view = this.describe(session);
+        if (view.human_busy) throw new ApiError(409, 'human_busy', 'Human input changed before handoff; terminal was not closed');
+        if (!view.connected || !view.agent_ready) throw new ApiError(409, 'waiting_for_agent', 'Management terminal is not ready for handoff; terminal was not closed');
+      }
       if (session.transport === 'ssh') {
         await commandResult(sshExecutable(), ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', session.target,
           `tmux kill-session -t ${shellQuote(session.id)} 2>/dev/null || ! tmux has-session -t ${shellQuote(session.id)} 2>/dev/null`]);
@@ -597,7 +697,7 @@ function createServer(broker, token) {
       if (auth.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) throw new ApiError(401, 'unauthorized', 'Authentication required');
       const url = new URL(request.url, 'http://127.0.0.1');
       let result;
-      if (request.method === 'GET' && url.pathname === '/health') result = { ok: true, version: VERSION, pid: process.pid };
+      if (request.method === 'GET' && url.pathname === '/health') result = { ok: true, version: VERSION, pid: process.pid, features: ['direct_program', 'input_busy', 'idle_close'] };
       else if (request.method === 'GET' && url.pathname === '/sessions') result = { sessions: [...broker.sessions.values()].map(session => broker.describe(session)) };
       else if (request.method === 'POST' && url.pathname === '/sessions/create') result = await broker.create(await readBody(request));
       else {
@@ -659,5 +759,5 @@ async function main() {
   });
 }
 
-module.exports = { TerminalBroker, ApiError, createServer, descriptorPath, shellQuote, classifyCommand, updateHumanInput, blockedScreen, spawnSshPipe, remoteBridgeCommand };
+module.exports = { TerminalBroker, ApiError, createServer, descriptorPath, shellQuote, classifyCommand, updateHumanInput, blockedScreen, spawnSshPipe, remoteBridgeCommand, directRootIdentity, nativeRootKind };
 if (require.main === module) main().catch(error => { process.stderr.write(`Terminal broker failed: ${error.message}\n`); process.exitCode = 1; });

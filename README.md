@@ -6,18 +6,20 @@
 
 **Personal Remote Ops & Nodes Hub** — one Codex conversation to coordinate the working agents you choose, on your computer and remote Linux machines.
 
-[中文说明](README.zh-CN.md) · [SSH transport contract](docs/ssh-transport.md) · [Codex maintenance](docs/codex-maintenance.md) · [Security](SECURITY.md)
+[中文说明](README.zh-CN.md) · [Management-session design and limits](docs/management-session-product.md) · [SSH transport contract](docs/ssh-transport.md) · [Codex maintenance](docs/codex-maintenance.md) · [Security](SECURITY.md)
 
-PRON Hub is a single-user, local-first connection service for Codex. Open a real terminal for each worker, start Codex using your normal workflow, and activate the terminals you want your current Codex chat to manage. You can still type directly in those same terminals.
+PRON Hub is a single-user, local-first connection service for Codex. **Version 0.5 adds a management-session MVP:** create a real local Codex conversation from the Hub, with its role, tools, and explicit worker scope initialized for you. It is experimental; version-specific live integration and desktop transfer are not certified by the unit tests.
 
-The **controller is the model already running in your Codex chat**, acting as your CEO: collect evidence, convey tasks, and summarize what needs your decision. The human retains final authority. The Hub runs no separate management model, does not inject a CEO role into workers, and does not automatically wake a dormant Codex conversation.
+The **controller is the model in that native Codex conversation**, acting as your CEO: collect evidence, convey tasks, and summarize what needs your decision. The human retains final authority. The Hub runs no separate model backend, does not inject a CEO role into workers, and does not automatically wake a dormant conversation. Each worker still has a real terminal in which you can use your normal Codex workflow or talk directly.
 
 ## What it does
 
 - Connects local terminals and SSH machines configured in the UI.
+- Creates and restores one default local management conversation, using an exact native Session ID rather than a newest-file guess.
+- Prepares a dedicated management workspace, persistent role guidance, and a scoped MCP tool connection without manual plugin installation.
 - Opens a shell in a selected project directory, or the user's home directory.
 - Lets the human and controller read and write the same worker terminal.
-- Limits controller access to an explicit activation list; it never scans every machine or conversation on startup.
+- Limits new management sessions to server-enforced worker and project-directory grants; startup does not scan every machine or history.
 - Reads persisted output from an exactly associated Codex session, including paginated long messages and optional tool records.
 - Preserves delivery identity across uncertain submissions and gives human typing priority.
 - Keeps terminals independent of the browser and Python UI service.
@@ -32,7 +34,8 @@ This is **Codex-focused**, not a universal CLI automation framework, a multi-use
 | Control computer | Python 3.11+, Node.js 22+, npm, a modern browser |
 | Local workers | An installed Codex CLI and the user's normal authentication/provider setup |
 | Remote workers | Linux, OpenSSH access, Python 3, tmux, and Codex installed for the remote user |
-| Codex controller | A local Codex client supporting plugins and stdio MCP |
+| Hub-created manager | A configured local Codex CLI supporting `exec --json`, exact-session `resume`, and stdio MCP |
+| Optional existing-chat plugin | A local Codex client supporting plugins and stdio MCP |
 
 The Python service uses the standard library. Terminal dependencies are installed with npm; browser assets are served locally, without a CDN. A native-build toolchain may be needed if `node-pty` cannot use a prebuilt binary.
 
@@ -56,23 +59,44 @@ python service.py status
 
 No administrator service or automatic startup is installed. A fresh configuration contains **only the local machine**. Add remote machines yourself in the UI, using a generic SSH alias such as `dev-workstation`; credentials remain in your existing SSH setup.
 
+## Start your management conversation
+
+1. Configure and connect the workers below. The initial scope picker uses only already-registered, activated workers; no historical discovery runs automatically. You may start with an empty scope.
+2. Click **Start management session** on the home card. Keep the default name or choose one, then explicitly select the workers this manager may access. Creating additional workers is disabled by default; optionally grant a connected machine and a concrete project directory using the directory chooser.
+3. The Hub prepares its own management workspace and MCP connection, then runs a one-shot, **read-only** native Codex initialization. It obtains the Session ID from the owned launch's native JSON event and asks only for `get_controller_context`. No worker task, history read, or new worker is part of initialization.
+4. Continue in the real management terminal. **Ready** requires both exact identity and an authenticated tool handshake, together with a usable terminal; a PID, visible welcome message, or connected PTY alone is not enough. Complete required login, trust, or permissions yourself. Provider and authentication settings are not rewritten.
+5. Thereafter use **Continue management**, which restores the original conversation. Use **Management scope** to change its grants. Repeated clicks, refreshes, and uncertain responses retain the original operation and do not force a second manager.
+
+For this workflow, **do not manually install the legacy plugin**: the Hub-generated manager already receives its scoped tool configuration. Before starting, make sure your local Codex installation and normal account/provider setup work. If initialization fails or its outcome is unknown, inspect the reported phase and original identity; the Hub does not delete locks, fork, or restart the shared Codex background server to conceal an error.
+
+The default management workspace is outside the source checkout: `%LOCALAPPDATA%/PRONHub/management-workspaces/<controller-id>` on Windows, or `$XDG_STATE_HOME/pron-hub/management-workspaces/<controller-id>` (default `~/.local/state/...`) on Linux/macOS. This avoids trusting the whole Hub repository just to enter a manager. Codex may still require you to confirm trust for that new owned directory; the Hub never accepts this prompt for you.
+
+The first self-check inherits your model/reasoning settings and can take several minutes. Its asynchronous launch remains visible; the Hub does not switch models or start duplicates because it is slow. Initialization is bounded to ten minutes, preserving any verified Session ID for reconciliation and exact resume after a timeout.
+
+For example:
+
+> Read the authorized slides and server workers, summarize actual progress and evidence, and list decisions I need to make. Do not send new tasks yet.
+
+> Send this fix request to the authorized server worker, then summarize its result and verification.
+
+### Continue in the Codex desktop app (experimental)
+
+**Continue in Codex** requires you to confirm that the manager is idle with no unsent draft. The Hub checks its owned terminal, releases that input entry, and offers a `codex://threads/<exact-session-id>` link for the same saved conversation. It does not create a new chat or automatically send `/app` or another command.
+
+The resulting status is **`desktop_unverified`**, not a verified seamless handoff. Opening a link does not prove the desktop app acquired the conversation or reloaded the scoped tools, project trust, model, and provider. Inspect those in the desktop app yourself; the Hub stops writing while the desktop owns the entry. To return, close the other entry and use **Continue management**, which attempts the same exact Session ID without reinitializing or resending business tasks. Occupancy and configuration errors remain explicit.
+
 ## Connect your workers
 
 1. Select or configure a machine, then open a terminal. Use the directory chooser, enter an absolute directory on that machine, or leave it blank and `cd` from the home directory.
 2. In that terminal, run `codex`, `codex-switch`, or your usual launcher. The human handles provider selection, login, secrets, OTPs, and approvals.
 3. To continue an existing conversation, use the on-demand history finder and follow the displayed `codex resume <session-id>` command yourself. Exit the original client first; opening another terminal is not a transfer of ownership.
-4. Activate the connected terminal for controller access. Activation does not start a model. Inactive terminals remain directly usable by the human.
-5. Install the local plugin below, select it in a Codex chat, and tell that chat what to coordinate.
+4. Activate the connected terminal, then explicitly select it in your new manager's scope. Activation does not start a model and is not, by itself, a grant to every scoped manager. Inactive terminals remain directly usable by the human.
 
-For example:
+Workers and managers are separate records and terminal services. A manager is not registered as its own worker; scoped tools reject manager-to-manager operations and recursive management creation. These are Hub API safeguards, not operating-system sandbox isolation.
 
-> Act as my CEO. Read the activated slides and server workers, summarize actual progress and evidence, and list decisions I need to make. Do not send new tasks yet.
+## Optional: connect an existing Codex chat with the legacy plugin
 
-> Send this fix request to the activated server worker, then summarize its result and verification.
-
-There is one shared activation list per local Hub. Multiple controller chats see the same list; this is not tenant or controller isolation.
-
-## Connect the Codex plugin
+This is a compatibility path for a chat you already run, not the new management-session workflow. **Legacy plugin credentials retain the shared global activation list:** multiple such chats have the same activated-worker access, not per-manager isolation. Prefer a Hub-created scoped manager when you want separate identity and grants. The scoped-only `get_controller_context` tool is not available to legacy credentials.
 
 First prepare a **machine-local** marketplace from the repository root:
 
@@ -127,20 +151,23 @@ Closing a page, changing selection, deactivating a worker, or closing the Python
 
 **“Close terminal” is different:** after explicit confirmation it ends that terminal's shell/agent and, remotely, its owned tmux session. It does not close other or external sessions. If the result is uncertain, the UI does not claim success.
 
+The management terminal is separate from worker terminals. **Hide display** or closing the browser sends no termination or draft input. **End management session** explicitly ends the manager's terminal process and disables its capability; it does not stop workers. Saved native identity and history are retained for an explicit same-session recovery.
+
 ## MCP tools
 
 | Tool | Purpose |
 |---|---|
-| `list_active_agents` | Read only the activated registry |
+| `get_controller_context` | Verify the authenticated management identity and scope; scoped managers only |
+| `list_active_agents` | Read only activated workers within the authenticated scope; legacy plugins use the global list |
 | `get_agent` | Inspect one terminal's connection and foreground state |
 | `read_agent` | Read its exact-session output with pagination |
 | `send_agent_message` | Deliver ordinary user task text |
 | `send_terminal_input` | Send explicitly authorized raw terminal input |
-| `create_agent` | Open a worker terminal on a UI-connected machine |
+| `create_agent` | Open a worker terminal in an explicitly authorized connected-machine/project-directory range; scoped creations belong to that manager |
 | `get_delivery` | Reconcile a durable submission |
 | `poll_events` | Read incremental activated-worker events |
 
-The service does not automatically approve worker actions, widen activation scope, or start a new controller turn.
+Read, write, delivery lookup, and event tools enforce the authenticated manager's scope. Scope revocation cancels unsubmitted queued work; one worker belongs to at most one scoped manager in this MVP. The service does not automatically approve worker actions, widen scope, recursively create managers, or start a new controller turn. Legacy credentials remain a broader trust boundary as described above.
 
 ## SSH and tunnels
 
@@ -152,7 +179,9 @@ Validate a **persistent display plus concurrent short SSH requests**, not just o
 
 The service binds only to loopback. Browser mutations require a matching Host/Origin and an HttpOnly SameSite cookie. MCP uses a private local capability descriptor, rejects browser-Origin requests, and does not forward the token through proxies or redirects.
 
-Machine configuration, activation, and durable deliveries are stored in `.runtime/hub.sqlite`. `config.example.json` and optional ignored `config.local.json` initialize a new registry; an existing saved registry takes precedence.
+Machine configuration, activation, durable deliveries, management records, scopes, and operation identities are stored in `.runtime/hub.sqlite`. Capability descriptors stay in the private runtime directory; production management workspaces use the per-user private location above. An explicitly supplied development/test runtime keeps its workspaces in that namespace. Each descriptor has an independent capability; the raw token is not put in a prompt, URL, or command-line argument. `config.example.json` and optional ignored `config.local.json` initialize a new registry; an existing saved registry takes precedence.
+
+Each manager's workspace contains its own `AGENTS.md` and `.codex/config.toml`. Its scoped connection is also supplied explicitly when the Hub launches or resumes Codex, without changing the user's global configuration. Whether a desktop client loads the same project configuration and trust is part of the experimental transfer check, not an assumed guarantee. The Hub's API grants do not restrict Codex's unrelated native tools, other plugins, or the user's SSH/system permissions.
 
 The rename deliberately preserves existing wire/state identifiers: `ceo_hub`, `ceo-hub`, `ceohub-`, `CEO_HUB_*`, `%LOCALAPPDATA%/CEOHub/`, and `~/.local/state/ceo-hub/`. Do not delete installed legacy plugin caches or rewrite working terminal IDs as a branding migration.
 
@@ -174,12 +203,13 @@ Run it **on the worker machine**, using the current user's trusted CLI installat
 ```sh
 python -m unittest discover -s tests -v
 node --check web/ui.js
+node --check web/controller.js
 npm run test:terminal
 npm run test:ui
 python scripts/check_publication.py
 ```
 
-Real PTY/remote integration tests are opt-in and are not enabled by ordinary unit tests. Run them only against disposable sessions. The test suite covers activation, exact-session reads, durable delivery, human-draft protection, terminal rendering, authentication, and lifecycle boundaries; it does not certify every provider or tunnel implementation.
+Real PTY/remote integration tests are opt-in and are not enabled by ordinary unit tests. Run them only against disposable sessions. Tests cover scope enforcement, native initialization events, stable start/resume keys, uncertain results, independent manager lifecycle, desktop-unverified UI, activation, exact-session reads, durable delivery, human-draft protection, terminal rendering, and authentication. They do not certify every Codex version, provider, tunnel implementation, or desktop tool reload. The 0.5 management MVP remains experimental pending version-specific live validation.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development and [SECURITY.md](SECURITY.md) for reporting concerns.
 

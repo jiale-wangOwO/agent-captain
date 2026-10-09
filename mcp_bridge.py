@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")
 MAX_MESSAGE_BYTES = 2 * 1024 * 1024
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -53,6 +53,8 @@ TOOLS = [
     tool("get_delivery", "Read durable terminal submission state for a request_id returned by send_agent_message, send_terminal_input, or create_agent. Check this before retrying a timed-out or uncertain submission. Submitted means input was written, not that the agent accepted or completed the task.", schema({"request_id": {"type": "string", "minLength": 1, "maxLength": 512}}, ("request_id",))),
 ]
 TOOLS_BY_NAME = {item["name"]: item for item in TOOLS}
+CONTROLLER_CONTEXT_TOOL = tool("get_controller_context", "Read this authenticated management session's server-enforced scope and initialization status. This does not grant permission, send tasks, or rely on a model claiming initialization is complete.", schema({}))
+TOOLS_BY_NAME["get_controller_context"] = CONTROLLER_CONTEXT_TOOL
 
 
 class BridgeError(Exception):
@@ -66,7 +68,7 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 def connection_file() -> Path:
-    override = os.environ.get("CEO_HUB_CONNECTION_FILE")
+    override = os.environ.get("PRON_HUB_CONNECTION_FILE") or os.environ.get("CEO_HUB_CONNECTION_FILE")
     if override:
         return Path(override).expanduser()
     if os.name == "nt":
@@ -77,7 +79,7 @@ def connection_file() -> Path:
     return Path.home() / ".local" / "state" / "ceo-hub" / "service.json"
 
 
-def read_connection() -> tuple[str, str]:
+def read_descriptor() -> dict[str, Any]:
     """Read each call, so an already-running adapter survives a Hub restart."""
     try:
         raw = connection_file().read_bytes()
@@ -107,7 +109,12 @@ def read_connection() -> tuple[str, str]:
         valid = False
     if not valid:
         raise BridgeError("Refused PRON Hub descriptor URL: only http://127.0.0.1 or http://[::1] without credentials, query, or fragment is allowed. Fix the local service descriptor.")
-    return url.rstrip("/"), token
+    return {**descriptor, "url": url.rstrip("/")}
+
+
+def read_connection() -> tuple[str, str]:
+    descriptor = read_descriptor()
+    return descriptor["url"], descriptor["token"]
 
 
 def redacted_json(value: Any, token: str) -> Any:
@@ -211,6 +218,7 @@ class McpBridge:
         self.initialized = False
         self.ready = False
         self.protocol_version: str | None = None
+        self.scoped = False
 
     @staticmethod
     def error(request_id: Any, code: int, message: str) -> dict[str, Any]:
@@ -243,6 +251,22 @@ class McpBridge:
                     or not isinstance(params.get("clientInfo"), dict)):
                 return self.error(request_id, -32602, "initialize requires protocolVersion, capabilities, and clientInfo.")
             self.protocol_version = version if version in PROTOCOL_VERSIONS else PROTOCOL_VERSIONS[-1]
+            # Scoped launches explicitly point to their private descriptor. The
+            # descriptor ID is only a flag/expected identity: the HTTP bearer is
+            # what the service authenticates. Legacy stdio discovery stays fully
+            # usable without a running Hub or any descriptor file.
+            expected = os.environ.get("PRON_HUB_CONTROLLER_ID")
+            if expected:
+                try:
+                    descriptor = read_descriptor()
+                    if len(expected) > 200 or descriptor.get("controller_id") != expected:
+                        raise BridgeError("The management descriptor has no valid controller identity.")
+                    context = call_service("get_controller_context", {})
+                    if not isinstance(context, dict) or context.get("mode") != "scoped" or context.get("controller_id") != expected:
+                        raise BridgeError("Management identity verification failed. Reopen this management session from PRON Hub.")
+                    self.scoped = True
+                except BridgeError as exc:
+                    return self.error(request_id, -32001, str(exc))
             self.initialized = True
             result = {"protocolVersion": self.protocol_version, "capabilities": {"tools": {"listChanged": False}},
                       "serverInfo": {"name": "ceo-hub", "title": "PRON Hub", "version": VERSION},
@@ -252,7 +276,7 @@ class McpBridge:
         elif method == "tools/list":
             if params.get("cursor"):
                 return self.error(request_id, -32602, "This tool list has no pagination cursor.")
-            result = {"tools": TOOLS}
+            result = {"tools": TOOLS + ([CONTROLLER_CONTEXT_TOOL] if self.scoped else [])}
         elif method == "tools/call":
             name = params.get("name")
             if not isinstance(name, str) or name not in TOOLS_BY_NAME:

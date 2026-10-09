@@ -49,6 +49,23 @@ def create_server(hub, port=8766, token=None):
             value = self.headers.get("Authorization", "")
             return not self.headers.get("Origin") and value.startswith("Bearer ") and secrets.compare_digest(value[7:], session_token)
 
+        def plugin_identity(self):
+            # The request body never establishes a controller's identity. Only
+            # this bearer capability, authenticated by the owning service, does.
+            if self.headers.get("Origin"):
+                return False, None
+            value = self.headers.get("Authorization", "")
+            if not value.startswith("Bearer "):
+                return False, None
+            credential = value[7:]
+            if secrets.compare_digest(credential, session_token):
+                return True, None  # Compatibility channel: global UI scope.
+            try:
+                controller_id = hub.controllers.authenticate(credential)
+            except Exception:
+                return False, None
+            return controller_id is not None, controller_id
+
         def respond(self, status, payload, content_type="application/json; charset=utf-8", cookie=False):
             data = payload if isinstance(payload, bytes) else json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
@@ -69,6 +86,7 @@ def create_server(hub, port=8766, token=None):
             parsed = urlparse(self.path)
             assets = {"/": ("index.html", "text/html; charset=utf-8"),
                       "/ui.js": ("ui.js", "text/javascript; charset=utf-8"),
+                      "/controller.js": ("controller.js", "text/javascript; charset=utf-8"),
                       "/style.css": ("style.css", "text/css; charset=utf-8"),
                       "/prose.css": ("prose.css", "text/css; charset=utf-8")}
             vendors = {"/vendor/xterm.js": ("@xterm/xterm/lib/xterm.js", "text/javascript; charset=utf-8"),
@@ -98,12 +116,26 @@ def create_server(hub, port=8766, token=None):
                     self.respond(200, hub.terminal_output(args["host"][0], args["thread_id"][0], int(args.get("after", ["0"])[0])))
                 except Exception as error:
                     self.respond(400, {"error": str(error)})
+            elif parsed.path in ("/api/controllers", "/api/controllers/get", "/api/controllers/output") and self.authenticated():
+                try:
+                    args = parse_qs(parsed.query)
+                    if parsed.path == "/api/controllers":
+                        result = {"controllers": hub.controllers.list()}
+                    elif parsed.path.endswith("/get"):
+                        result = hub.controllers.get(args["id"][0], refresh=True)
+                    else:
+                        result = hub.controllers.terminal_output(args["id"][0], int(args.get("after", ["0"])[0]))
+                    self.respond(200, result)
+                except PermissionError as error:
+                    self.respond(403, {"error": str(error)})
+                except Exception as error:
+                    self.respond(400, {"error": str(error)})
             else:
                 self.respond(404, {"error": "Not found or unauthorized"})
 
         def do_POST(self):
             plugin_request = self.path == "/api/plugin"
-            authorized = self.plugin_authenticated() if plugin_request else self.authenticated() and self.headers.get("Origin") == server.origin
+            authorized, controller_id = self.plugin_identity() if plugin_request else (self.authenticated() and self.headers.get("Origin") == server.origin, None)
             if not self.trusted_host() or not authorized:
                 self.respond(403, {"error": "Invalid session or origin"})
                 return
@@ -113,7 +145,23 @@ def create_server(hub, port=8766, token=None):
                     raise ValueError("Invalid body size")
                 body = json.loads(self.rfile.read(length))
                 if plugin_request:
-                    self.respond(200, hub.plugin_call(body["tool"], body.get("arguments", {})))
+                    self.respond(200, hub.plugin_call(body["tool"], body.get("arguments", {}), controller_id=controller_id))
+                elif self.path == "/api/controllers/prepare":
+                    self.respond(200, hub.controllers.prepare(body))
+                elif self.path in ("/api/controllers/start", "/api/controllers/resume"):
+                    method = hub.controllers.start if self.path.endswith("/start") else hub.controllers.resume
+                    self.respond(200, method(body["id"], body.get("request_key")))
+                elif self.path == "/api/controllers/scope":
+                    self.respond(200, hub.controllers.set_scope(body["id"], body.get("agent_ids", []),
+                        allowed_hosts=body.get("allowed_hosts", []), host_roots=body.get("host_roots")))
+                elif self.path == "/api/controllers/input":
+                    self.respond(200, hub.controllers.input(body["id"], body["data"]))
+                elif self.path == "/api/controllers/resize":
+                    self.respond(200, hub.controllers.resize(body["id"], body["cols"], body["rows"]))
+                elif self.path == "/api/controllers/close":
+                    self.respond(200, hub.controllers.close(body["id"], body.get("confirm") is True))
+                elif self.path == "/api/controllers/desktop":
+                    self.respond(200, hub.controllers.desktop(body["id"], body.get("confirm") is True))
                 elif self.path == "/api/hosts/upsert":
                     self.respond(200, hub.upsert_host(body))
                 elif self.path == "/api/hosts/connect":
@@ -157,6 +205,7 @@ def create_server(hub, port=8766, token=None):
     server.daemon_threads = True
     server.origin = f"http://127.0.0.1:{server.server_port}"
     server.session_token = session_token
+    hub.controllers.set_gateway_origin(server.origin)
     return server
 
 

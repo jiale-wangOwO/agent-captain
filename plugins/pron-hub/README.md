@@ -3,6 +3,12 @@
 This package provides the `pron-hub` skill for acting as the user's CEO in the
 current Codex chat. It does not start another model or select a model provider.
 
+This is the **legacy existing-chat integration**. Its service credential can
+access the Hub's shared global activation list; it is not automatically narrowed
+by a new management session's per-controller grants. For scoped management,
+start a management conversation in the Hub UI instead. That workflow prepares
+its own MCP connection and does not require installing this package.
+
 The source package deliberately contains no machine-specific MCP command. Its
 empty `.mcp.json` makes a direct source install **skill-only**, not a connected Hub.
 The repository catalog is named `pron-hub-source` so it cannot accidentally

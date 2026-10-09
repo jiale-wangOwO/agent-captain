@@ -44,7 +44,7 @@ class PluginPackagingTests(unittest.TestCase):
     def test_source_identity_and_machine_independent_template(self):
         manifest = self.load(self.source_plugin / ".codex-plugin" / "plugin.json")
         self.assertEqual(manifest["name"], "pron-hub")
-        self.assertEqual(manifest["version"], "0.4.0")
+        self.assertEqual(manifest["version"], "0.5.0")
         self.assertEqual(manifest["interface"]["displayName"], "PRON Hub")
         self.assertEqual(self.load(self.source_plugin / ".mcp.json"), {"mcpServers": {}})
         catalog = self.load(self.clone / ".agents" / "plugins" / "marketplace.json")
@@ -179,7 +179,7 @@ class PluginPackagingTests(unittest.TestCase):
         result = self.generate()
         # Mimic a host copying this package into an installation cache. The
         # absolute bridge reference remains valid without plugin-root expansion.
-        cache = self.base / "isolated codex cache" / "pron-hub-local" / "pron-hub" / "0.4.0"
+        cache = self.base / "isolated codex cache" / "pron-hub-local" / "pron-hub" / "0.5.0"
         shutil.copytree(result["plugin_root"], cache)
         cwd = self.base / "unrelated working directory"
         cwd.mkdir()
