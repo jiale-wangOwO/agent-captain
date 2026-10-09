@@ -23,6 +23,7 @@ VERSION = "0.5.0"
 PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")
 MAX_MESSAGE_BYTES = 2 * 1024 * 1024
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+ROOT = Path(__file__).resolve().parent
 
 
 def schema(properties: dict[str, Any], required: tuple[str, ...] = ()) -> dict[str, Any]:
@@ -67,10 +68,7 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def connection_file() -> Path:
-    override = os.environ.get("PRON_HUB_CONNECTION_FILE") or os.environ.get("CEO_HUB_CONNECTION_FILE")
-    if override:
-        return Path(override).expanduser()
+def legacy_connection_file() -> Path:
     if os.name == "nt":
         state = os.environ.get("LOCALAPPDATA")
         if not state:
@@ -79,10 +77,23 @@ def connection_file() -> Path:
     return Path.home() / ".local" / "state" / "ceo-hub" / "service.json"
 
 
+def connection_file() -> Path:
+    override = os.environ.get("PRON_HUB_CONNECTION_FILE") or os.environ.get("CEO_HUB_CONNECTION_FILE")
+    if override:
+        return Path(override).expanduser()
+    canonical = ROOT / ".runtime" / "service.json"
+    # A configured cached plugin pins the original checkout through env. This
+    # default covers source execution, without breaking existing user installs.
+    if os.path.lexists(canonical):
+        return canonical
+    return legacy_connection_file()
+
+
 def read_descriptor() -> dict[str, Any]:
     """Read each call, so an already-running adapter survives a Hub restart."""
     try:
-        raw = connection_file().read_bytes()
+        with connection_file().open("rb") as stream:
+            raw = stream.read(65537)
         if len(raw) > 65536:
             raise ValueError("oversized descriptor")
         descriptor = json.loads(raw)

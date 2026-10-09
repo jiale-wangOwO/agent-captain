@@ -103,7 +103,10 @@ def configure_plugin(output: Path | str | None = None, *,
     plugin_output = destination / "plugins" / PLUGIN_NAME
     bridge_output = plugin_output / "mcp_bridge.py"
     mcp = {"mcpServers": {"pron_hub": {
-        "command": str(interpreter), "args": ["-u", str(bridge_output)]
+        "command": str(interpreter), "args": ["-u", str(bridge_output)],
+        # This is a location only, never a copied/read credential. The cached
+        # bridge and ordinary-shell web service must address the same checkout.
+        "env": {"CEO_HUB_CONNECTION_FILE": str(root / ".runtime" / "service.json")}
     }}}
     marker = {"generator": "pron-hub-configure-plugin", "schema_version": GENERATOR_VERSION,
               "plugin": PLUGIN_NAME, "plugin_version": manifest["version"],

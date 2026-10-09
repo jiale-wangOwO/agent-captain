@@ -481,6 +481,57 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.service.resume(c["id"], "return-1")["session_id"], SID)
         self.assertEqual(len(self.launches), 1)
 
+    def test_resume_keeps_initialization_launcher_despite_changed_path(self):
+        original = str(Path(self.temp.name) / "initial-app-codex.exe")
+        resolved = []
+        def resolver():
+            resolved.append(True)
+            return [original]
+        self.service.command_resolver = resolver
+        c = self.started()
+        self.assertEqual(len(resolved), 1)
+        self.assertEqual(self.hub.store.setting("controller-launch:" + c["id"]), [original])
+        self.service.close(c["id"], True)
+        self.service.command_resolver = lambda: self.fail("resume must not consult changed PATH")
+        result = self.service.resume(c["id"], "resume-pinned")
+        self.assertEqual(result["session_id"], SID)
+        self.assertEqual(self.terminals.creates[-1]["program"], original)
+        self.assertEqual(len(self.launches), 1)
+
+    def test_missing_pinned_launcher_never_falls_back(self):
+        c = self.started()
+        self.service.close(c["id"], True)
+        with self.hub.store.lock, self.hub.store.db:
+            self.hub.store.db.execute("delete from settings where key=?", ("controller-launch:" + c["id"],))
+        self.service.command_resolver = lambda: self.fail("missing pin must not fallback")
+        result = self.service.resume(c["id"], "resume-no-pin")
+        self.assertEqual(result["state"], "needs_attention")
+        self.assertEqual(result["error"]["code"], "codex_unavailable")
+        self.assertEqual(result["session_id"], SID)
+        self.assertEqual(len(self.terminals.creates), 1)
+
+    def test_deleted_pinned_binary_refuses_clearly_without_new_terminal(self):
+        c = self.started()
+        self.service.close(c["id"], True)
+        # Turn on the real existence guard after fake bootstrap. Its fake pin
+        # never exists: no real CLI or file needs to be created/deleted.
+        self.service._launcher_injected = False
+        self.service.command_resolver = lambda: self.fail("deleted pin must not fallback")
+        result = self.service.resume(c["id"], "resume-deleted-pin")
+        self.assertEqual(result["error"]["code"], "codex_unavailable")
+        self.assertEqual(len(self.terminals.creates), 1)
+
+    def test_pinned_launcher_stores_no_flags_env_or_arbitrary_script(self):
+        c = self.started()
+        command = self.hub.store.setting("controller-launch:" + c["id"])
+        self.assertEqual(len(command), 1)
+        self.assertNotIn("PRON_HUB_CONNECTION_FILE", json.dumps(command))
+        for unsafe in ([command[0], "--api-key=secret"], [str(Path(self.temp.name) / "run.cmd")],
+                       [str(Path(self.temp.name) / "node.exe"), str(Path(self.temp.name) / "unknown.js")]):
+            self.hub.store.setting("controller-launch:" + c["id"], unsafe)
+            with self.assertRaises(RuntimeError):
+                self.service._trusted_launch(c["id"])
+
     def test_desktop_requires_confirm_ready_and_no_draft_truthful_state(self):
         c = self.started()
         with self.assertRaises(ValueError):

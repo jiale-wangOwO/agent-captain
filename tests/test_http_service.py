@@ -4,6 +4,7 @@ import threading
 import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, build_opener, ProxyHandler
+from unittest.mock import Mock
 
 from app import create_server
 from hub import Hub
@@ -12,7 +13,9 @@ from hub import Hub
 class HttpServiceTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.hub = Hub(self.temp.name)
+        terminals = Mock()
+        terminals.sessions.return_value = []
+        self.hub = Hub(self.temp.name, terminals=terminals)
         self.server = create_server(self.hub, port=0, token="test-private-token")
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -27,7 +30,9 @@ class HttpServiceTests(unittest.TestCase):
 
     def request(self, path, body=None, **headers):
         data = json.dumps(body).encode() if body is not None else None
-        with self.opener.open(Request(self.server.origin + path, data=data, headers=headers), timeout=3) as response:
+        # Windows shared CI runners can briefly stall loopback scheduling. This
+        # is an authorization contract, not a three-second latency benchmark.
+        with self.opener.open(Request(self.server.origin + path, data=data, headers=headers), timeout=10) as response:
             return json.load(response)
 
     def test_plugin_read_is_authorized_without_browser_cookie_or_model(self):

@@ -17,13 +17,69 @@ from urllib.parse import parse_qs, urlparse
 from hub import Hub, ROOT, VERSION
 
 
-def connection_file():
-    override = os.environ.get("CEO_HUB_CONNECTION_FILE")
-    if override:
-        return Path(override)
+def legacy_connection_file():
+    """Old per-user location, retained for explicit compatibility/migration."""
     if os.name == "nt":
         return Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "CEOHub/service.json"
     return Path.home() / ".local/state/ceo-hub/service.json"
+
+
+def connection_file():
+    override = os.environ.get("CEO_HUB_CONNECTION_FILE")
+    if override:
+        return Path(override).expanduser()
+    # Checkout-owned state is shared by ordinary shells and packaged desktop
+    # processes, whose identical APPDATA strings may address different files.
+    return ROOT / ".runtime" / "service.json"
+
+
+def sync_connection_aliases(payload):
+    """Refresh explicitly registered old Hub descriptors, never account auth.
+
+    Some already-running legacy bridges cannot load the new reader until their
+    client restarts. Private path-only aliases preserve those same recipients
+    across a normal service-token rotation. Missing, malformed, different-port
+    or nonstandard targets are left untouched; no credentials are logged.
+    """
+    reference = ROOT / '.runtime' / 'service-compatibility-references.json'
+    updated = 0
+    try:
+        if reference.is_symlink():
+            return 0
+        raw = reference.read_bytes()
+        values = json.loads(raw) if len(raw) <= 8192 else None
+        paths = values.get('service_files') if isinstance(values, dict) and set(values) == {'service_files'} else None
+        if not isinstance(paths, list) or not 1 <= len(paths) <= 8:
+            return 0
+    except (OSError, ValueError, UnicodeError):
+        return 0
+    for value in paths:
+        try:
+            if (not isinstance(value, str) or len(value) > 4096 or value.startswith(('\\\\', '//'))
+                    or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in value)):
+                continue
+            target = Path(value)
+            if (not target.is_absolute() or target.is_symlink() or not target.is_file()
+                    or target.name != 'service.json' or target.parent.name.casefold() not in ('ceohub', 'ceo-hub')
+                    or target.resolve() == connection_file().resolve()):
+                continue
+            old_raw = target.read_bytes()
+            old = json.loads(old_raw) if len(old_raw) <= 65536 else None
+            if (not isinstance(old, dict) or set(old) != {'url', 'token', 'pid', 'version'}
+                    or old.get('url', '').rstrip('/') != payload['url'].rstrip('/')
+                    or type(old.get('pid')) is not int or old['pid'] <= 0
+                    or not isinstance(old.get('token'), str) or not 16 <= len(old['token']) <= 4096
+                    or not isinstance(old.get('version'), str)):
+                continue
+            temporary = target.with_name(target.name + '.' + secrets.token_hex(8) + '.tmp')
+            with temporary.open('x', encoding='utf-8') as stream:
+                stream.write(json.dumps(payload))
+            temporary.chmod(0o600)
+            temporary.replace(target)
+            updated += 1
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    return updated
 
 
 def create_server(hub, port=8766, token=None):
@@ -215,9 +271,11 @@ def serve(port=8766):
     descriptor = connection_file()
     descriptor.parent.mkdir(parents=True, exist_ok=True)
     temporary = descriptor.with_suffix(".tmp")
-    temporary.write_text(json.dumps({"url": server.origin, "token": server.session_token, "version": VERSION, "pid": os.getpid()}), encoding="utf-8")
+    payload = {"url": server.origin, "token": server.session_token, "version": VERSION, "pid": os.getpid()}
+    temporary.write_text(json.dumps(payload), encoding="utf-8")
     temporary.chmod(0o600)
     temporary.replace(descriptor)
+    sync_connection_aliases(payload)
     atexit.register(hub.close)
     print(f"PRON Hub connection service {VERSION}: {server.origin}", flush=True)
     print("CEO 是当前 Codex 对话；本服务不运行管理模型、不自动扫描对话。", flush=True)

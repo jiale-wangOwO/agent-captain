@@ -259,6 +259,12 @@ class Hub:
                     "target": config.get("target", ""), "cwd": cwd, "title": title, "cols": cols, "rows": rows})
                 result = {"created": True, **self.get_agent(host, thread_id, sessions=[runtime]), **runtime,
                           "agent_id": self.agent_id(host, thread_id), "terminal_id": terminal_id, "thread_id": thread_id}
+            except BrokerError as error:
+                # A pinned owner's pre-launch failure is known not to have
+                # created a second terminal; do not describe it as unknown.
+                delivery = {"state": "blocked" if error.code == "bound_transport_unavailable" else "unknown",
+                            "error": str(error), "code": error.code}
+                result = {"created": False, **self.get_agent(host, thread_id, sessions=[]), "delivery": delivery}
             except Exception as error:
                 result = {"created": False, **self.get_agent(host, thread_id, sessions=[]), "delivery": {"state": "unknown", "error": str(error)}}
             if not thread_id.startswith("ceohub-"):

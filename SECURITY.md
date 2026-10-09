@@ -113,6 +113,16 @@ state directory, outside the source checkout. A new CID never overwrites an
 existing directory or files. First-run Codex folder trust is a human decision,
 not an initialization key the Hub presses automatically. Explicit development
 or test runtimes retain workspaces in their isolated namespace.
+The canonical web descriptor and the worker-owner reference are private
+checkout runtime artifacts. The worker reference stores a path only and is
+created exclusively after verified reuse/start in a mutating workflow; invalid,
+missing-target or unreachable bound references must not fall back to a second
+owner. Launcher pins store executable argv only, never authentication,
+provider configuration, environment values, or arbitrary CLI flags.
+Explicit legacy service aliases contain paths only. Their existing standard Hub
+descriptors may receive the same rotated service capability, but only for the
+same loopback endpoint and a valid descriptor shape. No alias is discovered
+automatically, and account-auth files or different endpoints are not targets.
 The one `.agents/` source exception is `.agents/plugins/marketplace.json`, a
 machine-independent local plugin catalog. It is scanned as ordinary source;
 other `.agents/` files remain private and excluded. Keep credentials, absolute

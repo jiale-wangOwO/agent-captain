@@ -73,6 +73,8 @@ The default management workspace is outside the source checkout: `%LOCALAPPDATA%
 
 The first self-check inherits your model/reasoning settings and can take several minutes. Its asynchronous launch remains visible; the Hub does not switch models or start duplicates because it is slow. Initialization is bounded to ten minutes, preserving any verified Session ID for reconciliation and exact resume after a timeout.
 
+Resume retains the witnessed local Codex executable entry, instead of resolving a different version from a new shell's `PATH`. If that installed entry is removed, restoration stops with an environment error; it does not silently downgrade to another CLI or alter your provider setup.
+
 For example:
 
 > Read the authorized slides and server workers, summarize actual progress and evidence, and list decisions I need to make. Do not send new tasks yet.
@@ -111,7 +113,7 @@ codex plugin marketplace add "<printed marketplace_root>"
 codex plugin add pron-hub@pron-hub-local
 ```
 
-The generator only creates files. It does **not** install the plugin, edit Codex settings, read a service token, or restart anything. The generated MCP command uses the Python interpreter that ran the script and an absolute path to its retained bridge.
+The generator only creates files. It does **not** install the plugin, edit Codex settings, read a service token, or restart anything. The generated MCP command uses the Python interpreter that ran the script, an absolute path to its retained bridge, and a non-secret reference to the checkout's service descriptor. If you move the checkout, regenerate the plugin configuration.
 
 **Keep the generated directory** while the plugin is installed. Its default location is `.runtime/plugin-marketplace/`. To update or move the installation, generate a new directory and register/install from the new printed path:
 
@@ -180,6 +182,10 @@ Validate a **persistent display plus concurrent short SSH requests**, not just o
 The service binds only to loopback. Browser mutations require a matching Host/Origin and an HttpOnly SameSite cookie. MCP uses a private local capability descriptor, rejects browser-Origin requests, and does not forward the token through proxies or redirects.
 
 Machine configuration, activation, durable deliveries, management records, scopes, and operation identities are stored in `.runtime/hub.sqlite`. Capability descriptors stay in the private runtime directory; production management workspaces use the per-user private location above. An explicitly supplied development/test runtime keeps its workspaces in that namespace. Each descriptor has an independent capability; the raw token is not put in a prompt, URL, or command-line argument. `config.example.json` and optional ignored `config.local.json` initialize a new registry; an existing saved registry takes precedence.
+
+The web/MCP service shares `.runtime/service.json`, with explicit connection-file overrides retained. The private `.runtime/worker-terminal-reference.json` holds only the physical path to an existing worker broker descriptor, not its token. A verified default terminal-creation workflow records this reference exclusively; metadata reads do not create it. This avoids Windows packaged-app and ordinary-shell state namespaces appearing to be different machines. A broken or unreachable pinned owner fails closed and needs human repair; it never creates a second broker owner automatically. Work terminal processes remain independent of web-service restarts.
+
+For an already-running older bridge, an explicitly registered private `.runtime/service-compatibility-references.json` may list existing standard legacy Hub descriptors. A service restart refreshes only same-endpoint, valid Hub-shaped targets so those same clients can follow token rotation. It does not discover destinations, copy account authentication, or touch different-port/non-Hub files. New installations use the canonical descriptor.
 
 Each manager's workspace contains its own `AGENTS.md` and `.codex/config.toml`. Its scoped connection is also supplied explicitly when the Hub launches or resumes Codex, without changing the user's global configuration. Whether a desktop client loads the same project configuration and trust is part of the experimental transfer check, not an assumed guarantee. The Hub's API grants do not restrict Codex's unrelated native tools, other plugins, or the user's SSH/system permissions.
 

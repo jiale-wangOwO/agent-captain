@@ -100,6 +100,15 @@ class TerminalHubTests(unittest.TestCase):
         self.hub.close()
         self.temp.cleanup()
 
+    def test_bound_owner_unavailable_reports_known_blocked_creation(self):
+        with patch.object(self.hub, 'history', side_effect=AssertionError('No history/SSH for this fake terminal')), \
+             patch.object(self.terminals, 'create', side_effect=BrokerError('Original transport unavailable', 'bound_transport_unavailable')):
+            result = self.hub.create_terminal('316', '/workspace/project', 'Pending worker', thread_id='ceohub-112233445566778899aabbccddeeff00')
+        self.assertFalse(result['created'])
+        self.assertEqual(result['delivery']['state'], 'blocked')
+        self.assertEqual(result['delivery']['code'], 'bound_transport_unavailable')
+        self.assertEqual(self.terminals.records, {})
+
     def register(self, thread_id="work-1", active=True, terminal_id="ceohub-0123456789abcdef01234567", state="agent", host="local"):
         self.terminals.add(terminal_id, host, state)
         self.hub.store.remember(host, thread_id, "Work", active=active, access="control", mode="terminal", terminal_id=terminal_id, cwd="/workspace/project")

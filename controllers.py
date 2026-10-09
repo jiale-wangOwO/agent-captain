@@ -47,7 +47,7 @@ PRON Hub authorization scopes its own APIs, not all Codex or operating-system
 tools. Preserve Codex sandbox and human approval boundaries.
 """
 ERRORS = {
-    "codex_unavailable": "未找到可直接运行的本机 Codex；请先安装并配置 Codex。",
+    "codex_unavailable": "管理会话的 Codex 启动入口未保存、失效或尚未核验；请确认原入口与安装，PRON Hub 不会自动改用其他版本。",
     "bootstrap_failed": "初始化未完成；已保存的会话身份不会被替换，请检查本机登录或配置后恢复。",
     "bootstrap_timeout": "初始化超时；不会自动创建另一条会话或重发任务。",
     "bootstrap_unknown": "启动结果未知；不能重复新建，请核对原启动。",
@@ -68,7 +68,12 @@ def resolve_codex_command():
     """Resolve a native executable or known npm JS entry; never run a cmd string."""
     native = shutil.which("codex.exe") if os.name == "nt" else shutil.which("codex")
     if native and Path(native).is_file() and (os.name != "nt" or Path(native).suffix.lower() == ".exe"):
-        return [str(Path(native).resolve())]
+        entry = Path(native).resolve()
+        if entry.suffix.casefold() != ".js":
+            return [str(entry)]
+        node = shutil.which("node")
+        if node and tuple(part.casefold() for part in entry.parts[-4:]) == ("@openai", "codex", "bin", "codex.js"):
+            return [str(Path(node).resolve()), str(entry)]
     shim = shutil.which("codex.cmd") or shutil.which("codex")
     if shim:
         entry = Path(shim).parent / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
@@ -153,6 +158,7 @@ class ControllerService:
             descriptor_file=self.runtime / "controller-terminal-broker-v050.json",
             runtime=self.runtime / "controller-terminal")
         self.launcher = launcher or subprocess.Popen
+        self._launcher_injected = launcher is not None
         self.command_resolver = resolve_codex_command
         self.origin = None
         self._lock = threading.RLock()
@@ -502,6 +508,37 @@ class ControllerService:
         with self.store.lock, self.store.db:
             self.store.db.execute("update controller_operations set state=? where request_key=?", (state, key))
 
+    def _trusted_launch(self, cid, command=None):
+        """Pin only a bounded non-secret executable argv, never CLI options.
+
+        PATH is consulted once for initialization. Later resumes retain that
+        witnessed entry, including App-bundled clients not on a normal shell's
+        PATH. An absent/unknown pin or deleted executable fails closed rather
+        than silently switching to another installed version.
+        """
+        try:
+            argv = command if command is not None else self.store.setting("controller-launch:" + cid)
+        except (ValueError, TypeError):
+            raise RuntimeError("codex_unavailable") from None
+        valid = isinstance(argv, list) and len(argv) in (1, 2) and all(
+            isinstance(arg, str) and arg and len(arg) <= 4096 and Path(arg).is_absolute()
+            and not any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in arg) for arg in argv)
+        if valid and len(argv) == 1:
+            valid = Path(argv[0]).suffix.casefold() not in (".cmd", ".bat", ".ps1", ".js")
+        elif valid:
+            valid = (Path(argv[0]).name.casefold() in ("node", "node.exe", "nodejs")
+                and tuple(part.casefold() for part in Path(argv[1]).parts[-4:]) == ("@openai", "codex", "bin", "codex.js"))
+        if not valid:
+            raise RuntimeError("codex_unavailable")
+        # Pure injected-launcher tests intentionally use nonexistent fake
+        # absolute executable paths. Real execution always verifies the pin.
+        if not self._launcher_injected and (not all(Path(arg).is_file() for arg in argv)
+                or os.name != "nt" and not os.access(argv[0], os.X_OK)):
+            raise RuntimeError("codex_unavailable")
+        if command is not None:
+            self.store.setting("controller-launch:" + cid, list(argv))
+        return list(argv)
+
     def start(self, cid, request_key):
         with self._lock:
             row = self._row(cid)
@@ -520,7 +557,7 @@ class ControllerService:
                 self._finish(request_key, "blocked")
                 raise RuntimeError("原启动结果未核验；不能重复新建管理会话。")
             try:
-                command = self.command_resolver()
+                command = self._trusted_launch(cid, self.command_resolver())
             except Exception:
                 self._update(cid, state="failed", phase="environment", error_code="codex_unavailable")
                 self._finish(request_key, "failed")
@@ -617,6 +654,13 @@ class ControllerService:
         row = self._row(cid)
         if not row["session_id"] or not _uuid(row["session_id"]):
             raise RuntimeError("缺少可信管理会话身份。")
+        try:
+            command = self._trusted_launch(cid)
+        except RuntimeError:
+            self._update(cid, state="needs_attention", phase="environment", error_code="codex_unavailable",
+                         input_owner="none", cap_active=0, tools_ready=0)
+            self._finish(key, "blocked")
+            return self.get(cid)
         # Store a deterministic operation-linked terminal ID before contacting
         # the broker. Reconciliation is possible even if create's reply is lost.
         # Local exited PTYs are never resurrected by the broker. A new resume
@@ -624,7 +668,6 @@ class ControllerService:
         tid = "ceohub-" + hashlib.sha256((cid + ":" + key).encode()).hexdigest()[:32]
         self._update(cid, state="attaching", phase="terminal", terminal_id=tid, input_owner="hub", cap_active=1, tools_ready=0)
         try:
-            command = self.command_resolver()
             self.terminals.create({"session_id": tid, "host": "local", "transport": "local", "target": "", "cwd": row["workspace"],
                 "title": row["title"], "program": command[0], "args": command[1:] + ["resume", row["session_id"], "-C", row["workspace"]] + self._overrides(row),
                 "cols": 110, "rows": 32, "controller_id": cid})
@@ -700,7 +743,8 @@ class ControllerService:
                 except Exception:
                     self._update(cid, state="unknown", phase="terminal", input_owner="none", cap_active=0, error_code="terminal_unknown")
                     raise RuntimeError("管理入口关闭结果未知；不会自动重新连接。") from None
-            self._update(cid, state="closed", phase="closed", input_owner="none", cap_active=0)
+            self._update(cid, state="closed", phase="closed", input_owner="none", cap_active=0,
+                         tools_ready=0, error_code=None)
             return self.get(cid)
 
     def desktop(self, cid, confirm=False):

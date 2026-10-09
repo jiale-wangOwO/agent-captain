@@ -61,6 +61,7 @@ class PluginPackagingTests(unittest.TestCase):
         server = self.load(plugin / ".mcp.json")["mcpServers"]["pron_hub"]
         self.assertEqual(server["command"], str(Path(sys.executable).resolve()))
         self.assertEqual(server["args"], ["-u", str(plugin / "mcp_bridge.py")])
+        self.assertEqual(server["env"], {"CEO_HUB_CONNECTION_FILE": str(self.clone / ".runtime" / "service.json")})
         self.assertEqual((plugin / "mcp_bridge.py").read_bytes(), (self.clone / "mcp_bridge.py").read_bytes())
         self.assertEqual(result["plugin"], "pron-hub@pron-hub-local")
         self.assertTrue(result["retain_generated_directory"])
@@ -90,7 +91,9 @@ class PluginPackagingTests(unittest.TestCase):
             "plugins/pron-hub/mcp_bridge.py",
         })
         generated_config = self.load(Path(result["plugin_root"]) / ".mcp.json")
-        self.assertNotIn("env", generated_config["mcpServers"]["pron_hub"])
+        self.assertEqual(generated_config["mcpServers"]["pron_hub"]["env"],
+                         {"CEO_HUB_CONNECTION_FILE": str(self.clone / ".runtime" / "service.json")})
+        self.assertNotIn("fixture-not-a-credential", json.dumps(generated_config))
         self.assertEqual(self.load(self.output / ".pron-hub-generated.json")["generator"], "pron-hub-configure-plugin")
 
     def test_existing_unknown_directory_preserved(self):
