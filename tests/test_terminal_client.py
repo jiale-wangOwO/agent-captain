@@ -71,6 +71,42 @@ class TerminalClientTests(unittest.TestCase):
         self.assertEqual(result["ansi"], view["ansi"])
         snapshot.assert_called_once_with("ceohub-0123456789abcdef", 5000)
 
+    def test_manager_launch_environment_is_lazy_and_only_copied_into_owned_child(self):
+        inherited = {"KEEP": "yes", "HTTP_PROXY": "http://127.0.0.1:7890"}
+        callback = Mock(return_value=inherited)
+        client = TerminalClient(descriptor_file=self.path, runtime=Path(self.temp.name) / "logs", launch_env=callback)
+        self.assertEqual(client.sessions(), [])
+        callback.assert_not_called()
+        process = Mock()
+        process.poll.return_value = None
+        with patch.object(client, "running", side_effect=[False, True]), patch("terminal_client.shutil.which", return_value="fake-node"), \
+                patch("terminal_client.Path.exists", return_value=True), patch("terminal_client.subprocess.Popen", return_value=process) as spawn:
+            client.ensure_started()
+        callback.assert_called_once_with()
+        child_env = spawn.call_args.kwargs["env"]
+        self.assertEqual(child_env["HTTP_PROXY"], inherited["HTTP_PROXY"])
+        self.assertEqual(child_env["KEEP"], "yes")
+        self.assertEqual(child_env["CEO_HUB_TERMINAL_FILE"], str(self.path.resolve()))
+        self.assertEqual(inherited, {"KEEP": "yes", "HTTP_PROXY": "http://127.0.0.1:7890"})
+
+    def test_existing_manager_and_default_worker_do_not_infer_or_change_proxy(self):
+        callback = Mock(side_effect=AssertionError("a connected broker never rereads launch settings"))
+        client = TerminalClient(descriptor_file=self.path, runtime=self.temp.name, launch_env=callback)
+        with patch.object(client, "running", return_value=True):
+            client.ensure_started()
+        callback.assert_not_called()
+        worker = TerminalClient(runtime=Path(self.temp.name) / "worker-logs")
+        process = Mock()
+        process.poll.return_value = None
+        supplied = {"CEO_HUB_TERMINAL_FILE": str(self.path), "KEEP": "yes", "HTTP_PROXY": "http://existing-user-setting:1234"}
+        with patch.dict(os.environ, supplied, clear=True), patch.object(worker, "running", side_effect=[False, True]), \
+                patch("terminal_client.shutil.which", return_value="fake-node"), patch("terminal_client.Path.exists", return_value=True), \
+                patch("terminal_client.subprocess.Popen", return_value=process) as spawn:
+            worker.ensure_started()
+            self.assertEqual(dict(os.environ), supplied)
+        self.assertEqual(spawn.call_args.kwargs["env"]["HTTP_PROXY"], supplied["HTTP_PROXY"])
+        self.assertIsNone(worker.launch_env)
+
 
 if __name__ == "__main__":
     unittest.main()

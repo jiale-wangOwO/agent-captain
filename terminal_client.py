@@ -67,10 +67,14 @@ def descriptor_path():
 
 
 class TerminalClient:
-    def __init__(self, descriptor_file=None, runtime=None):
+    def __init__(self, descriptor_file=None, runtime=None, launch_env=None):
         self.lock = threading.RLock()
         self.descriptor_file = Path(descriptor_file) if descriptor_file is not None else None
         self.runtime = Path(runtime) if runtime is not None else ROOT / ".runtime"
+        # Optional manager-only launch context. Laziness keeps metadata reads
+        # free of registry/network activity; worker clients retain the original
+        # plain environment-copy behavior.
+        self.launch_env = launch_env
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
     @staticmethod
@@ -170,7 +174,8 @@ class TerminalClient:
                 raise RuntimeError("终端依赖未安装；请在 PRON Hub 目录执行 npm ci。")
             logs = self.runtime
             logs.mkdir(parents=True, exist_ok=True)
-            environment = os.environ.copy()
+            inherited = self.launch_env() if callable(self.launch_env) else self.launch_env
+            environment = os.environ.copy() if inherited is None else dict(inherited)
             environment["CEO_HUB_TERMINAL_FILE"] = str(chosen)
             with (logs / "terminal.out.log").open("ab") as output, (logs / "terminal.err.log").open("ab") as error:
                 process = subprocess.Popen([node, str(ROOT / "terminal_broker.cjs")], cwd=ROOT,

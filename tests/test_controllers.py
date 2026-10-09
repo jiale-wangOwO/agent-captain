@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from controllers import ControllerService, INITIALIZATION, resolve_codex_command, default_workspace_root, ROOT
+from controllers import ControllerService, INITIALIZATION, resolve_codex_command, default_workspace_root, manager_launch_environment, ROOT
 from terminal_client import BrokerError
 from store import Store
 
@@ -30,6 +30,32 @@ class FakeDirectories:
     def list(self, config, cwd):
         self.calls.append((config, cwd))
         return {"path": str(Path(cwd).resolve()) if config["transport"] == "local" else cwd}
+
+
+class FakeRegistry:
+    HKEY_CURRENT_USER = "fake-hkcu"
+
+    def __init__(self, values=None, failure=False):
+        self.values = values or {}
+        self.failure = failure
+        self.opened = 0
+
+    def OpenKey(self, root, path):
+        self.opened += 1
+        if self.failure:
+            raise OSError("registry access unavailable")
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+    def QueryValueEx(self, key, name):
+        if name not in self.values:
+            raise OSError("no such setting")
+        return self.values[name], 0
 
 
 class FakeHub:
@@ -333,7 +359,7 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("read-only", argv)
         self.assertNotIn("--yolo", argv)
         self.assertNotIn("--ignore-user-config", argv)
-        self.assertNotIn("env", kwargs)
+        self.assertEqual(kwargs["env"], os.environ.copy())
         self.assertEqual(argv[-1], INITIALIZATION)
         self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
         body = self.terminals.creates[0]
@@ -571,6 +597,61 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(context["controller_id"], c["id"])
         self.assertFalse(context["policy"]["operating_system_isolation"])
         self.assertEqual(self.hub.store.agents(), [])
+
+    def test_context_ready_uses_current_owned_terminal_observation(self):
+        c = self.started()
+        context = self.service.view_context(c["id"])["controller"]
+        self.assertEqual(context["state"], "ready")
+        self.assertTrue(context["tools_ready"])
+        self.assertTrue(context["connected"])
+        self.assertTrue(context["agent_ready"])
+
+    def test_context_prepared_without_terminal_never_claims_ready(self):
+        c = self.prepare()
+        context = self.service.view_context(c["id"])["controller"]
+        self.assertEqual(context["state"], "prepared")
+        self.assertFalse(context["connected"])
+        self.assertFalse(context["agent_ready"])
+
+    def test_manager_proxy_inherits_only_enabled_literal_loopback_and_no_global_write(self):
+        base = {"KEEP": "yes", "NO_PROXY": "custom"}
+        registry = FakeRegistry({"ProxyEnable": 1, "ProxyServer": "127.0.0.1:7890"})
+        with patch.dict(os.environ, {"UNCHANGED": "yes"}, clear=True):
+            result = manager_launch_environment(base, "nt", registry)
+            self.assertEqual(dict(os.environ), {"UNCHANGED": "yes"})
+        self.assertEqual(base, {"KEEP": "yes", "NO_PROXY": "custom"})
+        self.assertEqual(result["HTTP_PROXY"], "http://127.0.0.1:7890")
+        self.assertEqual(result["HTTPS_PROXY"], "http://127.0.0.1:7890")
+        self.assertEqual(result["NO_PROXY"], "custom")
+
+    def test_manager_proxy_protocol_specific_ipv6_and_unsupported_entries(self):
+        registry = FakeRegistry({"ProxyEnable": 1, "ProxyServer": "http=127.0.0.1:1234;https=https://[::1]:4321;socks=127.0.0.1:5555"})
+        result = manager_launch_environment({}, "nt", registry)
+        self.assertEqual(result, {"HTTP_PROXY": "http://127.0.0.1:1234", "HTTPS_PROXY": "https://[::1]:4321"})
+
+    def test_manager_proxy_respects_any_existing_proxy_env_including_empty(self):
+        for key, value in (("HTTP_PROXY", "http://elsewhere:1234"), ("https_proxy", ""), ("All_Proxy", "socks5://existing")):
+            registry = FakeRegistry({"ProxyEnable": 1, "ProxyServer": "127.0.0.1:7890"})
+            base = {key: value}
+            self.assertEqual(manager_launch_environment(base, "nt", registry), base)
+            self.assertEqual(registry.opened, 0)
+
+    def test_manager_proxy_disabled_pac_auto_detect_other_platform_or_registry_failure(self):
+        unsupported = ({"ProxyEnable": 0}, {"ProxyEnable": "1"}, {"ProxyEnable": 1, "AutoConfigURL": "http://example.test/proxy.pac"},
+                       {"ProxyEnable": 1, "AutoDetect": 1})
+        for values in unsupported:
+            registry = FakeRegistry({"ProxyServer": "127.0.0.1:7890"} | values)
+            self.assertEqual(manager_launch_environment({"KEEP": "yes"}, "nt", registry), {"KEEP": "yes"})
+        registry = FakeRegistry({"ProxyEnable": 1, "ProxyServer": "127.0.0.1:7890"})
+        self.assertEqual(manager_launch_environment({}, "posix", registry), {})
+        self.assertEqual(registry.opened, 0)
+        self.assertEqual(manager_launch_environment({}, "nt", FakeRegistry(failure=True)), {})
+
+    def test_manager_proxy_refuses_credentials_nonliteral_and_unsafe_urls(self):
+        for value in ("localhost:7890", "192.0.2.1:7890", "http://user:secret@127.0.0.1:7890", "socks5://127.0.0.1:7890",
+                      "http://127.0.0.1:7890/path", "http://127.0.0.1:7890/?secret=x", "127.0.0.1:99999", "127.0.0.1:7890\n"):
+            registry = FakeRegistry({"ProxyEnable": 1, "ProxyServer": value})
+            self.assertEqual(manager_launch_environment({}, "nt", registry), {})
 
     def test_shutdown_does_not_kill_manager_or_workers(self):
         c = self.started()

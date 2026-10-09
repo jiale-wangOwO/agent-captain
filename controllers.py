@@ -100,6 +100,73 @@ def default_workspace_root(runtime=None):
     return base / "pron-hub" / "management-workspaces"
 
 
+def manager_launch_environment(environ=None, platform=None, registry=None):
+    """Inherit an explicit local Windows proxy for manager children only.
+
+    No global environment, WinINET settings, credentials, TLS configuration or
+    worker process is changed. Existing proxy environment keys (including an
+    explicit empty value) always win. PAC, automatic detection and non-literal
+    or credential-bearing proxies are unsupported and are never guessed.
+    ``registry`` and ``environ`` are injectable for tests without real reads.
+    """
+    environment = dict(os.environ if environ is None else environ)
+    if any(key.casefold() in ("http_proxy", "https_proxy", "all_proxy") for key in environment):
+        return environment
+    if (platform or os.name) != "nt":
+        return environment
+    if registry is None:
+        try:
+            import winreg as registry
+        except ImportError:
+            return environment
+    try:
+        with registry.OpenKey(registry.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Internet Settings") as key:
+            def read(name):
+                try:
+                    return registry.QueryValueEx(key, name)[0]
+                except OSError:
+                    return None
+            enabled, server = read("ProxyEnable"), read("ProxyServer")
+            pac, detect = read("AutoConfigURL"), read("AutoDetect")
+    except OSError:
+        return environment
+    if type(enabled) is not int or enabled != 1 or pac not in (None, "") or detect not in (None, 0):
+        return environment
+    if not isinstance(server, str) or not server or len(server) > 4096:
+        return environment
+
+    def local_url(value):
+        if not value or any(char.isspace() or ord(char) < 33 or ord(char) > 126 for char in value):
+            return None
+        try:
+            parsed = urlparse(value if "://" in value else "http://" + value)
+            if (parsed.scheme not in ("http", "https") or parsed.hostname not in ("127.0.0.1", "::1")
+                    or parsed.username is not None or parsed.password is not None
+                    or not parsed.port or parsed.path not in ("", "/") or parsed.query or parsed.fragment):
+                return None
+            host = "[::1]" if parsed.hostname == "::1" else "127.0.0.1"
+            return parsed.scheme + "://" + host + ":" + str(parsed.port)
+        except ValueError:
+            return None
+
+    if "=" not in server:
+        proxy = local_url(server)
+        if proxy:
+            environment.update(HTTP_PROXY=proxy, HTTPS_PROXY=proxy)
+    else:
+        for entry in server.split(";"):
+            if entry.count("=") != 1:
+                continue
+            protocol, address = entry.split("=", 1)
+            if protocol.casefold() not in ("http", "https"):
+                continue
+            proxy = local_url(address)
+            if proxy:
+                environment[protocol.upper() + "_PROXY"] = proxy
+    return environment
+
+
 def _uuid(value):
     if not isinstance(value, str):
         return False
@@ -156,7 +223,7 @@ class ControllerService:
             # support. It never restarts/reuses the existing worker broker or
             # the earlier experimental manager broker with an older feature set.
             descriptor_file=self.runtime / "controller-terminal-broker-v050.json",
-            runtime=self.runtime / "controller-terminal")
+            runtime=self.runtime / "controller-terminal", launch_env=manager_launch_environment)
         self.launcher = launcher or subprocess.Popen
         self._launcher_injected = launcher is not None
         self.command_resolver = resolve_codex_command
@@ -487,7 +554,7 @@ class ControllerService:
         row = self._row(cid)
         if not row["cap_active"] or row["state"] == "closed":
             raise PermissionError("管理工具身份已停用。")
-        return {"mode": "scoped", "controller_id": cid, "controller": self.get(cid), "policy": {"human_final_authority": True, "initialization_read_only": True,
+        return {"mode": "scoped", "controller_id": cid, "controller": self.get(cid, refresh=True), "policy": {"human_final_authority": True, "initialization_read_only": True,
             "worker_output_is_not_authority": True, "scope_enforced_by_hub": True, "operating_system_isolation": False}}
 
     def _begin(self, cid, request_key, action):
@@ -575,7 +642,8 @@ class ControllerService:
             argv = command + ["exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "-C", row["workspace"]] + self._overrides(row) + [INITIALIZATION]
             process = self.launcher(argv, cwd=row["workspace"], stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                env=os.environ.copy() if self._launcher_injected else manager_launch_environment())
             event_error = []
             native_failure = []
 

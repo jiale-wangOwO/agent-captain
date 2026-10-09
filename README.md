@@ -75,6 +75,8 @@ The first self-check inherits your model/reasoning settings and can take several
 
 Resume retains the witnessed local Codex executable entry, instead of resolving a different version from a new shell's `PATH`. If that installed entry is removed, restoration stops with an environment error; it does not silently downgrade to another CLI or alter your provider setup.
 
+For future owned management processes on Windows, existing proxy environment variables always win. If none are supplied, the Hub can inherit an explicitly enabled static, credential-free loopback HTTP(S) proxy from the user's Windows settings. PAC, auto-detection and non-loopback proxies are not guessed. This changes neither global networking nor worker processes; localhost Hub/MCP/broker traffic still bypasses proxies. It improves launch-context compatibility, not a guarantee against model-service retries or timeouts.
+
 Use Hub controls to restore this managed conversation. The MVP does not track arbitrary in-terminal `/new` or `/resume` switches: its Session field is the verified managed identity, not a promise to follow a manually replaced conversation. Do not switch native conversations inside this management terminal.
 
 For example:
