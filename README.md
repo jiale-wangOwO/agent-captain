@@ -75,6 +75,8 @@ The first self-check inherits your model/reasoning settings and can take several
 
 Resume retains the witnessed local Codex executable entry, instead of resolving a different version from a new shell's `PATH`. If that installed entry is removed, restoration stops with an environment error; it does not silently downgrade to another CLI or alter your provider setup.
 
+Use Hub controls to restore this managed conversation. The MVP does not track arbitrary in-terminal `/new` or `/resume` switches: its Session field is the verified managed identity, not a promise to follow a manually replaced conversation. Do not switch native conversations inside this management terminal.
+
 For example:
 
 > Read the authorized slides and server workers, summarize actual progress and evidence, and list decisions I need to make. Do not send new tasks yet.
