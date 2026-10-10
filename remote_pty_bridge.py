@@ -89,7 +89,10 @@ def probe_existing_session(session_id):
         return {"ok": False, "exists": False, "reason": "probe_unavailable"}
     if exists.returncode:
         return {"ok": True, "exists": False, "reason": "session_missing"}
-    fields = tmux("display-message", "-p", "-t", target,
+    # display-message resolves a target-pane, not a target-session. The colon
+    # makes the exact session component explicit and selects its current pane;
+    # bare '=name' can succeed with an empty format context on real tmux.
+    fields = tmux("display-message", "-p", "-t", target + ":",
         "#{session_name}\t#{session_id}\t#{session_created}\t#{pane_id}\t#{pane_pid}").split("\t")
     if len(fields) != 5 or fields[0] != session_id or not re.fullmatch(r"\$[0-9]+", fields[1]) or not fields[2].isdigit() or not re.fullmatch(r"%[0-9]+", fields[3]) or not fields[4].isdigit():
         raise BridgeError("Owned session identity was not confirmed")
@@ -223,6 +226,10 @@ class Attachment:
                 return int(fields[1]), int(fields[2])
         return None
 
+    def window_target(self):
+        """Explicit session component for target-window/target-pane commands."""
+        return getattr(self, "attachment_target", "=" + self.session_id) + ":"
+
     def wait_client_size(self, cols, rows):
         deadline = time.monotonic() + 6
         while time.monotonic() < deadline:
@@ -234,7 +241,7 @@ class Attachment:
         raise BridgeError("tmux client did not acknowledge the requested dimensions")
 
     def window_geometry(self):
-        fields = tmux("display-message", "-p", "-t", getattr(self, "attachment_target", "=" + self.session_id),
+        fields = tmux("display-message", "-p", "-t", self.window_target(),
                       "#{window_width}\t#{window_height}\t#{pane_pid}\t#{pane_width}\t#{pane_height}").split("\t")
         if len(fields) != 5:
             raise BridgeError("Owned window metadata was not confirmed")
@@ -256,7 +263,7 @@ class Attachment:
                 os.kill(self.child.pid, signal.SIGWINCH)
                 self.wait_client_size(cols, rows)
                 # Window layout changes only after kernel and cached client agree.
-                target = getattr(self, "attachment_target", "=" + self.session_id)
+                target = self.window_target()
                 tmux("set-window-option", "-t", target, "window-size", "manual")
                 tmux("resize-window", "-t", target, "-x", str(cols), "-y", str(rows))
                 tmux("refresh-client", "-t", self.tty)
@@ -271,7 +278,7 @@ class Attachment:
                         raise BridgeError("Owned display client disconnected")
                     os.kill(self.child.pid, signal.SIGWINCH)
                     self.wait_client_size(old_cols, old_rows)
-                    tmux("resize-window", "-t", getattr(self, "attachment_target", "=" + self.session_id), "-x", str(old_window[0]), "-y", str(old_window[1]))
+                    tmux("resize-window", "-t", self.window_target(), "-x", str(old_window[0]), "-y", str(old_window[1]))
                     tmux("refresh-client", "-t", self.tty)
                     confirmed = (winsize(0) == (old_cols, old_rows) == old_window[:2]
                                  and self.window_geometry()[:2] == old_window[:2]

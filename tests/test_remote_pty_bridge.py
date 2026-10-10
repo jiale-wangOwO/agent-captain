@@ -191,7 +191,55 @@ class BridgeTests(unittest.TestCase):
             result = bridge.probe_existing_session(proof["name"])
         self.assertEqual(result["identity"], proof)
         self.assertEqual(run.call_args.args[0], ["tmux", "has-session", "-t", "=" + proof["name"]])
-        self.assertEqual(tmux.call_args.args[3], "=" + proof["name"])
+        self.assertEqual(tmux.call_args.args[3], "=" + proof["name"] + ":")
+
+    def test_real_tmux_empty_context_is_avoided_by_explicit_target_pane(self):
+        proof = self.proof()
+        fields = ["S"] + ["1"] * 19
+        fields[19] = str(proof["pane_start_ticks"])
+        raw = (str(proof["pane_pid"]) + " (bash) " + " ".join(fields)).encode()
+        def display(*args):
+            self.assertEqual(args[0], "display-message")
+            # Reproduce the real symptom: a bare exact target-session can
+            # return success with empty fields when a target-pane is expected.
+            if args[3] == "=" + proof["name"]:
+                return "\t\t\t\t"
+            self.assertEqual(args[3], "=" + proof["name"] + ":")
+            return "\t".join(str(proof[k]) for k in ("name", "session", "created", "pane", "pane_pid"))
+        with patch.object(bridge.subprocess, "run", return_value=types.SimpleNamespace(returncode=0)), \
+                patch.object(bridge, "tmux", side_effect=display), patch.object(bridge.Path, "open", return_value=io.BytesIO(raw)), \
+                patch.object(bridge.Path, "stat", return_value=types.SimpleNamespace(st_uid=1000)), \
+                patch.object(bridge.os, "geteuid", return_value=1000, create=True):
+            self.assertEqual(bridge.probe_existing_session(proof["name"])["identity"], proof)
+
+    def test_session_and_window_commands_use_different_immutable_targets(self):
+        value = self.attachment()
+        value.attachment_target = "$11"
+        def tmux(*args):
+            if args[0] == "list-clients":
+                self.assertEqual(args[2], "$11")
+                return str(value.child.pid) + "\t100\t30\t" + value.tty
+            self.assertEqual(args[0], "display-message")
+            self.assertEqual(args[3], "$11:")
+            return "100\t30\t888888\t100\t30"
+        with patch.object(bridge, "tmux", side_effect=tmux):
+            self.assertEqual(value.client_geometry(), (100, 30))
+            self.assertEqual(value.window_geometry(), (100, 30, 888888, 100, 30))
+
+    def test_resize_and_rollback_target_window_not_bare_session(self):
+        value, state, ioctl, kill, tmux = self.scenario(fail_first_redraw=True)
+        value.attachment_target = "$11"
+        calls = []
+        def checked(*args):
+            calls.append(args)
+            if args[0] in ("set-window-option", "resize-window"):
+                self.assertEqual(args[2], "$11:")
+            return tmux(*args)
+        with patch.object(bridge.fcntl, "ioctl", ioctl), patch.object(bridge.os, "kill", kill), \
+                patch.object(bridge, "tmux", side_effect=checked):
+            with self.assertRaises(bridge.ResizeFailure):
+                value.resize(73, 33)
+        self.assertEqual(len([args for args in calls if args[0] == "resize-window"]), 2)
 
 
 if __name__ == "__main__":
