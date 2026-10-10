@@ -112,8 +112,8 @@ test('explicit reconnect uses exact registered terminal even if the registry sti
   await h.context.reconnectTerminal();
   const post = writes(h);
   assert.equal(post.length, 1);
-  assert.equal(post[0].url, '/api/terminals/connect');
-  assert.deepEqual(JSON.parse(post[0].options.body), { host: '316', thread_id: 'work-1' });
+  assert.equal(post[0].url, '/api/agents/reconnect');
+  assert.deepEqual(JSON.parse(post[0].options.body), { host: '316', thread_id: 'work-1', request_key: 'request-key' });
 });
 
 test('a cached successful machine check is not drawn as a live SSH display heartbeat', () => {

@@ -8,6 +8,7 @@ over a private per-connection Unix socket. It never kills a tmux pane/session.
 from __future__ import annotations
 
 import argparse
+import base64
 import fcntl
 import hashlib
 import json
@@ -28,6 +29,7 @@ SESSION = re.compile(r"ceohub-[a-f0-9]{16,48}\Z")
 BRIDGE = re.compile(r"[a-f0-9]{24,48}\Z")
 MAX_REQUEST = 4096
 RESULT_MARKER = "CEO_HUB_PTY_RESULT="
+EXISTING_MARKER = "/.__pronhub_existing__/"
 
 
 class BridgeError(RuntimeError):
@@ -38,6 +40,79 @@ class ResizeFailure(BridgeError):
     def __init__(self, result):
         super().__init__(result["error"])
         self.result = result
+
+
+def attach_directory(cwd, session_id):
+    """Backwards-compatible strict-attach hint carried by old broker's cwd arg.
+
+    The reserved absolute namespace is never used as a directory. Normal first
+    creation keeps its historical cwd behavior; exact marker means attach-only.
+    Malformed markers fail closed, never creating a replacement shell.
+    """
+    if isinstance(cwd, str) and cwd.startswith("/.__pronhub_existing"):
+        if not SESSION.fullmatch(session_id):
+            raise BridgeError("Invalid existing-session attachment marker")
+        base = EXISTING_MARKER + session_id
+        if cwd == base:
+            return "", True, None
+        if not cwd.startswith(base + "/"):
+            raise BridgeError("Invalid existing-session attachment marker")
+        encoded = cwd[len(base) + 1:]
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,2048}", encoded):
+            raise BridgeError("Invalid existing-session attachment marker")
+        try:
+            expected = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+        except (ValueError, UnicodeError):
+            raise BridgeError("Invalid existing-session attachment marker") from None
+        if not valid_session_identity(expected, session_id):
+            raise BridgeError("Invalid existing-session attachment marker")
+        return "", True, expected
+    return cwd, False, None
+
+
+def valid_session_identity(value, session_id):
+    return (isinstance(value, dict) and set(value) == {"name", "session", "created", "pane", "pane_pid", "pane_start_ticks"}
+        and value["name"] == session_id and isinstance(value["session"], str) and re.fullmatch(r"\$[0-9]+", value["session"])
+        and isinstance(value["pane"], str) and re.fullmatch(r"%[0-9]+", value["pane"])
+        and all(type(value[key]) is int and value[key] > 0 for key in ("created", "pane_pid", "pane_start_ticks")))
+
+
+def probe_existing_session(session_id):
+    """Read one exact tmux/pane identity; no stdin, cwd, argv or task text."""
+    if not isinstance(session_id, str) or not SESSION.fullmatch(session_id):
+        raise BridgeError("Invalid owned terminal session ID")
+    target = "=" + session_id
+    try:
+        exists = subprocess.run(["tmux", "has-session", "-t", target], stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return {"ok": False, "exists": False, "reason": "probe_unavailable"}
+    if exists.returncode:
+        return {"ok": True, "exists": False, "reason": "session_missing"}
+    fields = tmux("display-message", "-p", "-t", target,
+        "#{session_name}\t#{session_id}\t#{session_created}\t#{pane_id}\t#{pane_pid}").split("\t")
+    if len(fields) != 5 or fields[0] != session_id or not re.fullmatch(r"\$[0-9]+", fields[1]) or not fields[2].isdigit() or not re.fullmatch(r"%[0-9]+", fields[3]) or not fields[4].isdigit():
+        raise BridgeError("Owned session identity was not confirmed")
+    pid = int(fields[4])
+    if pid <= 0:
+        raise BridgeError("Owned pane identity was not confirmed")
+    path = Path("/proc") / str(pid)
+    try:
+        with (path / "stat").open("rb") as stream:
+            raw = stream.read(8193)
+        if len(raw) > 8192 or path.stat().st_uid != os.geteuid():
+            raise ValueError()
+        prefix, separator, suffix = raw.decode("utf-8").rpartition(")")
+        values = suffix.split()
+        if not separator or int(prefix.split(" ", 1)[0]) != pid or len(values) < 20:
+            raise ValueError()
+        ticks = int(values[19])
+        if ticks <= 0:
+            raise ValueError()
+    except (OSError, ValueError, UnicodeError):
+        raise BridgeError("Owned pane identity was not confirmed") from None
+    return {"ok": True, "exists": True, "identity": {"name": fields[0], "session": fields[1],
+            "created": int(fields[2]), "pane": fields[3], "pane_pid": pid, "pane_start_ticks": ticks}}
 
 
 def size(cols, rows):
@@ -116,13 +191,16 @@ def apply_winsize(fd, cols, rows):
 
 
 class Attachment:
-    def __init__(self, session_id, bridge_id, cols, rows, cwd):
+    def __init__(self, session_id, bridge_id, cols, rows, cwd, require_existing=False):
         identity(session_id, bridge_id)
         size(cols, rows)
         if not os.isatty(0):
             raise BridgeError("SSH -tt is required for the display attachment")
         if not isinstance(cwd, str) or len(cwd) > 4096 or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in cwd):
             raise BridgeError("Invalid terminal directory")
+        cwd, marker, expected = attach_directory(cwd, session_id)
+        self.require_existing = bool(require_existing or marker)
+        self.expected_identity = expected
         cwd = cwd or str(Path.home())
         if not os.path.isabs(cwd):
             raise BridgeError("Terminal directory must be absolute")
@@ -137,7 +215,7 @@ class Attachment:
         self.worker = None
 
     def client_geometry(self):
-        listing = tmux("list-clients", "-t", self.session_id,
+        listing = tmux("list-clients", "-t", getattr(self, "attachment_target", "=" + self.session_id),
                        "-F", "#{client_pid}\t#{client_width}\t#{client_height}\t#{client_tty}")
         for line in listing.splitlines():
             fields = line.split("\t")
@@ -156,7 +234,7 @@ class Attachment:
         raise BridgeError("tmux client did not acknowledge the requested dimensions")
 
     def window_geometry(self):
-        fields = tmux("display-message", "-p", "-t", self.session_id,
+        fields = tmux("display-message", "-p", "-t", getattr(self, "attachment_target", "=" + self.session_id),
                       "#{window_width}\t#{window_height}\t#{pane_pid}\t#{pane_width}\t#{pane_height}").split("\t")
         if len(fields) != 5:
             raise BridgeError("Owned window metadata was not confirmed")
@@ -178,8 +256,9 @@ class Attachment:
                 os.kill(self.child.pid, signal.SIGWINCH)
                 self.wait_client_size(cols, rows)
                 # Window layout changes only after kernel and cached client agree.
-                tmux("set-window-option", "-t", self.session_id, "window-size", "manual")
-                tmux("resize-window", "-t", self.session_id, "-x", str(cols), "-y", str(rows))
+                target = getattr(self, "attachment_target", "=" + self.session_id)
+                tmux("set-window-option", "-t", target, "window-size", "manual")
+                tmux("resize-window", "-t", target, "-x", str(cols), "-y", str(rows))
                 tmux("refresh-client", "-t", self.tty)
                 fields = self.window_geometry()
                 if fields[:2] != (cols, rows) or winsize(0) != (cols, rows) or self.client_geometry() != (cols, rows):
@@ -192,7 +271,7 @@ class Attachment:
                         raise BridgeError("Owned display client disconnected")
                     os.kill(self.child.pid, signal.SIGWINCH)
                     self.wait_client_size(old_cols, old_rows)
-                    tmux("resize-window", "-t", self.session_id, "-x", str(old_window[0]), "-y", str(old_window[1]))
+                    tmux("resize-window", "-t", getattr(self, "attachment_target", "=" + self.session_id), "-x", str(old_window[0]), "-y", str(old_window[1]))
                     tmux("refresh-client", "-t", self.tty)
                     confirmed = (winsize(0) == (old_cols, old_rows) == old_window[:2]
                                  and self.window_geometry()[:2] == old_window[:2]
@@ -251,14 +330,29 @@ class Attachment:
 
     def run(self):
         apply_winsize(0, self.cols, self.rows)
-        exists = subprocess.run(["tmux", "has-session", "-t", self.session_id], stdin=subprocess.DEVNULL,
+        if self.require_existing:
+            current = probe_existing_session(self.session_id)
+            if not current.get("ok") or not current.get("exists"):
+                raise BridgeError("Original tmux session is missing; replacement was not created")
+            proof = current["identity"]
+            if self.expected_identity is not None and self.expected_identity != proof:
+                raise BridgeError("Original tmux identity changed; display was not attached")
+            self.expected_identity = proof
+            # Immutable tmux ID: a close/recreate of the same NAME cannot
+            # redirect this display client to a different existing worker.
+            self.attachment_target = proof["session"]
+        else:
+            self.attachment_target = "=" + self.session_id
+        exists = subprocess.run(["tmux", "has-session", "-t", "=" + self.session_id], stdin=subprocess.DEVNULL,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5).returncode == 0
         if not exists:
+            if self.require_existing:
+                raise BridgeError("Original tmux session is missing; replacement was not created")
             tmux("new-session", "-d", "-s", self.session_id, "-c", self.cwd, "-x", str(self.cols), "-y", str(self.rows))
         # Existing sessions are attached as-is: no cwd change, resume command,
         # keystrokes, provider selection or process restart.
-        tmux("set-option", "-t", self.session_id, "status", "off")
-        tmux("set-option", "-t", self.session_id, "mouse", "off")
+        tmux("set-option", "-t", self.attachment_target, "status", "off")
+        tmux("set-option", "-t", self.attachment_target, "mouse", "off")
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.listener.settimeout(0.2)
         old_umask = os.umask(0o077)
@@ -274,7 +368,9 @@ class Attachment:
         # xterm/SSH pipes are UTF-8 even if the server's non-login environment
         # lacks LANG. Tell this display client explicitly, without changing the
         # shell locale, provider configuration or existing agent environment.
-        self.child = subprocess.Popen(["tmux", "-u", "attach-session", "-t", self.session_id])
+        self.child = subprocess.Popen(["tmux", "-u", "attach-session", "-t", self.attachment_target])
+        if self.require_existing and probe_existing_session(self.session_id).get("identity") != self.expected_identity:
+            raise BridgeError("Original tmux identity changed; display was not confirmed")
         self.resize(self.cols, self.rows)
         self.worker = threading.Thread(target=self.serve, name="ceo-pty-resize", daemon=True)
         self.worker.start()
@@ -345,13 +441,17 @@ def request_resize(session_id, bridge_id, cols, rows):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("attach", "resize"))
+    parser.add_argument("mode", choices=("attach", "resize", "probe"))
     parser.add_argument("--session", required=True)
-    parser.add_argument("--bridge-id", required=True)
-    parser.add_argument("--cols", type=int, required=True)
-    parser.add_argument("--rows", type=int, required=True)
+    parser.add_argument("--bridge-id")
+    parser.add_argument("--cols", type=int)
+    parser.add_argument("--rows", type=int)
     parser.add_argument("--cwd", default="")
     args = parser.parse_args()
+    if args.mode == "probe":
+        result = probe_existing_session(args.session)
+        print(RESULT_MARKER + json.dumps(result), flush=True)
+        return 0 if result.get("ok") else 1
     if args.mode == "resize":
         try:
             result = request_resize(args.session, args.bridge_id, args.cols, args.rows)

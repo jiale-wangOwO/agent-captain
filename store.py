@@ -26,7 +26,8 @@ class Store:
             """)
             columns = {r[1] for r in self.db.execute("pragma table_info(agents)")}
             for name, declaration in (("active", "integer default 0"), ("access", "text default 'observe'"),
-                                      ("mode", "text default 'history'"), ("terminal_id", "text"), ("cwd", "text default ''")):
+                                      ("mode", "text default 'history'"), ("terminal_id", "text"), ("cwd", "text default ''"),
+                                      ("pinned", "integer default 0")):
                 if name not in columns:
                     self.db.execute(f"alter table agents add column {name} {declaration}")
             outbox_columns = {r[1] for r in self.db.execute("pragma table_info(outbox)")}
@@ -51,6 +52,20 @@ class Store:
             else:
                 rows = self.db.execute("select * from events where id>? order by id limit ?", (after, limit)).fetchall()
         return [dict(r) | {"data": json.loads(r["data"])} for r in rows]
+
+    def recent_events(self, limit=400, kinds=None):
+        """Recent UI tail in ascending cursor order; durable history remains."""
+        with self.lock:
+            if kinds:
+                placeholders = ",".join("?" for _ in kinds)
+                rows = self.db.execute("select * from events where kind in (" + placeholders + ") order by id desc limit ?", (*kinds, limit)).fetchall()
+            else:
+                rows = self.db.execute("select * from events order by id desc limit ?", (limit,)).fetchall()
+        return [dict(row) | {"data": json.loads(row["data"])} for row in reversed(rows)]
+
+    def event_cursor(self):
+        with self.lock:
+            return self.db.execute("select coalesce(max(id),0) from events").fetchone()[0]
 
     def setting(self, key, value=None):
         with self.lock, self.db:
@@ -80,6 +95,21 @@ class Store:
     def set_active(self, host, thread_id, active):
         with self.lock, self.db:
             self.db.execute("update agents set active=? where host=? and thread_id=?", (int(active), host, thread_id))
+        return self.agent(host, thread_id)
+
+    def update_agent_metadata(self, host, thread_id, alias=None, pinned=None):
+        """Change presentation only; never activation, terminal or output identity."""
+        values = {}
+        if alias is not None:
+            values["alias"] = alias
+        if pinned is not None:
+            values["pinned"] = int(pinned)
+        with self.lock, self.db:
+            if not self.db.execute("select 1 from agents where host=? and thread_id=?", (host, thread_id)).fetchone():
+                raise ValueError("未登记的工作终端。")
+            if values:
+                self.db.execute("update agents set " + ",".join(key + "=?" for key in values) + " where host=? and thread_id=?",
+                                (*values.values(), host, thread_id))
         return self.agent(host, thread_id)
 
     def agents(self):

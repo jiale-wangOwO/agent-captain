@@ -100,7 +100,9 @@ class McpBridgeTests(unittest.TestCase):
         self.assertEqual(responses[0]["result"]["serverInfo"]["version"], mcp_bridge.VERSION)
         self.assertEqual(responses[2]["result"], {})
         names = {item["name"] for item in responses[1]["result"]["tools"]}
-        self.assertEqual(names, {"list_active_agents", "get_agent", "read_agent", "send_agent_message", "send_terminal_input", "create_agent", "poll_events", "get_delivery"})
+        self.assertEqual(names, {"list_active_agents", "get_agent", "read_agent", "update_agent", "reconnect_agent", "send_agent_message", "send_terminal_input", "create_agent", "poll_events", "get_delivery"})
+        self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "ceo-hub")
+        self.assertEqual(responses[0]["result"]["serverInfo"]["version"], "0.6.0")
         self.assertNotIn("private-secret", process.stdout)
 
     def test_negotiation_and_required_initialization(self):
@@ -193,6 +195,110 @@ class McpBridgeTests(unittest.TestCase):
         result = self.call(bridge, "send_agent_message", arguments)["result"]
         self.assertFalse(result["isError"])
         self.assertEqual(service.calls[0]["body"]["arguments"], arguments)
+
+    def test_metadata_update_passes_only_explicit_alias_pin_and_stable_key(self):
+        service = self.service(result={"updated": True, "agent_id": "316::terminal-1", "alias": "电路项目", "pinned": True,
+                                       "active": True, "scope_changed": False})
+        bridge = mcp_bridge.McpBridge()
+        self.initialize(bridge)
+        arguments = {"agent_id": "316::terminal-1", "alias": "电路项目", "pinned": True, "request_key": "metadata-once"}
+        response = self.call(bridge, "update_agent", arguments)["result"]
+        self.assertFalse(response["isError"])
+        self.assertEqual(response["structuredContent"]["scope_changed"], False)
+        self.assertEqual(service.calls[0]["body"], {"tool": "update_agent", "arguments": arguments})
+        self.assertNotIn("controller_id", service.calls[0]["body"]["arguments"])
+        for field in ("host", "command", "text", "active", "grant"):
+            self.assertNotIn(field, service.calls[0]["body"]["arguments"])
+
+    def test_metadata_update_invalid_or_empty_changes_do_not_contact_service(self):
+        service = self.service()
+        bridge = mcp_bridge.McpBridge()
+        self.initialize(bridge)
+        base = {"agent_id": "local::terminal-1", "request_key": "metadata-key"}
+        invalid = [base, {**base, "alias": ""}, {**base, "alias": "   "},
+                   {**base, "alias": "中" * 201}, {**base, "alias": "title\x1b[31m"},
+                   {**base, "alias": "title\n"}, {**base, "alias": "title\x85"},
+                   {**base, "pinned": 1}, {**base, "pinned": "true"},
+                   {"agent_id": "local::terminal-1", "pinned": True},
+                   {**base, "pinned": True, "active": True},
+                   {**base, "pinned": True, "controller_id": "different-controller"}]
+        for arguments in invalid:
+            with self.subTest(arguments=arguments):
+                self.assertTrue(self.call(bridge, "update_agent", arguments)["result"]["isError"])
+        self.assertEqual(service.calls, [])
+        mcp_bridge.validate_arguments("update_agent", {**base, "pinned": False})
+        mcp_bridge.validate_arguments("update_agent", {**base, "alias": "中" * 200})
+
+    def test_reconnect_passes_exact_existing_agent_and_key_without_startup_or_transport_arguments(self):
+        service = self.service(result={"reconnected": True, "state": "connected", "agent_id": "316::terminal-1"})
+        bridge = mcp_bridge.McpBridge()
+        self.initialize(bridge)
+        arguments = {"agent_id": "316::terminal-1", "request_key": "reattach-once"}
+        result = self.call(bridge, "reconnect_agent", arguments)["result"]
+        self.assertFalse(result["isError"])
+        self.assertEqual(service.calls[0]["body"], {"tool": "reconnect_agent", "arguments": arguments})
+        for extra in ({"command": "codex resume"}, {"force": True}, {"create": True}, {"host": "other"},
+                      {"target": "other-host"}, {"transport": "tunnel"}, {"controller_id": "different"}, {"text": "task"}):
+            self.assertTrue(self.call(bridge, "reconnect_agent", {**arguments, **extra})["result"]["isError"])
+        self.assertTrue(self.call(bridge, "reconnect_agent", {"agent_id": "316::terminal-1"})["result"]["isError"])
+        self.assertEqual(len(service.calls), 1)
+
+    def test_management_action_timeout_preserves_unknown_same_key_guidance_without_retry(self):
+        self.service()
+        bridge = mcp_bridge.McpBridge()
+        self.initialize(bridge)
+        for name in ("update_agent", "reconnect_agent"):
+            with self.subTest(tool=name), patch.object(mcp_bridge, "build_opener") as opener:
+                opener.return_value.open.side_effect = mcp_bridge.URLError("fixture connection lost")
+                arguments = {"agent_id": "316::terminal-1", "request_key": "same-management-action"}
+                if name == "update_agent":
+                    arguments["pinned"] = True
+                response = self.call(bridge, name, arguments)["result"]
+                self.assertTrue(response["isError"])
+                self.assertIn("outcome is unknown", response["content"][0]["text"])
+                self.assertIn("SAME request_key", response["content"][0]["text"])
+                self.assertEqual(opener.return_value.open.call_count, 1)
+
+    def test_reconnect_operation_evidence_preserves_blocked_unknown_and_done_outcomes(self):
+        service = self.service()
+        bridge = mcp_bridge.McpBridge()
+        self.initialize(bridge)
+        arguments = {"agent_id": "316::terminal-1", "request_key": "same-reconnect-operation"}
+        for state, code in (("blocked", "original_session_missing"), ("unknown", "reconnect_unknown"),
+                            ("done", "already_connected")):
+            service.result = {"agent_id": "316::terminal-1", "connected": state == "done",
+                              "operation": "reconnect_agent", "operation_state": state,
+                              "operation_id": "same-reconnect-operation",
+                              "recovery": {"code": code, "message": "保留原对象；没有输入或新建。", "next_action": "inspect_connection"}}
+            with self.subTest(state=state):
+                response = self.call(bridge, "reconnect_agent", arguments)["result"]
+                self.assertFalse(response["isError"])
+                self.assertEqual(response["structuredContent"], service.result)
+                self.assertEqual(service.calls[-1]["body"]["arguments"], arguments)
+        self.assertEqual(len(service.calls), 3, "only the three explicit test calls may contact the fake service")
+
+    def test_cached_overview_preserves_freshness_evidence_instead_of_claiming_live_connectivity(self):
+        cached = {"agents": [{"agent_id": "316::terminal-1", "pinned": True, "host_label": "远端开发机",
+                              "management": {"status": "display_disconnected", "label": "显示连接已断开",
+                                             "tone": "muted", "primary_action": "reconnect", "needs_attention": True}, "connected": False,
+                              "live_verified": False, "status_checked_at": "fixture-old-time"}], "status_source": "cache"}
+        service = self.service(result=cached)
+        bridge = mcp_bridge.McpBridge()
+        self.initialize(bridge)
+        result = self.call(bridge)["result"]
+        self.assertFalse(result["isError"])
+        self.assertEqual(result["structuredContent"], cached)
+        self.assertEqual(service.calls[0]["body"], {"tool": "list_active_agents", "arguments": {}})
+        self.assertEqual(len(service.calls), 1)
+
+    def test_new_management_tools_have_safe_mutation_annotations_and_closed_schemas(self):
+        for name in ("update_agent", "reconnect_agent"):
+            definition = mcp_bridge.TOOLS_BY_NAME[name]
+            self.assertFalse(definition["annotations"]["readOnlyHint"])
+            self.assertFalse(definition["annotations"]["destructiveHint"])
+            self.assertTrue(definition["annotations"]["idempotentHint"])
+            self.assertFalse(definition["inputSchema"]["additionalProperties"])
+            self.assertIn("request_key", definition["inputSchema"]["required"])
 
     def test_raw_terminal_input_preserves_keys_and_requires_stable_request_key(self):
         service = self.service(result={"request_id": "input-1", "delivery": "submitted"})

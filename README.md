@@ -6,9 +6,9 @@
 
 **Personal Remote Ops & Nodes Hub** — one Codex conversation to coordinate the working agents you choose, on your computer and remote Linux machines.
 
-[中文说明](README.zh-CN.md) · [Management-session design and limits](docs/management-session-product.md) · [SSH transport contract](docs/ssh-transport.md) · [Codex maintenance](docs/codex-maintenance.md) · [Security](SECURITY.md)
+[中文说明](README.zh-CN.md) · [Agent workbench](docs/agent-workbench.md) · [Management-session design and limits](docs/management-session-product.md) · [SSH transport contract](docs/ssh-transport.md) · [Codex maintenance](docs/codex-maintenance.md) · [Security](SECURITY.md)
 
-PRON Hub is a single-user, local-first connection service for Codex. **Version 0.5 adds a management-session MVP:** create a real local Codex conversation from the Hub, with its role, tools, and explicit worker scope initialized for you. It is experimental; version-specific live integration and desktop transfer are not certified by the unit tests.
+PRON Hub is a single-user, local-first connection service for Codex. **Version 0.6 adds an agent workbench:** manage registered workers across machines, with search, filters, pinning, renaming, and safe reconnection. The management-session MVP introduced in 0.5 creates a real local Codex conversation with its role, tools, and explicit worker scope initialized. That integration remains experimental; version-specific live integration and desktop transfer are not certified by the unit tests.
 
 The **controller is the model in that native Codex conversation**, acting as your CEO: collect evidence, convey tasks, and summarize what needs your decision. The human retains final authority. The Hub runs no separate model backend, does not inject a CEO role into workers, and does not automatically wake a dormant conversation. Each worker still has a real terminal in which you can use your normal Codex workflow or talk directly.
 
@@ -92,6 +92,10 @@ For example:
 The resulting status is **`desktop_unverified`**, not a verified seamless handoff. Opening a link does not prove the desktop app acquired the conversation or reloaded the scoped tools, project trust, model, and provider. Inspect those in the desktop app yourself; the Hub stops writing while the desktop owns the entry. To return, close the other entry and use **Continue management**, which attempts the same exact Session ID without reinitializing or resending business tasks. Occupancy and configuration errors remain explicit.
 
 ## Connect your workers
+
+The workbench defaults to frequently used and connected agents across machines: connected, pinned, or activated workers, excluding closed records. Activated but disconnected work remains visible; choose all registered records to find old entries. Filter by machine, status, name, or project path; pin recurring work and rename it for recognition. Open a shared terminal, read actual conversation output, or reconnect directly from its card. Filtering, pinning, renaming, and changing the display do not alter worker processes or manager grants.
+
+Reconnection only reattaches the original remote persistent terminal. It must not create a replacement shell, run `codex resume`, or replay a task. If that terminal no longer exists, a local process cannot be restored, or the SSH route is unavailable, the service reports an actionable next step. Start new work explicitly. An external tunnel adapter remains responsible for restoring its SSH endpoint; the Hub does not restart shared tunnels or models. See the [workbench contract](docs/agent-workbench.md).
 
 1. Select or configure a machine, then open a terminal. Use the directory chooser, enter an absolute directory on that machine, or leave it blank and `cd` from the home directory.
 2. In that terminal, run `codex`, `codex-switch`, or your usual launcher. The human handles provider selection, login, secrets, OTPs, and approvals.

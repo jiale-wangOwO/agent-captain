@@ -19,11 +19,11 @@ from terminal_client import BrokerError, TerminalClient
 from controllers import ControllerService, default_workspace_root
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 RETRYABLE = ("queued", "waiting_for_agent", "human_busy", "awaiting_connection", "blocked")
 MANAGEMENT_EVENTS = ("host_configured", "host_connected", "host_unavailable", "agent_attached",
                      "agent_created", "agent_activated", "agent_deactivated", "message_submitted",
-                     "terminal_input_submitted", "terminal_state", "terminal_output", "terminal_closed")
+                     "terminal_input_submitted", "terminal_state", "terminal_output", "terminal_closed", "agent_updated", "agent_reconnected")
 
 
 class Hub:
@@ -38,6 +38,7 @@ class Hub:
         self.terminals = terminals if terminals is not None else TerminalClient()
         self.directories = directories if directories is not None else DirectoryBrowser()
         self.registry_lock = threading.RLock()
+        self._reconnecting = set()
         self.event_condition = threading.Condition()
         self.stopping = False
         self._stop = threading.Event()
@@ -160,14 +161,193 @@ class Hub:
         safe = {key: value for key, value in row.items() if key not in ("access", "owned")}
         runtime = next((s for s in (self.terminals.sessions() if sessions is None else sessions) if s["id"] == row.get("terminal_id")), {})
         binding = self.store.setting(self._output_key(host, row.get("terminal_id"))) if row.get("terminal_id") else None
-        return {**safe, "agent_id": self.agent_id(host, thread_id), "source": "terminal" if row.get("terminal_id") else "history",
+        result = {**safe, "pinned": bool(row.get("pinned")), "host_label": self.host(host).get("label", host),
+                "agent_id": self.agent_id(host, thread_id), "source": "terminal" if row.get("terminal_id") else "history",
                 "output_binding": {"state": "recorded", "session_id": binding["session_id"], "method": binding.get("method"),
                                    "note": "上次关联；读取时重新核验当前进程。"} if binding else {"state": "unbound"},
                 "source_thread_id": None if thread_id.startswith("ceohub-") else thread_id,
                 "connected": bool(runtime.get("connected")), "status": runtime.get("state", "not_connected"),
                 "state": runtime.get("state", "not_connected"), "command": runtime.get("command", ""),
-                "agent_ready": bool(runtime.get("agent_ready")), "blocked_reason": runtime.get("blocked_reason"),
+                "agent_ready": bool(runtime.get("agent_ready")), "human_busy": bool(runtime.get("human_busy")), "blocked_reason": runtime.get("blocked_reason"),
                 **self._closed_status(row, runtime)}
+        recovery = self.store.setting(self._recovery_key(host, thread_id))
+        if recovery:
+            result["recovery"] = recovery
+        result["management"] = self._management(result)
+        return result
+
+    @staticmethod
+    def _management(agent):
+        """One cached presentation shared by UI, get/list and scoped tools.
+
+        Ready means input availability, not task completion. This method never
+        performs SSH, reads transcripts or guesses which business task is active.
+        """
+        state, mode = agent.get("state"), agent.get("mode")
+        if mode == "closed" or state == "closed":
+            status, label, tone, action, attention = "closed", "已结束", "neutral", "none", False
+        elif mode in ("closing", "close_unknown"):
+            status, label, tone, action, attention = mode, "关闭结果待核对" if mode == "close_unknown" else "正在关闭", "warning", "none", True
+        elif not agent.get("terminal_id"):
+            status, label, tone, action, attention = "history", "历史记录", "neutral", "view_history", False
+        elif agent.get("recovery", {}).get("code") in ("original_session_missing", "original_session_changed", "reconnect_unknown"):
+            unknown = agent["recovery"]["code"] == "reconnect_unknown"
+            status, label, tone, action, attention = ("recovery_unknown" if unknown else "missing"), ("重连结果待核对" if unknown else "原终端待核对"), "warning", "inspect_connection", True
+        elif not agent.get("connected"):
+            recovery = agent.get("recovery", {})
+            missing = recovery.get("code") in ("original_session_missing", "original_session_changed")
+            status, label, tone, action, attention = ("missing" if missing else "disconnected"), ("原终端待核对" if missing else "连接已断开"), "warning", ("inspect_connection" if missing else "reconnect"), True
+        elif agent.get("human_busy"):
+            status, label, tone, action, attention = "human_busy", "你正在输入", "neutral", "open_terminal", False
+        elif agent.get("blocked_reason"):
+            status, label, tone, action, attention = "needs_input", "需人工处理", "warning", "open_terminal", True
+        elif state == "shell":
+            status, label, tone, action, attention = "shell", "终端就绪 · 未启动 agent", "neutral", "open_terminal", bool(agent.get("active"))
+        elif agent.get("agent_ready"):
+            status, label, tone, action, attention = ("ready", "Agent 可交互", "positive", "open_terminal", False) if agent.get("active") else ("inactive", "未激活", "neutral", "open_terminal", False)
+        else:
+            status, label, tone, action, attention = "checking", "已连接 · 待核验", "neutral", "open_terminal", False
+        return {"status": status, "label": label, "tone": tone, "primary_action": action, "needs_attention": attention}
+
+    @staticmethod
+    def _recovery_key(host, thread_id):
+        return "agent-recovery:" + hashlib.sha256(json.dumps([host, thread_id]).encode()).hexdigest()
+
+    def update_agent(self, host, thread_id, alias=None, pinned=None, origin="ui", request_key=None, controller_id=None):
+        if origin not in ("ui", "plugin"):
+            raise ValueError("更新来源必须为 ui 或 plugin。")
+        if alias is not None and (not isinstance(alias, str) or not alias.strip() or len(alias.strip()) > 200 or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in alias)):
+            raise ValueError("工作名称不能为空，最长 200 字符，不接受控制字符。")
+        if pinned is not None and type(pinned) is not bool:
+            raise ValueError("pinned 必须为明确布尔值。")
+        if alias is None and pinned is None:
+            raise ValueError("至少提供工作名称或置顶状态。")
+        self._request_key(request_key)
+        if origin == "plugin" and not request_key:
+            raise ValueError("管理操作必须提供稳定 request_key。")
+        with self.registry_lock:
+            self.get_agent(host, thread_id, plugin=origin == "plugin")
+            if controller_id is not None:
+                self._require_controller_scope(controller_id, host, thread_id)
+            key = "agent-update:" + request_key if request_key else None
+            if key:
+                fingerprint = hashlib.sha256(json.dumps([host, thread_id, alias, pinned, origin, controller_id], ensure_ascii=False).encode()).hexdigest()
+                previous = self.store.begin_operation(key, fingerprint)
+                if previous is not None:
+                    return self.get_agent(host, thread_id)
+            self.store.update_agent_metadata(host, thread_id, alias.strip() if alias is not None else None, pinned)
+            result = self.get_agent(host, thread_id)
+            if key:
+                self.store.finish_operation(key, {"agent_id": result["agent_id"], "updated": True})
+            self.record_event("agent_updated", host=host, thread_id=thread_id, alias=result["alias"], pinned=result["pinned"], origin=origin)
+            return result
+
+    def _probe_remote_terminal(self, host, terminal_id):
+        if not isinstance(terminal_id, str) or not re.fullmatch(r"ceohub-[a-f0-9]{16,48}", terminal_id):
+            return {"ok": False, "exists": False, "reason": "invalid_terminal_id"}
+        config = self.host(host)
+        if config["transport"] != "ssh":
+            return {"ok": False, "exists": False, "reason": "unsupported_transport"}
+        target = config.get("target", "")
+        if not isinstance(target, str) or not target or target.startswith("-") or any(char.isspace() or ord(char) < 32 for char in target):
+            return {"ok": False, "exists": False, "reason": "invalid_ssh_target"}
+        # Send the same source the old 0.3 broker loads per attachment. Probe mode
+        # only reads the chosen tmux/pane identity, never input or model config.
+        source = (ROOT / "remote_pty_bridge.py").read_text(encoding="utf-8")
+        try:
+            reply = subprocess.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ConnectTimeout=10",
+                target, "python3 - probe --session " + shlex.quote(terminal_id)], input=source,
+                text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=25,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if reply.returncode or len(reply.stdout) > 65536:
+                detail = (reply.stderr or "")[:4096].casefold()
+                reason = "ssh_host_key_required" if "host key verification failed" in detail else "ssh_auth_required" if "permission denied" in detail or "authentication failed" in detail else "route_unavailable"
+                return {"ok": False, "exists": False, "reason": reason}
+            lines = [line.removeprefix("CEO_HUB_PTY_RESULT=") for line in reply.stdout.splitlines() if line.startswith("CEO_HUB_PTY_RESULT=")]
+            result = json.loads(lines[0]) if len(lines) == 1 else None
+            if not isinstance(result, dict) or type(result.get("exists")) is not bool or type(result.get("ok")) is not bool:
+                raise ValueError()
+            if result.get("exists"):
+                identity = result.get("identity")
+                if not isinstance(identity, dict) or set(identity) != {"name", "session", "created", "pane", "pane_pid", "pane_start_ticks"} or identity["name"] != terminal_id or not isinstance(identity["session"], str) or not re.fullmatch(r"\$[0-9]+", identity["session"]) or not isinstance(identity["pane"], str) or not re.fullmatch(r"%[0-9]+", identity["pane"]) or any(type(identity[key]) is not int or identity[key] <= 0 for key in ("created", "pane_pid", "pane_start_ticks")):
+                    raise ValueError()
+            return result
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return {"ok": False, "exists": False, "reason": "route_unavailable"}
+
+    def reconnect_agent(self, host, thread_id, origin="ui", request_key=None, controller_id=None):
+        if origin not in ("ui", "plugin"):
+            raise ValueError("重连来源必须为 ui 或 plugin。")
+        self._request_key(request_key)
+        if origin == "plugin" and not request_key:
+            raise ValueError("管理重连必须提供稳定 request_key。")
+        with self.registry_lock:
+            agent = self.get_agent(host, thread_id, plugin=origin == "plugin")
+            if controller_id is not None:
+                self._require_controller_scope(controller_id, host, thread_id)
+            def finish(code, message, next_action, state="blocked", view=None):
+                recovery = {"code": code, "message": message, "next_action": next_action}
+                self.store.setting(self._recovery_key(host, thread_id), recovery)
+                result = (view or self.get_agent(host, thread_id)) | {"recovery": recovery, "operation": "reconnect_agent", "operation_state": state,
+                    "operation_id": request_key}
+                result["management"] = self._management(result)
+                if operation:
+                    self.store.finish_operation(operation, {"state": state, "recovery": recovery})
+                return result
+            request_key = request_key or "ui-reconnect-" + str(uuid.uuid4())
+            operation = "agent-reconnect:" + request_key
+            fingerprint = hashlib.sha256(json.dumps([host, thread_id, agent.get("terminal_id"), origin, controller_id]).encode()).hexdigest()
+            try:
+                previous = self.store.begin_operation(operation, fingerprint)
+            except RuntimeError:
+                return finish("reconnect_unknown", "原重连结果尚未核验；请先检查连接，不使用新请求键强制重试。", "inspect_connection", "unknown")
+            if previous is not None:
+                result = self.get_agent(host, thread_id) | {"operation": "reconnect_agent", "operation_state": previous["state"], "operation_id": request_key,
+                    "recovery": previous["recovery"]}
+                result["management"] = self._management(result)
+                return result
+            if agent.get("mode") in ("closed", "closing", "close_unknown"):
+                return finish("closed", "此终端已结束或关闭结果待核对；不会重新启动。", "none")
+            if agent.get("connected"):
+                return finish("already_connected", "当前显示连接仍在；未重复附着，也未发送任何输入。", "open_terminal", "done", agent)
+            if not agent.get("terminal_id"):
+                return finish("missing_terminal", "没有可恢复的原终端；请由用户选择或新建终端。", "inspect_connection")
+            if self.host(host)["transport"] != "ssh":
+                return finish("local_reconnect_unsupported", "本机终端进程不能由重连按钮重新启动；请核对原显示服务或手动打开终端。", "inspect_connection")
+            before = self._probe_remote_terminal(host, agent["terminal_id"])
+            if not before.get("ok"):
+                if before.get("reason") == "ssh_auth_required":
+                    return finish("ssh_auth_required", "SSH 认证需要由用户处理；不会读取或改写凭据，也不会自动尝试登录。", "check_connection")
+                if before.get("reason") == "ssh_host_key_required":
+                    return finish("ssh_host_key_required", "SSH 主机密钥需要由用户核验；不会跳过验证或改写 known_hosts。", "check_connection")
+                return finish("route_unavailable", "SSH 路由暂不可达；请检查机器或恢复 SSH 上游/隧道路由，再由用户重试。不会自动重启服务。", "check_connection")
+            if not before.get("exists"):
+                return finish("original_session_missing", "原 tmux 会话不存在；未创建替代 shell、未启动或恢复 Codex。", "inspect_connection")
+            if controller_id is not None:
+                self._require_controller_scope(controller_id, host, thread_id)
+            proof = before["identity"]
+            marker = "/.__pronhub_existing__/" + agent["terminal_id"] + "/" + base64.urlsafe_b64encode(json.dumps(proof, sort_keys=True).encode()).decode().rstrip("=")
+            self._reconnecting.add(self.agent_id(host, thread_id))
+            try:
+                runtime = self.terminals.create({"session_id": agent["terminal_id"], "host": host, "transport": "ssh", "target": self.host(host)["target"],
+                    "cwd": marker, "title": agent["alias"], "cols": 100, "rows": 30})
+                after = self._probe_remote_terminal(host, agent["terminal_id"])
+                if not after.get("ok"):
+                    return finish("reconnect_unknown", "已请求原显示附着，但后续身份核验暂不可用；不重复重连或发送任务。", "inspect_connection", "unknown")
+                if not after.get("exists") or after.get("identity") != proof:
+                    return finish("original_session_changed", "原 tmux/pane 身份已经改变；未确认恢复，不发送输入，也不关闭其他工作进程。", "inspect_connection", "blocked")
+                current = self.terminals.snapshot(agent["terminal_id"], 60)
+                view = self.get_agent(host, thread_id, sessions=[current])
+                if not view["connected"]:
+                    return finish("route_unavailable", "原显示附着仍未连接；请检查 SSH 上游或隧道路由，再由用户重试。", "check_connection", "blocked", view)
+                code = "reconnected" if view["agent_ready"] else "awaiting_foreground"
+                message = "已重新附着原终端并核验相同 tmux/pane；未重启 agent、未输入任务。" if view["agent_ready"] else "原终端显示已附着且身份一致；前台尚未就绪，请进入终端核对。"
+                self.record_event("agent_reconnected", host=host, thread_id=thread_id, terminal_id=agent["terminal_id"], origin=origin)
+                return finish(code, message, "open_terminal", "done", view)
+            except Exception:
+                return finish("reconnect_unknown", "原显示连接结果未知；请核对原终端和路由，不重放任务或自动重启。", "inspect_connection", "unknown")
+            finally:
+                self._reconnecting.discard(self.agent_id(host, thread_id))
 
     def split_agent_id(self, agent_id):
         parts = agent_id.split("::", 1)
@@ -490,6 +670,8 @@ class Hub:
         # User keystrokes can contain login secrets: forward without persisting.
         if origin != "ui":
             raise ValueError("输入来源必须为 ui 或 plugin。")
+        if self.agent_id(host, thread_id) in self._reconnecting:
+            raise ValueError("此终端正在核验原显示附着，请稍后输入；没有发送这些按键。")
         # No registry lock or slow process probe here: user keystrokes must reach
         # the broker during a CEO readiness probe and acquire its typing lease.
         agent = self.store.agent(host, thread_id)
@@ -734,6 +916,14 @@ class Hub:
             if controller_id is not None:
                 self._require_controller_scope(controller_id, host, thread_id)
             return result
+        if tool in ("update_agent", "reconnect_agent"):
+            if not arguments.get("request_key"):
+                raise ValueError("管理操作必须提供稳定 request_key。")
+            key = self._controller_key(controller_id, arguments["request_key"]) if controller_id is not None else arguments["request_key"]
+            if tool == "update_agent":
+                return self.update_agent(host, thread_id, alias=arguments.get("alias"), pinned=arguments.get("pinned"),
+                    origin="plugin", request_key=key, controller_id=controller_id)
+            return self.reconnect_agent(host, thread_id, origin="plugin", request_key=key, controller_id=controller_id)
         if tool in ("send_agent_message", "send_terminal_input"):
             if not arguments.get("request_key"):
                 raise ValueError("发送必须提供稳定 request_key。")
@@ -770,8 +960,10 @@ class Hub:
     def state(self, after=0):
         agents = self.attached_agents()
         connected = self.connected_hosts(agents)
+        events = self.store.recent_events(kinds=MANAGEMENT_EVENTS) if int(after) == 0 else self.store.events(after, kinds=MANAGEMENT_EVENTS)
         return {"version": VERSION, "controller": "codex-plugin", "legacy_scope_shared": True, "hosts": [{"id": h, **c, **self.connections.get(h, {}), "connected": h in connected} for h, c in self.hosts.items()],
-                "agents": agents, "events": self.store.events(after, kinds=MANAGEMENT_EVENTS), "outbox": self.store.outbox(), "approvals": []}
+                "agents": agents, "events": events, "cursor": self.store.event_cursor() if int(after) == 0 else (events[-1]["id"] if events else int(after)),
+                "outbox": self.store.outbox(), "approvals": []}
 
     def close(self):
         if self.stopping:

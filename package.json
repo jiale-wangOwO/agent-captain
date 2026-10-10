@@ -1,12 +1,12 @@
 {
   "name": "pron-hub-terminal",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "description": "Persistent shared terminals for PRON Hub (Personal Remote Ops & Nodes Hub)",
   "scripts": {
     "terminal-broker": "node terminal_broker.cjs",
     "test:terminal": "node --test tests/test_terminal_broker.cjs tests/test_terminal_foreground.cjs tests/test_ssh_command_eof.cjs tests/test_controller_protocol.cjs",
-    "test:ui": "node --test tests/test_terminal_ui_contract.cjs tests/test_terminal_wheel.cjs tests/test_terminal_render_sync.cjs tests/test_terminal_render_replay.cjs tests/test_terminal_geometry_race.cjs tests/test_terminal_disconnect_ui.cjs tests/test_host_display_refresh.cjs tests/test_conversation_output_ui.cjs tests/test_controller_ui.cjs"
+    "test:ui": "node --test tests/test_terminal_ui_contract.cjs tests/test_terminal_wheel.cjs tests/test_terminal_render_sync.cjs tests/test_terminal_render_replay.cjs tests/test_terminal_geometry_race.cjs tests/test_terminal_disconnect_ui.cjs tests/test_host_display_refresh.cjs tests/test_conversation_output_ui.cjs tests/test_controller_ui.cjs tests/test_worker_workbench_ui.cjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "0.11.0",

@@ -228,6 +228,11 @@ def create_server(hub, port=8766, token=None):
                     self.respond(200, hub.discover(body["host"], body.get("query", ""), body.get("cwd", ""), body.get("limit", 20)))
                 elif self.path == "/api/agents/attach":
                     self.respond(200, hub.attach_agent(body["host"], body["thread_id"], body.get("alias", "")))
+                elif self.path == "/api/agents/update":
+                    self.respond(200, hub.update_agent(body["host"], body["thread_id"], alias=body.get("alias"),
+                        pinned=body.get("pinned"), request_key=body.get("request_key")))
+                elif self.path == "/api/agents/reconnect":
+                    self.respond(200, hub.reconnect_agent(body["host"], body["thread_id"], request_key=body.get("request_key")))
                 elif self.path == "/api/terminals/create":
                     self.respond(200, hub.create_terminal(body["host"], body.get("cwd", ""), body["title"], body.get("thread_id"),
                         body.get("cols", 100), body.get("rows", 30), body.get("active") is True, body.get("request_key")))

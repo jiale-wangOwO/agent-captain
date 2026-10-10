@@ -6,9 +6,9 @@
 
 **Personal Remote Ops & Nodes Hub**：通过一个 Codex 主控对话，协调你选定的本机和远程 Linux 工作 agent。
 
-[English](README.md) · [管理会话实现与边界](docs/management-session-product.md) · [SSH 传输接口约定](docs/ssh-transport.md) · [Codex 后台维护](docs/codex-maintenance.md) · [安全说明](SECURITY.md)
+[English](README.md) · [Agent 工作台](docs/agent-workbench.md) · [管理会话实现与边界](docs/management-session-product.md) · [SSH 传输接口约定](docs/ssh-transport.md) · [Codex 后台维护](docs/codex-maintenance.md) · [安全说明](SECURITY.md)
 
-PRON Hub 是单用户、本地优先的连接服务。**0.5 版本新增管理会话 MVP**：从 Hub 创建一条真实的本机 Codex 对话，自动准备管理角色、工具和明确的工作范围。该功能仍属实验性，单元测试不等于实际 Codex 版本、供应商或桌面交接已获得认证。
+PRON Hub 是单用户、本地优先的连接服务。**0.6 版本新增 Agent 工作台**，把各机器上已登记的工作终端集中管理，支持搜索、筛选、置顶、改名和安全重连。0.5 引入的管理会话 MVP 可从 Hub 创建一条真实的本机 Codex 对话，准备管理角色、工具和明确的工作范围。管理会话仍属实验性，单元测试不等于实际 Codex 版本、供应商或桌面交接已获得认证。
 
 **主控模型就是这条原生 Codex 对话里的模型**，担当你的 CEO：调查进展、传达任务、汇总证据和待决事项。用户保留最终决策权。Hub 不另建模型服务，不向工作 agent 注入 CEO 角色，也不会自动唤醒空闲对话。每个工作 agent 仍使用真实终端，你可以像平常一样启动 Codex、直接参与对话。
 
@@ -91,6 +91,10 @@ python service.py status
 状态为 **`desktop_unverified`（桌面接管未核验）**，不是已经证明的无缝交接。打开链接不能证明桌面端取得会话，或重新加载了工具、项目信任、模型和供应商设置；需在桌面端核对。桌面入口使用期间，Hub 不继续写入。返回 Hub 前先关闭另一入口，再点击 **「继续管理」**，按准确原 Session 尝试恢复，不重新初始化或重发业务任务；占用或配置冲突会明确报出。
 
 ## 连接工作 agent
+
+日常使用不需要先逐台机器找终端。**工作台默认跨机器展示「常用与已连接」的 agent**（已连接、置顶或允许管理；已激活但断线的工作仍保留），旧记录在「全部登记」找回。可按机器、状态、名称或项目路径筛选；把常用工作置顶，并改成容易辨认的名称。卡片上直接打开共享终端、读取真实会话输出或重新连接。筛选、置顶、改名和切换显示都不改变工作进程或管理者授权。
+
+「重新连接」只重附着原来的远程持久终端，绝不自动新建 shell、执行 `codex resume` 或重发任务。原终端已经结束、本机进程不能恢复或 SSH 路由不可用时，会显示下一步；需要新工作时明确点击「新终端」。外部 tunnel 的恢复仍由提供 SSH 的工具处理，Hub 不替你重启模型或共享隧道服务。详细交互和 MCP 契约见 [Agent 工作台](docs/agent-workbench.md)。
 
 1. 选择或配置机器，点击「新终端」。可以浏览目录、输入该机器上的绝对路径，或留空进入用户主目录后自行 `cd`。
 2. 在真实终端中运行 `codex`、`codex-switch` 或自己的启动器。供应商选择、登录、密钥、OTP、审批均由用户处理。

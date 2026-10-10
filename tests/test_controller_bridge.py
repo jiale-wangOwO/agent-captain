@@ -49,7 +49,7 @@ class ControllerBridgeTests(unittest.TestCase):
         return bridge.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "test"}}})
 
-    def test_scoped_initialize_passive_context_only_with_descriptor_auth_and_ninth_tool(self):
+    def test_scoped_initialize_passive_context_only_with_descriptor_auth_and_context_tool(self):
         bridge = mcp_bridge.McpBridge()
         response = self.initialize(bridge)
         self.assertIn("result", response)
@@ -57,7 +57,7 @@ class ControllerBridgeTests(unittest.TestCase):
         self.assertNotIn("private-controller-cap", json.dumps(response))
         bridge.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
         response = bridge.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        self.assertEqual(len(response["result"]["tools"]), 9)
+        self.assertEqual(len(response["result"]["tools"]), 11)
         self.assertEqual(response["result"]["tools"][-1]["name"], "get_controller_context")
         self.assertEqual(len(self.calls), 1)
 
@@ -82,7 +82,7 @@ class ControllerBridgeTests(unittest.TestCase):
             self.assertIn("result", self.initialize(bridge))
             bridge.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
             response = bridge.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-            self.assertEqual(len(response["result"]["tools"]), 8)
+        self.assertEqual(len(response["result"]["tools"]), 10)
 
     def test_custom_terminal_descriptor_and_logs_only_change_child_environment(self):
         runtime = Path(self.temp.name) / "broker-logs"

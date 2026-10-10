@@ -141,10 +141,11 @@ test('connected Refresh Screen reconstructs the same terminal without connect or
 
 test('offline reconnect still explicitly connects only the same owned terminal', async () => {
   const h = harness(); h.agent.connected = false;
+  h.route((url, options, fallback) => { if (url === '/api/agents/reconnect') { h.agent.connected = true; return reply({...h.agent, recovery: {code: 'connected', message: 'Original tmux attached'}}); } return fallback(url); });
   const reconnecting = h.context.reconnectTerminal(); await until(() => h.terminals.at(-1).pending.length === 1);
   h.terminals.at(-1).finishWrite(); await reconnecting;
-  const connect = h.network.filter(call => call.url === '/api/terminals/connect');
-  assert.equal(connect.length, 1); assert.deepEqual(JSON.parse(connect[0].options.body), {host: '316', thread_id: h.agent.thread_id});
+  const connect = h.network.filter(call => call.url === '/api/agents/reconnect');
+  assert.equal(connect.length, 1); assert.deepEqual(JSON.parse(connect[0].options.body), {host: '316', thread_id: h.agent.thread_id, request_key: 'render-request'});
   assert.equal(h.network.filter(call => call.url === '/api/terminals/create').length, 0);
 });
 

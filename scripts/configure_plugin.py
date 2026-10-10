@@ -36,7 +36,8 @@ def _json_bytes(value: Any) -> bytes:
 
 def configure_plugin(output: Path | str | None = None, *,
                      repo_root: Path | str | None = None,
-                     python_executable: Path | str | None = None) -> dict[str, Any]:
+                     python_executable: Path | str | None = None,
+                     legacy_ceo_identity: bool = False) -> dict[str, Any]:
     """Generate only into a new directory; never read live Hub/Codex state.
 
     ``repo_root`` and ``python_executable`` are injectable for isolated tests.
@@ -97,19 +98,40 @@ def configure_plugin(output: Path | str | None = None, *,
     # Keep the repo-discovered skill-only source catalog distinct from the
     # configured marketplace. Otherwise source selection could silently install
     # the unconfigured template under the same marketplace identity.
-    marketplace["name"] = MARKETPLACE_NAME
+    plugin_name = "ceo-hub" if legacy_ceo_identity else PLUGIN_NAME
+    marketplace_name = "ceo-hub-local" if legacy_ceo_identity else MARKETPLACE_NAME
+    server_name = "ceo_hub" if legacy_ceo_identity else "pron_hub"
+    if legacy_ceo_identity:
+        # Explicit compatibility output only. Never inspect installed caches or
+        # infer identity from user settings, and never copy any credentials.
+        try:
+            skill = prepared.pop("skills/pron-hub/SKILL.md").decode("utf-8")
+            readme = prepared["README.md"].decode("utf-8")
+        except UnicodeError:
+            raise ConfigurationError("The compatibility source text is not valid UTF-8. No output was generated.") from None
+        manifest["name"] = plugin_name
+        prepared[".codex-plugin/plugin.json"] = _json_bytes(manifest)
+        if not skill.startswith("---\nname: pron-hub\n") and not skill.startswith("---\r\nname: pron-hub\r\n"):
+            raise ConfigurationError("The source skill identity cannot be converted safely. No output was generated.")
+        prepared["skills/ceo-hub/SKILL.md"] = skill.replace("name: pron-hub", "name: ceo-hub", 1).encode("utf-8")
+        prepared["README.md"] = readme.replace(
+            "`pron-hub` skill", "`ceo-hub` compatibility skill", 1).encode("utf-8")
+    marketplace["name"] = marketplace_name
     marketplace["interface"] = {"displayName": "PRON Hub local tools"}
+    marketplace["plugins"][0]["name"] = plugin_name
+    marketplace["plugins"][0]["source"] = {"source": "local", "path": "./plugins/" + plugin_name}
 
-    plugin_output = destination / "plugins" / PLUGIN_NAME
+    plugin_output = destination / "plugins" / plugin_name
     bridge_output = plugin_output / "mcp_bridge.py"
-    mcp = {"mcpServers": {"pron_hub": {
+    mcp = {"mcpServers": {server_name: {
         "command": str(interpreter), "args": ["-u", str(bridge_output)],
         # This is a location only, never a copied/read credential. The cached
         # bridge and ordinary-shell web service must address the same checkout.
         "env": {"CEO_HUB_CONNECTION_FILE": str(root / ".runtime" / "service.json")}
     }}}
     marker = {"generator": "pron-hub-configure-plugin", "schema_version": GENERATOR_VERSION,
-              "plugin": PLUGIN_NAME, "plugin_version": manifest["version"],
+              "plugin": plugin_name, "plugin_version": manifest["version"],
+              "legacy_ceo_identity": bool(legacy_ceo_identity),
               "retain_generated_directory": True}
 
     # Reserve a new target exclusively. Do not replace it atomically via rename:
@@ -144,10 +166,11 @@ def configure_plugin(output: Path | str | None = None, *,
 
     # Quoted paths are display-only; the generator never invokes a shell.
     commands = [f'codex plugin marketplace add "{destination}"',
-                f"codex plugin add {PLUGIN_NAME}@{MARKETPLACE_NAME}"]
+                f"codex plugin add {plugin_name}@{marketplace_name}"]
     return {"marketplace_root": str(destination), "plugin_root": str(plugin_output),
-            "bridge": str(bridge_output), "plugin": f"{PLUGIN_NAME}@{MARKETPLACE_NAME}",
+            "bridge": str(bridge_output), "plugin": f"{plugin_name}@{marketplace_name}",
             "version": manifest["version"], "commands": commands,
+            "legacy_ceo_identity": bool(legacy_ceo_identity),
             "retain_generated_directory": True}
 
 
@@ -156,9 +179,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path,
                         help="New output directory (default: <checkout>/.runtime/plugin-marketplace). Existing targets are refused.")
     parser.add_argument("--json", action="store_true", help="Print generation metadata as JSON.")
+    parser.add_argument("--legacy-ceo-identity", action="store_true",
+                        help="Generate a CEO-compatible ceo-hub@ceo-hub-local package for an explicit same-identity upgrade; default PRON identity is unchanged.")
     args = parser.parse_args(argv)
     try:
-        result = configure_plugin(args.output)
+        result = configure_plugin(args.output, legacy_ceo_identity=args.legacy_ceo_identity)
     except ConfigurationError as exc:
         print(f"PRON Hub plugin: {exc}", file=sys.stderr)
         return 1

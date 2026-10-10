@@ -9,6 +9,13 @@ let terminalSession = null;
 let outputView = null, outputGeneration = 0, bindOutputTarget = null;
 let directoryTarget = null, directoryGeneration = 0, closeTarget = null, clipboardTarget = null, contextTerminal = null;
 const rendered = {hosts: '', agents: '', outbox: '', detail: ''};
+const workbenchStorageKey = 'pron-hub.worker-workbench.v1';
+let workbenchSaved = {};
+try { workbenchSaved = JSON.parse(window.localStorage?.getItem(workbenchStorageKey) || '{}') || {}; } catch (_) {}
+const agentFilters = {host: typeof workbenchSaved.host === 'string' ? workbenchSaved.host : '', query: typeof workbenchSaved.query === 'string' ? workbenchSaved.query : '', status: ['working', 'all', 'connected', 'attention', 'closed'].includes(workbenchSaved.status) ? workbenchSaved.status : 'working', active: !!workbenchSaved.active};
+let restoreAgentKey = agentKeyFromHash() || (typeof workbenchSaved.agent === 'string' ? workbenchSaved.agent : null), renameTarget = null;
+const reconnectOperations = new Map(Array.isArray(workbenchSaved.reconnect) ? workbenchSaved.reconnect.filter(entry => Array.isArray(entry) && typeof entry[0] === 'string' && typeof entry[1]?.requestKey === 'string') : []);
+const agentRecoveryNotices = new Map();
 const deliveryLabels = {queued: '已排队', waiting_for_agent: '等待在终端中启动工作 agent', human_busy: '等待你完成当前终端输入', blocked: '等待处理终端中的登录或审批', not_sent: '未发送', submitting: '输入提交中', submitted: '已写入终端', delivered: '已写入终端', completed: '该轮已结束', failed: '送达失败', interrupted: '已中断', scope_revoked: '已取消 · CEO 激活已撤销', unknown: '送达结果不确定 · 请核对终端', awaiting_connection: '等待终端连接'};
 const statusLabels = {shell: 'Shell 已就绪', running: '终端运行中', connected: '终端已连接', disconnected: '显示连接已断开', not_connected: '尚未连接终端', exited: '显示连接已结束', closed: '终端已关闭', closing: '正在关闭终端', close_unknown: '关闭结果未确认', error: '连接错误', unknown: '终端状态未知'};
 const disconnectedLabel = '显示连接已断开 · 工作进程未确认';
@@ -31,11 +38,43 @@ function hostDisplayStatus(host) {
 }
 const shortId = id => id ? String(id).slice(0, 8) + '…' + String(id).slice(-6) : '';
 const resumeCommand = id => `codex resume ${id}`;
+function agentKeyFromHash() { try { return new URLSearchParams(String(window.location?.hash || '').replace(/^#/, '')).get('agent'); } catch (_) { return null; } }
+function persistWorkbench() {
+  try { window.localStorage?.setItem(workbenchStorageKey, JSON.stringify({...agentFilters, agent: selectedAgent || restoreAgentKey, selectedHost, reconnect: [...reconnectOperations]})); } catch (_) {}
+}
+function updateAgentLocation() {
+  if (!window.history?.replaceState || !window.location) return;
+  const params = new URLSearchParams(String(window.location.hash || '').replace(/^#/, ''));
+  if (selectedAgent) params.set('agent', selectedAgent); else params.delete('agent');
+  window.history.replaceState(null, '', (window.location.pathname || '/') + (window.location.search || '') + (params.toString() ? '#' + params : ''));
+}
+function registeredAgent(key) { return state.agents.find(agent => agentKey(agent) === key || agent.agent_id === key || `${agent.host}::${agent.thread_id}` === key); }
+function agentNeedsAttention(agent) { return !isClosedAgent(agent) && (!!agent.management?.needs_attention || isClosingAgent(agent) || displayDisconnected(agent) || !!agent.blocked_reason || !!agent.error || ['setup_menu', 'approval', 'login', 'error', 'unknown'].includes(agent.state || agent.status) || !isTerminal(agent)); }
+function agentManagerGrant(agent) { const manager = window.PronController?.model?.controller; if (!manager) return null; const scope = manager.scope || manager.agent_ids || []; return scope.includes(agent.agent_id || `${agent.host}::${agent.thread_id}`); }
+function filteredAgents() {
+  const query = agentFilters.query.trim().toLocaleLowerCase();
+  return state.agents.filter(agent => (!agentFilters.host || agent.host === agentFilters.host)
+    && (!query || [agent.alias, agent.title, agent.cwd, agent.host_label, state.hosts.find(host => host.id === agent.host)?.label, agent.host].some(value => String(value || '').toLocaleLowerCase().includes(query)))
+    && (!agentFilters.active || agent.active)
+    && (agentFilters.status === 'closed' ? isClosedAgent(agent) : !isClosedAgent(agent))
+    && (agentFilters.status !== 'working' || agent.active || agent.pinned || isTerminal(agent) && !isClosingAgent(agent) && !displayDisconnected(agent))
+    && (agentFilters.status !== 'connected' || isTerminal(agent) && !isClosingAgent(agent) && !displayDisconnected(agent))
+    && (agentFilters.status !== 'attention' || agentNeedsAttention(agent)))
+    .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || String(a.alias || a.title || a.thread_id).localeCompare(String(b.alias || b.title || b.thread_id), 'zh-CN') || agentKey(a).localeCompare(agentKey(b)));
+}
+function renderWorkbenchFilters() {
+  const select = $('#agent-host-filter'); select.replaceChildren();
+  const all = node('option', '全部机器'); all.value = ''; select.append(all);
+  for (const host of state.hosts) { const option = node('option', host.label || host.id); option.value = host.id; select.append(option); }
+  select.value = agentFilters.host; $('#agent-status-filter').value = agentFilters.status;
+  $('#agent-search').value = agentFilters.query; $('#active-only').checked = agentFilters.active;
+  $('#all-machines').classList.toggle('selected', !agentFilters.host);
+}
 function dateText(value) { if (!value) return ''; const date = new Date(typeof value === 'number' ? value * (value < 1e12 ? 1000 : 1) : value); return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN'); }
 function toast(text) { $('#toast').textContent = text; $('#toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('#toast').hidden = true; }, 7500); }
 async function request(path, body) {
   const response = await fetch(path, body === undefined ? {credentials: 'same-origin', cache: 'no-store'} : {method: 'POST', credentials: 'same-origin', keepalive: path === '/api/terminals/input', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
-  const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || `请求失败 (${response.status})`); return data;
+  const data = await response.json().catch(() => ({})); if (!response.ok) { const error = new Error(typeof data.error === 'string' ? data.error : data.error?.message || `请求失败 (${response.status})`); error.status = response.status; error.code = data.code || data.error?.code; error.recovery = data.recovery; throw error; } return data;
 }
 async function action(element, task) { element.disabled = true; try { await task(); } catch (error) { toast(error.message); } finally { element.disabled = false; if (['terminal-connect', 'terminal-copy', 'terminal-paste'].includes(element.id)) renderDetail(); } }
 function button(text, className, onClick) { const element = node('button', text, className); element.type = 'button'; element.onclick = () => action(element, onClick); return element; }
@@ -46,7 +85,7 @@ function renderHosts() {
   const list = $('#hosts'); list.replaceChildren(); if (!state.hosts.length) empty(list, '尚未配置机器。点击 + 添加本机或 SSH 服务器。');
   for (const host of state.hosts) {
     const display = hostDisplayStatus(host);
-    const card = node('div', null, 'host-card' + (host.id === selectedHost ? ' selected' : '')); const select = button('', 'host-select', async () => selectHost(host.id));
+    const card = node('div', null, 'host-card' + (host.id === agentFilters.host ? ' selected' : '')); const select = button('', 'host-select', async () => selectHost(host.id));
     const name = node('span', null, 'host-name'); name.append(node('span', '', 'connection-dot' + (display.connected ? ' connected' : '')), node('strong', host.label || host.id));
     select.append(name, node('span', host.transport === 'local' ? '本机' : (host.target || host.targetAlias || 'SSH'), 'host-target')); card.append(select);
     const controls = node('div', null, 'host-controls'); controls.append(node('span', display.label, 'muted'), button('连接', 'text-button', async () => {
@@ -57,37 +96,85 @@ function renderHosts() {
     card.append(controls); if (host.error) card.append(node('p', host.error, 'host-error')); list.append(card);
   }
   $('#new-agent').disabled = !selectedHost; $('#discover-button').disabled = !selectedHost;
-  $('#machine-caption').textContent = currentHost() ? `当前机器：${currentHost().label || selectedHost}` : '先选择一台机器';
+  $('#machine-caption').textContent = agentFilters.host ? `仅看：${state.hosts.find(host => host.id === agentFilters.host)?.label || agentFilters.host}` : '跨机器查看 · 新终端使用当前选定机器';
+  renderWorkbenchFilters();
 }
 function selectHost(hostId) {
-  selectedHost = hostId; selectedAgent = null; historyGeneration++; resetConversationOutput(); disposeTerminal();
+  selectedHost = hostId; agentFilters.host = hostId;
   candidates = []; discoveryHost = null; $('#candidates-section').hidden = true;
-  renderHosts(); renderAgents(); renderDetail();
+  persistWorkbench(); renderHosts(); renderAgents(true); renderDetail();
 }
-async function selectAgent(agent) {
-  if (selectedAgent === agentKey(agent)) { if (terminalSession) terminalSession.term.focus(); return; }
-  selectedAgent = agentKey(agent); historyGeneration++; resetConversationOutput(); disposeTerminal(); renderAgents(); renderDetail();
-  if (isTerminal(agent)) await openTerminal(agent); else await readHistory();
+async function selectAgent(agent, options = {}) {
+  if (selectedAgent === agentKey(agent)) { if (options.focus && terminalSession) terminalSession.term.focus(); return; }
+  selectedAgent = agentKey(agent); selectedHost = agentFilters.host || agent.host; restoreAgentKey = null; historyGeneration++; resetConversationOutput(); disposeTerminal(); persistWorkbench(); updateAgentLocation(); renderHosts(); renderAgents(true); renderDetail();
+  if (isTerminal(agent)) await openTerminal(agent, {focus: !!options.focus}); else if (!options.restore) await readHistory();
 }
-function renderAgents() {
-  const list = $('#agents'); list.replaceChildren(); const matches = state.agents.filter(agent => agent.host === selectedHost && (!$('#active-only').checked || agent.active));
+function renderAgents(force = false) {
+  // A live registry update should not destroy a name being edited or steal its
+  // focus. Explicit filter/selection actions may redraw from the retained draft.
+  if (renameTarget?.rendered && !force) return;
+  const list = $('#agents'); list.replaceChildren(); const matches = filteredAgents();
   $('#registry-count').textContent = String(matches.length); $('#active-count').textContent = String(state.agents.filter(agent => agent.active).length);
-  if (!matches.length) empty(list, selectedHost ? '还没有工作终端。点击「新终端」，或查找已有 Codex 对话。' : '选择一台机器查看它的工作终端。');
+  const closedCount = state.agents.filter(isClosedAgent).length;
+  $('#agent-count-caption').textContent = `显示 ${matches.length} / ${state.agents.length} 个登记${agentFilters.status !== 'closed' && closedCount ? ` · ${closedCount} 个已关闭记录默认收起` : ''} · 连接状态不是任务完成状态`;
+  if (!matches.length) {
+    const copy = !state.agents.length ? '还没有登记工作会话。选择机器打开新终端，再按平常方式启动 Codex。' : agentFilters.status === 'closed' ? '没有符合筛选的已关闭记录。' : '没有符合筛选的工作会话；调整机器、名称或状态，已关闭记录可单独查看。';
+    empty(list, copy);
+    if (state.agents.length) list.append(button('清除筛选，查看工作会话', 'subtle agent-clear-filter', async () => clearAgentFilters()));
+  }
   for (const agent of matches) {
-    const terminal = isTerminal(agent), card = node('div', null, 'agent-card' + (agentKey(agent) === selectedAgent ? ' selected' : ''));
+    const terminal = isTerminal(agent), card = node('div', null, 'agent-card workbench-agent-card' + (agentKey(agent) === selectedAgent ? ' selected' : '') + (agent.pinned ? ' pinned' : ''));
+    const heading = node('div', null, 'agent-card-topline'); heading.append(node('span', agent.host_label || state.hosts.find(host => host.id === agent.host)?.label || agent.host, 'agent-host-label'));
+    const pin = button(agent.pinned ? '★' : '☆', 'agent-pin-button' + (agent.pinned ? ' pinned' : ''), async () => updateAgent(agent, {pinned: !agent.pinned})); pin.setAttribute('aria-label', `${agent.pinned ? '取消置顶' : '置顶'} ${agent.alias || agent.title || shortId(agent.thread_id)}`); pin.setAttribute('aria-pressed', String(!!agent.pinned)); heading.append(pin); card.append(heading);
     const open = button('', 'agent-select', async () => selectAgent(agent));
     const status = terminal ? isClosedAgent(agent) || isClosingAgent(agent) ? statusLabels[agent.status || agent.state] || '终端已暂停' : displayDisconnected(agent) ? disconnectedLabel : agent.command ? `显示连接已连接 · ${agent.command}` : '显示连接已连接' : '尚未连接终端';
     open.append(node('strong', agent.alias || agent.title || shortId(agent.thread_id)), node('span', status, 'agent-meta'), node('span', agent.cwd || shortId(agent.thread_id), 'agent-id')); card.append(open);
+    if (agent.management?.label) card.append(node('span', agent.management.label, 'agent-management-label' + (agentNeedsAttention(agent) ? ' attention' : '')));
+    const grant = agentManagerGrant(agent), grantRow = node('div', null, 'agent-scope-row');
+    grantRow.append(node('span', grant === true ? '当前主控已授权' : grant === false ? '当前主控未授权' : '管理会话范围尚未设置', 'badge' + (grant ? ' active-badge' : '')));
+    if (grant !== null && window.PronController?.openSettings) grantRow.append(button('管理范围', 'text-button', async () => window.PronController.openSettings(true))); card.append(grantRow);
+    const quick = node('div', null, 'agent-quick-actions');
+    quick.append(button(terminal ? '打开终端' : '查看记录', 'subtle', async () => selectAgent(agent)));
+    if (terminal) quick.append(button('会话输出', 'subtle', async () => { await selectAgent(agent); if (selectedAgent === agentKey(agent)) await readConversationOutput(); }));
+    if (terminal && !isClosedAgent(agent) && !isClosingAgent(agent) && displayDisconnected(agent) && agent.management?.primary_action !== 'none') quick.append(button('重连原终端', 'agent-reconnect-button', async () => { await selectAgent(agent); if (selectedAgent === agentKey(agent)) await reconnectTerminal(); }));
+    card.append(quick);
+    const more = node('details', null, 'agent-more'), summary = node('summary', '更多'); more.append(summary);
+    const moreActions = node('div', null, 'agent-more-actions'); moreActions.append(button('重命名', 'text-button', async () => openAgentRename(agent)), button('复制直达链接', 'text-button', async () => copyAgentLink(agent)));
+    if (terminal && !isClosedAgent(agent) && !isClosingAgent(agent)) moreActions.append(button('关闭终端…', 'text-button agent-close-link', async () => { await selectAgent(agent); if (selectedAgent === agentKey(agent)) openCloseTerminal(); })); more.append(moreActions); card.append(more);
+    if (renameTarget?.key === agentKey(agent)) {
+      const form = node('form', null, 'agent-inline-rename'), input = node('input'); input.value = renameTarget.value; input.maxLength = 200; input.required = true; input.setAttribute('aria-label', '工作会话新名称'); input.disabled = renameTarget.saving;
+      input.oninput = () => { renameTarget.value = input.value; };
+      const save = node('button', '保存'); save.type = 'submit'; save.disabled = renameTarget.saving;
+      form.onsubmit = event => { event.preventDefault(); void action(save, () => saveAgentRename(agent)); };
+      form.append(input, save, button('取消', 'text-button', async () => { renameTarget = null; renderAgents(true); })); card.append(form); renameTarget.rendered = true;
+      if (renameTarget.focus) { renameTarget.focus = false; requestAnimationFrame(() => input.focus()); }
+    }
     if (terminal) {
       const label = node('label', null, 'activation'), checkbox = node('input'); checkbox.type = 'checkbox'; checkbox.checked = !!agent.active;
       checkbox.disabled = isClosedAgent(agent) || isClosingAgent(agent);
-      checkbox.setAttribute('aria-label', `激活 ${agent.alias || agent.thread_id} 的 CEO 管理权限`);
+      checkbox.setAttribute('aria-label', `允许 ${agent.alias || agent.thread_id} 进入管理授权名单`);
       checkbox.onchange = async () => { checkbox.disabled = true; try { await request('/api/agents/activate', {host: agent.host, thread_id: agent.thread_id, active: checkbox.checked}); await refresh(true); } catch (error) { checkbox.checked = !!agent.active; toast(error.message); } finally { checkbox.disabled = false; } };
-      const activationLabel = isClosedAgent(agent) ? '已关闭 · 保留记录' : isClosingAgent(agent) ? '已暂停 · 待核对关闭结果' : agent.active ? 'CEO 已激活' : '未激活 · 可直接使用';
+      const activationLabel = isClosedAgent(agent) ? '已关闭 · 保留记录' : isClosingAgent(agent) ? '已暂停 · 待核对关闭结果' : agent.active ? '可供 CEO 管理 · 旧插件仍全局' : '仅直接使用 · 未加入管理名单';
       label.append(checkbox, node('span', activationLabel)); card.append(label);
     } else card.append(button('在终端中继续', 'text-button history-open', async () => openCreate(agent, agent.host)));
     list.append(card);
   }
+}
+function clearAgentFilters() { agentFilters.host = ''; agentFilters.query = ''; agentFilters.status = 'working'; agentFilters.active = false; persistWorkbench(); renderHosts(); renderAgents(true); }
+async function updateAgent(agent, fields) { const result = await request('/api/agents/update', {host: agent.host, thread_id: agent.thread_id, ...fields}); const updated = result.agent || result; if (updated.host === agent.host && updated.thread_id === agent.thread_id) Object.assign(agent, updated); await refresh(true); renderAgents(true); renderDetail(); }
+function openAgentRename(agent) { renameTarget = {key: agentKey(agent), value: agent.alias || agent.title || '', focus: true, saving: false, rendered: false}; renderAgents(true); }
+async function saveAgentRename(agent) {
+  const target = renameTarget; if (!target || target.key !== agentKey(agent) || target.saving) return;
+  const alias = target.value.trim(); if (!alias || alias.length > 200) throw new Error('名称不能为空，最多 200 个字符。');
+  target.saving = true;
+  try { await updateAgent(agent, {alias}); if (renameTarget === target) { renameTarget = null; renderAgents(true); } }
+  finally { target.saving = false; }
+}
+async function copyAgentLink(agent) {
+  if (!window.location?.origin) throw new Error('当前浏览器地址不可用。');
+  const url = window.location.origin + (window.location.pathname || '/') + '#agent=' + encodeURIComponent(agentKey(agent));
+  if (!navigator.clipboard?.writeText) throw new Error('浏览器未允许复制链接，请使用地址栏中的直达地址。');
+  await navigator.clipboard.writeText(url); toast('工作会话直达链接已复制；打开链接只显示原对象，不会启动或接管。');
 }
 function renderCandidates() {
   $('#candidates-section').hidden = false; const list = $('#candidates'); list.replaceChildren();
@@ -100,7 +187,7 @@ function renderCandidates() {
   }
 }
 function renderDetail() {
-  const agent = currentAgent(); $('#detail-empty').hidden = !!agent; $('#agent-detail').hidden = !agent; if (!agent) return;
+  const agent = currentAgent(); renderAgentRecoveryNotice(agent); $('#detail-empty').hidden = !!agent; $('#agent-detail').hidden = !agent; if (!agent) return;
   if (outputView?.key === selectedAgent && outputView.terminalId !== agent.terminal_id) resetConversationOutput();
   const terminal = isTerminal(agent), host = state.hosts.find(item => item.id === agent.host);
   $('#detail-host').textContent = host?.label || agent.host; $('#detail-name').textContent = agent.alias || agent.title || shortId(agent.thread_id);
@@ -124,6 +211,10 @@ function renderDetail() {
   $('#terminal-output').disabled = !terminal;
   $('#terminal-bind-output').disabled = !terminal;
   if (outputView?.key === selectedAgent && outputView.open) renderOutputBinding(agent);
+}
+function renderAgentRecoveryNotice(agent = currentAgent()) {
+  const message = agent ? agentRecoveryNotices.get(agentKey(agent)) || agent.recovery?.message || '' : '';
+  $('#agent-recovery-notice').textContent = message; $('#agent-recovery-notice').hidden = !message;
 }
 function showTerminalError(text) { $('#terminal-error').textContent = text; $('#terminal-error').hidden = !text; }
 function renderTerminalErrors(session) {
@@ -149,6 +240,10 @@ function terminalApiIdentity(session) { return session.kind === 'controller' ? {
 function terminalStatusElement(session) { return $(session.kind === 'controller' ? '#controller-terminal-status' : '#terminal-status'); }
 function updateDisplayConnection(session, connected) {
   if (session.kind === 'controller') { window.PronController?.updateDisplayConnection(session, connected); return; }
+  // Canonical output can reconcile a lost successful reconnect response for
+  // this exact registered display. Never use a cached machine check for this.
+  const recoveryOperation = reconnectOperations.get(session.key);
+  if (connected && recoveryOperation && !recoveryOperation.acknowledged) { recoveryOperation.acknowledged = true; persistWorkbench(); }
   const changed = session.displayConnected !== connected;
   session.displayConnected = connected;
   if (!connected) {
@@ -271,7 +366,7 @@ async function writeTerminalFrame(session, data, reset, cols, rows) {
     session.writingFrame = false;
   }
 }
-async function openTerminal(agent) {
+async function openTerminal(agent, options = {}) {
   if (terminalSession?.key === agentKey(agent)) return;
   disposeTerminal();
   if (!window.Terminal || !window.FitAddon?.FitAddon) throw new Error('终端组件未加载。请刷新页面；若仍失败，请检查后台的本地 xterm 资源。');
@@ -291,7 +386,7 @@ async function openTerminal(agent) {
   session.observer = new ResizeObserver(() => { if (!session.disposed && $('#terminal').clientWidth > 0) safeFit(session); }); session.observer.observe($('#terminal'));
   requestAnimationFrame(() => safeFit(session));
   await pollTerminal(session);
-  if (!session.disposed && !session.closed) term.focus();
+  if (options.focus && !session.disposed && !session.closed && sessionConnected(session)) term.focus();
 }
 function flushTerminalInput(session) {
   clearTimeout(session.inputTimer); session.inputTimer = null;
@@ -382,7 +477,31 @@ async function pollTerminal(session) {
 async function reconnectTerminal() {
   const agent = currentAgent(); if (!isTerminal(agent)) return;
   if (!displayDisconnected(agent)) { disposeTerminal(); await openTerminal(agent); return; }
-  await request('/api/terminals/connect', {host: agent.host, thread_id: agent.thread_id}); disposeTerminal(); await refresh(true); await openTerminal(currentAgent() || agent);
+  const key = agentKey(agent), previous = reconnectOperations.get(key);
+  const operation = previous && !previous.acknowledged ? previous : {requestKey: crypto.randomUUID(), acknowledged: false}; reconnectOperations.set(key, operation); persistWorkbench();
+  let result;
+  try { result = await request('/api/agents/reconnect', {host: agent.host, thread_id: agent.thread_id, request_key: operation.requestKey}); }
+  catch (error) {
+    const recovery = error.recovery;
+    const message = recovery?.message || `重连结果未确认：${error.message}。保留原请求键，请核对这个终端；不会新建、resume 或重发任务。`;
+    agentRecoveryNotices.set(key, message); agent.recovery = recovery || {code: 'unknown', message};
+    if (selectedAgent === key) renderAgentRecoveryNotice(agent);
+    throw error;
+  }
+  const updated = result.agent || result;
+  if (updated.host === agent.host && updated.thread_id === agent.thread_id) Object.assign(agent, updated);
+  const recovery = result.recovery || {};
+  agentRecoveryNotices.set(key, recovery.message || '已核对原终端的重连请求。重新连接不代表 Codex 已恢复或任务已完成。');
+  if (selectedAgent === key) renderAgentRecoveryNotice(agent);
+  if (!['unknown', 'reconnect_unknown', 'delivery_unknown'].includes(recovery.code) && recovery.next_action !== 'reconcile') operation.acknowledged = true;
+  persistWorkbench();
+  await refresh(true);
+  if (selectedAgent !== key) return result;
+  const current = currentAgent() || agent;
+  const connected = result.connected === true || updated.connected === true || ['connected', 'already_connected', 'reattached', 'reconnected'].includes(recovery.code);
+  if (connected) { disposeTerminal(); await openTerminal(current); }
+  else { if (terminalSession?.key === key) updateDisplayConnection(terminalSession, false); renderDetail(); }
+  return result;
 }
 function messageText(message) { if (message.text != null) return String(message.text); if (typeof message.content === 'string') return message.content; return (message.content || []).map(item => item.text || '').filter(Boolean).join('\n'); }
 function resetConversationOutput() {
@@ -539,7 +658,7 @@ function renderOutbox() {
 function renderEvents(events) {
   for (const item of events || []) { const id = item.id ?? `${item.kind}:${JSON.stringify(item.data)}`; activity.set(id, item); if (typeof item.id === 'number') cursor = Math.max(cursor, item.id); }
   while (activity.size > 60) activity.delete(activity.keys().next().value); const list = $('#activity'); list.replaceChildren();
-  const kinds = {terminal_created: '打开工作终端', terminal_connected: '终端重新连接', terminal_exited: '显示连接已结束', terminal_closed: '关闭工作终端', terminal_state: '终端状态更新', terminal_output: '终端输出更新', terminal_input_submitted: 'CEO 终端输入送达', message_submitted: 'CEO 消息提交', agent_created: '创建工作终端', agent_attached: '连接工作终端', agent_activated: '纳入 CEO 管理', agent_deactivated: '移出 CEO 管理', host_connected: '机器连接', host_unavailable: '机器连接不可用', host_configured: '机器配置更新', error: '后台错误'};
+  const kinds = {terminal_created: '打开工作终端', terminal_connected: '终端重新连接', terminal_exited: '显示连接已结束', terminal_closed: '关闭工作终端', terminal_state: '终端状态更新', terminal_output: '终端输出更新', terminal_input_submitted: 'CEO 终端输入送达', message_submitted: 'CEO 消息提交', agent_created: '创建工作终端', agent_attached: '连接工作终端', agent_updated: '工作名称或置顶已更新', agent_reconnected: '已附着原工作终端', agent_activated: '纳入 CEO 管理', agent_deactivated: '移出 CEO 管理', host_connected: '机器连接', host_unavailable: '机器连接不可用', host_configured: '机器配置更新', error: '后台错误'};
   for (const item of Array.from(activity.values()).reverse().slice(0, 12)) { const data = item.data || {}, row = node('article', null, 'event-row'); row.append(node('strong', kinds[item.kind] || item.kind || '后台事件'), node('span', [data.host, shortId(data.thread_id), dateText(item.time || item.created_at || item.timestamp)].filter(Boolean).join(' · '), 'muted')); if (data.text || data.reason) row.append(node('p', String(data.text || data.reason).slice(0, 280))); list.append(row); }
   if (!list.childElementCount) empty(list, '暂无连接事件。');
 }
@@ -550,13 +669,15 @@ async function refresh(force = false) {
   try {
     const next = await request('/api/state?after=' + cursor);
     for (const field of ['hosts', 'agents', 'outbox']) state[field] = Array.isArray(next[field]) ? next[field] : [];
-    if (!selectedHost || !state.hosts.some(host => host.id === selectedHost)) selectedHost = state.hosts[0]?.id || null;
+    if (!selectedHost || !state.hosts.some(host => host.id === selectedHost)) selectedHost = state.hosts.find(host => host.id === workbenchSaved.selectedHost)?.id || state.hosts[0]?.id || null;
+    if (agentFilters.host && !state.hosts.some(host => host.id === agentFilters.host)) agentFilters.host = '';
+    if (restoreAgentKey && !selectedAgent) { const restored = registeredAgent(restoreAgentKey); if (restored) await selectAgent(restored, {restore: true}); }
     if (selectedAgent && !currentAgent()) { selectedAgent = null; historyGeneration++; resetConversationOutput(); disposeTerminal(); }
     // Registry updates never replace the terminal DOM or focus it: typing, selection and dimensions stay intact.
     // Host cards depend on live display counts, not just the saved machine
     // configuration. Keep output sequence/text out of this cache signature.
     const hostDisplays = state.hosts.map(host => [host.id, hostDisplayStatus(host)]);
-    const parts = {hosts: JSON.stringify([state.hosts, selectedHost, hostDisplays]), agents: JSON.stringify([state.agents, selectedHost, selectedAgent, $('#active-only').checked]), outbox: JSON.stringify(state.outbox), detail: JSON.stringify(currentAgent() || null)};
+    const parts = {hosts: JSON.stringify([state.hosts, selectedHost, hostDisplays, agentFilters.host]), agents: JSON.stringify([state.agents, selectedAgent, agentFilters]), outbox: JSON.stringify(state.outbox), detail: JSON.stringify(currentAgent() || null)};
     for (const [key, render] of Object.entries({hosts: renderHosts, agents: renderAgents, outbox: renderOutbox, detail: renderDetail})) if (rendered[key] !== parts[key]) { rendered[key] = parts[key]; render(); }
     renderEvents(next.events); $('#status').textContent = `后台服务在线${next.version ? ' · ' + next.version : ''}`; $('#status').classList.add('online');
   } catch (error) { $('#status').textContent = '后台服务未连接'; $('#status').classList.remove('online'); }
@@ -664,8 +785,13 @@ $('#discover-form').onsubmit = event => { event.preventDefault(); action($('#dis
   const result = await request('/api/agents/discover', {host, query: $('#discovery-query').value.trim(), cwd: $('#discovery-cwd').value.trim(), limit: 20});
   if (selectedHost !== host) return; discoveryHost = host; candidates = result.threads || []; $('#candidate-note').textContent = '这里只查找历史记录；连接会打开 shell，由你选择模型和运行 resume。'; renderCandidates();
 }); };
-$('#clear-candidates').onclick = () => { $('#candidates-section').hidden = true; candidates = []; }; $('#active-only').onchange = renderAgents;
-$('#new-agent').onclick = () => { if (currentHost()) openCreate(); };
+$('#clear-candidates').onclick = () => { $('#candidates-section').hidden = true; candidates = []; };
+$('#active-only').onchange = () => { agentFilters.active = $('#active-only').checked; persistWorkbench(); renderAgents(true); };
+$('#agent-search').oninput = () => { agentFilters.query = $('#agent-search').value; persistWorkbench(); renderAgents(true); };
+$('#agent-host-filter').onchange = () => { agentFilters.host = $('#agent-host-filter').value; if (agentFilters.host) selectedHost = agentFilters.host; persistWorkbench(); renderHosts(); renderAgents(true); };
+$('#agent-status-filter').onchange = () => { agentFilters.status = $('#agent-status-filter').value; persistWorkbench(); renderAgents(true); };
+$('#all-machines').onclick = () => { agentFilters.host = ''; persistWorkbench(); renderHosts(); renderAgents(true); };
+$('#new-agent').onclick = () => { if (currentHost()) openCreate(null, agentFilters.host || selectedHost); };
 $('#continue-terminal').onclick = () => { const agent = currentAgent(); if (agent) openCreate(agent, agent.host); };
 $('#browse-directory').onclick = openDirectories;
 $('#directory-path-form').onsubmit = event => { event.preventDefault(); void loadDirectory($('#directory-path').value.trim()); };
@@ -725,4 +851,5 @@ $('#clipboard-form').onsubmit = event => { event.preventDefault(); action($('#cl
 $('#clipboard-dialog').addEventListener('close', () => { clipboardTarget = null; $('#clipboard-text').value = ''; $('#clipboard-text').readOnly = false; });
 $('#copy-resume').onclick = () => action($('#copy-resume'), async () => { await navigator.clipboard.writeText($('#resume-command').textContent); toast('命令已复制。请在终端中自行粘贴并执行。'); });
 window.addEventListener('beforeunload', () => { if (terminalSession?.input) flushTerminalInput(terminalSession); });
+window.addEventListener('hashchange', () => { const key = agentKeyFromHash(), agent = key ? registeredAgent(key) : null; if (agent && agentKey(agent) !== selectedAgent) void selectAgent(agent, {restore: true}).catch(error => toast(error.message)); });
 refresh(); setInterval(refresh, 3000);

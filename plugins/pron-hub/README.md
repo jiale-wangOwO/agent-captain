@@ -3,6 +3,14 @@
 This package provides the `pron-hub` skill for acting as the user's CEO in the
 current Codex chat. It does not start another model or select a model provider.
 
+The management tools provide a scoped cached overview, worker display aliases /
+pins (`update_agent`), and user-requested display reattachment to an existing
+SSH tmux session (`reconnect_agent`). A reconnect never starts Codex, resumes a
+conversation, replays input, restarts an external tunnel, or substitutes a new
+worker if the original tmux session is missing. Metadata changes do not grant
+access. Inspect live evidence for the selected worker rather than treating the
+cached overview as a fresh connectivity check.
+
 This is the **legacy existing-chat integration**. Its service credential can
 access the Hub's shared global activation list; it is not automatically narrowed
 by a new management session's per-controller grants. For scoped management,
@@ -37,6 +45,29 @@ update, choose a new output directory, for example:
 python scripts/configure_plugin.py --output .runtime/plugin-marketplace-v2
 ```
 
+To upgrade an existing `ceo-hub@ceo-hub-local` installation without introducing
+a second plugin identity, explicitly generate a compatibility package instead:
+
+```sh
+python scripts/configure_plugin.py --legacy-ceo-identity --output .runtime/plugin-marketplace-ceo-v0.6.0
+```
+
+This keeps the plugin name `ceo-hub`, skill name `ceo-hub`, marketplace name
+`ceo-hub-local`, and MCP server key `ceo_hub`, while the displayed product name
+is PRON Hub. It only creates a new retained directory: it does not inspect or
+edit installed caches, `config.toml`, authentication, or running services. The
+normal command still generates `pron-hub@pron-hub-local`. Install only the
+identity you intend to use, not both, to avoid duplicate tools.
+
+Review the generated commands before registration. A running MCP process and
+its discovered tool list do not hot-reload after source changes: reload that
+MCP connection or reopen the controlling chat and verify `tools/list` includes
+`update_agent` and `reconnect_agent`, with server version `0.6.0`. Updating the
+installed skill/manifest is separate from replacing a bridge file; local plugin
+cache loading may require an app reload or restart. Do not restart the terminal
+broker or a worker to refresh plugin tools.
+
 This is a local desktop/CLI integration. It is not a hosted plugin listing and
 does not make a local terminal service available to cloud clients. The existing
-`ceo-hub` plugin identity and installed caches are not modified by this package.
+`ceo-hub` plugin identity and installed caches are not modified merely by
+generating this package; any explicit installation is a separate user action.

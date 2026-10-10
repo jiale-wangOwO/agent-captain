@@ -1,5 +1,8 @@
 """Pure helper validation/rollback tests; no SSH, PTY, model or user process."""
 import importlib.util
+import base64
+import io
+import json
 import os
 import signal
 import struct
@@ -8,7 +11,7 @@ import threading
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 
 if os.name == "nt":
@@ -110,6 +113,85 @@ class BridgeTests(unittest.TestCase):
         value = self.attachment()
         with patch.object(bridge.fcntl, "ioctl", side_effect=AssertionError("no mutation")), patch.object(bridge.os, "kill", side_effect=AssertionError("no signal")), self.assertRaises(bridge.BridgeError):
             value.resize(0, 30)
+
+    def proof(self):
+        return {"name": "ceohub-0123456789abcdef01234567", "session": "$11", "created": 1234,
+                "pane": "%20", "pane_pid": 777777, "pane_start_ticks": 888888}
+
+    def strict_attachment(self):
+        value = self.attachment()
+        value.require_existing = True
+        value.expected_identity = self.proof()
+        value.cwd = "/work/project"
+        value.child, value.listener, value.worker, value.socket_inode = None, None, None, None
+        value.path = Mock()
+        value.path.lstat.return_value = types.SimpleNamespace(st_ino=123)
+        return value
+
+    def test_existing_marker_binds_exact_session_and_bounded_fingerprint(self):
+        proof = self.proof()
+        marker = bridge.EXISTING_MARKER + proof["name"] + "/" + base64.urlsafe_b64encode(json.dumps(proof).encode()).decode().rstrip("=")
+        cwd, strict, decoded = bridge.attach_directory(marker, proof["name"])
+        self.assertEqual((cwd, strict, decoded), ("", True, proof))
+        self.assertEqual(bridge.attach_directory("/work/project", proof["name"]), ("/work/project", False, None))
+        for invalid in (bridge.EXISTING_MARKER + "foreign", marker + "/extra", "/.__pronhub_existing_bad__/" + proof["name"]):
+            with self.assertRaises(bridge.BridgeError):
+                bridge.attach_directory(invalid, proof["name"])
+
+    def test_missing_strict_original_never_starts_shell_or_display(self):
+        value = self.strict_attachment()
+        with patch.object(bridge, "apply_winsize"), patch.object(bridge, "probe_existing_session", return_value={"ok": True, "exists": False}), \
+                patch.object(bridge, "tmux") as tmux, patch.object(bridge.subprocess, "Popen") as spawn:
+            with self.assertRaisesRegex(bridge.BridgeError, "replacement was not created"):
+                value.run()
+        tmux.assert_not_called()
+        spawn.assert_not_called()
+
+    def test_same_name_replacement_before_attach_is_rejected(self):
+        value = self.strict_attachment()
+        replacement = self.proof() | {"session": "$12", "pane_pid": 777778}
+        with patch.object(bridge, "apply_winsize"), patch.object(bridge, "probe_existing_session", return_value={"ok": True, "exists": True, "identity": replacement}), \
+                patch.object(bridge, "tmux") as tmux, patch.object(bridge.subprocess, "Popen") as spawn:
+            with self.assertRaisesRegex(bridge.BridgeError, "identity changed"):
+                value.run()
+        tmux.assert_not_called()
+        spawn.assert_not_called()
+
+    def test_close_recreate_race_attaches_only_immutable_id_and_ends_only_own_display(self):
+        value = self.strict_attachment()
+        replacement = self.proof() | {"session": "$12", "pane_pid": 777778}
+        child = Mock()
+        child.pid = 999999
+        child.poll.return_value = None
+        socket_mock = Mock()
+        with patch.object(bridge, "apply_winsize"), patch.object(bridge, "probe_existing_session", side_effect=[
+            {"ok": True, "exists": True, "identity": self.proof()}, {"ok": True, "exists": True, "identity": replacement}]), \
+                patch.object(bridge.subprocess, "run", return_value=types.SimpleNamespace(returncode=0)), \
+                patch.object(bridge.subprocess, "Popen", return_value=child) as spawn, patch.object(bridge, "tmux") as tmux, \
+                patch.object(bridge.socket, "socket", return_value=socket_mock), patch.object(bridge.socket, "AF_UNIX", 1, create=True), \
+                patch.object(bridge.os, "umask", return_value=0o077):
+            with self.assertRaisesRegex(bridge.BridgeError, "identity changed"):
+                value.run()
+            value.cleanup()
+        self.assertEqual(spawn.call_args.args[0], ["tmux", "-u", "attach-session", "-t", "$11"])
+        self.assertNotIn("new-session", [call.args[0] for call in tmux.call_args_list])
+        self.assertTrue(all(call.args[2] == "$11" for call in tmux.call_args_list))
+        child.terminate.assert_called_once_with()
+        child.kill.assert_not_called()
+
+    def test_probe_reads_exact_session_and_selected_kernel_identity_only(self):
+        proof = self.proof()
+        fields = ["S"] + ["1"] * 19
+        fields[19] = str(proof["pane_start_ticks"])
+        raw = (str(proof["pane_pid"]) + " (bash) " + " ".join(fields)).encode()
+        with patch.object(bridge.subprocess, "run", return_value=types.SimpleNamespace(returncode=0)) as run, \
+                patch.object(bridge, "tmux", return_value="\t".join(str(proof[k]) for k in ("name", "session", "created", "pane", "pane_pid"))) as tmux, \
+                patch.object(bridge.Path, "open", return_value=io.BytesIO(raw)), patch.object(bridge.Path, "stat", return_value=types.SimpleNamespace(st_uid=1000)), \
+                patch.object(bridge.os, "geteuid", return_value=1000, create=True):
+            result = bridge.probe_existing_session(proof["name"])
+        self.assertEqual(result["identity"], proof)
+        self.assertEqual(run.call_args.args[0], ["tmux", "has-session", "-t", "=" + proof["name"]])
+        self.assertEqual(tmux.call_args.args[3], "=" + proof["name"])
 
 
 if __name__ == "__main__":

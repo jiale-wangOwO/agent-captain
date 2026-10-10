@@ -54,6 +54,18 @@ or revoke existing worker connections.
 
 ## What terminal access authorizes
 
+Workbench metadata changes are not grants: renaming or pinning cannot activate a
+worker or add it to a manager's scope. The new metadata and reconnect MCP tools
+enforce the same activation and independent-controller checks as reads and
+writes, including after a previous request's result has been cached.
+
+Reconnect means restoring the display of an existing owned remote tmux, not
+replacing a missing terminal or resuming another Codex. Strict attachment checks
+the exact terminal namespace and fails closed when the original is missing.
+It sends no business input and does not restart a shared SSH/tunnel provider.
+Local stopped PTYs require an explicit new terminal; automatic model restarts
+are not a recovery mechanism.
+
 A shared terminal has the privileges of the account running its shell and SSH
 connection. A management agent that can write to that terminal can effectively
 run the same commands as that user. Terminal activation is a significant trust

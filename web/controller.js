@@ -32,7 +32,11 @@
       model.terminal.term.options.disableStdin = !canWriteTerminal(model.terminal);
       if (!canReadDisplay(model.terminal)) { clearTimeout(model.terminal.timer); model.terminal.timer = null; }
     }
-    render(); return next;
+    render();
+    // Refresh permission badges only. The workbench keeps its selected display
+    // and human draft; scope reads never attach a terminal or take focus.
+    if (typeof renderAgents === 'function') renderAgents();
+    return next;
   }
   function isReady(c) { return c?.state === 'ready' && !!c.session_id && c.tools_ready === true; }
   function isTerminalCurrent(session) { return !!session && session === model.terminal && session.controllerId === model.controller?.id && session.terminalId === model.controller?.terminal_id && !session.disposed; }
