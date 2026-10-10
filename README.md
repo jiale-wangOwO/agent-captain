@@ -151,6 +151,8 @@ Long messages are chunked rather than silently clipped. Incomplete or malformed 
 
 ## Input and lifecycle safeguards
 
+**0.6.1 adds explicit local display-service recovery.** If the web page is online but worker displays are disconnected, check the workbench's separate service status. When the bound owner is affirmatively offline, confirm **Restore display service**, then reattach only the selected original terminal. The equivalent maintenance commands are `python terminal_service.py status` and `python terminal_service.py recover --confirm`. Recovery never deletes the binding, restarts remote Codex, batch-restores other sessions, or replays tasks; a live PID, ambiguous endpoint, or changed ownership blocks replacement. See the [recovery boundaries](docs/agent-workbench.md).
+
 Ordinary task messages use bracketed paste and Enter in the same foreground Codex terminal. They are not shell commands and are blocked at a shell, login prompt, approval screen, or recognized startup menu. Raw keys are reserved for terminal actions explicitly authorized by the human.
 
 Human drafts take precedence: `human_busy` means the controller must not overwrite them. A `submitted` delivery proves bytes were written, **not** that Codex accepted or completed the task. Keep the same `request_key`, inspect `get_delivery`, and never blindly resubmit uncertain writes with a new key.

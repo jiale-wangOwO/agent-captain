@@ -1,6 +1,6 @@
 {
   "name": "pron-hub",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "让当前 Codex 对话成为 CEO，与用户共用已激活的本机和 SSH 工作终端。",
   "author": {"name": "PRON Hub contributors"},
   "skills": "./skills/",

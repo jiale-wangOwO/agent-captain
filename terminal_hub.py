@@ -19,7 +19,7 @@ from terminal_client import BrokerError, TerminalClient
 from controllers import ControllerService, default_workspace_root
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 RETRYABLE = ("queued", "waiting_for_agent", "human_busy", "awaiting_connection", "blocked")
 MANAGEMENT_EVENTS = ("host_configured", "host_connected", "host_unavailable", "agent_attached",
                      "agent_created", "agent_activated", "agent_deactivated", "message_submitted",
@@ -172,6 +172,14 @@ class Hub:
                 **self._closed_status(row, runtime)}
         recovery = self.store.setting(self._recovery_key(host, thread_id))
         if recovery:
+            recovery = dict(recovery)
+            if recovery.get("code") == "reconnect_unknown":
+                proof = self.store.setting("terminal-owner-recovery-proof") or {}
+                fingerprint = self._reconnect_fingerprint(host, thread_id, row.get("terminal_id"), "ui", None)
+                keys = [key.removeprefix("agent-reconnect:") for key, value in proof.get("operations", {}).items()
+                        if key.startswith("agent-reconnect:") and value == fingerprint]
+                if keys:
+                    recovery.update(reconcile_available=True, next_action="reconcile_reconnect", reconcile_request_keys=keys)
             result["recovery"] = recovery
         result["management"] = self._management(result)
         return result
@@ -212,6 +220,167 @@ class Hub:
     @staticmethod
     def _recovery_key(host, thread_id):
         return "agent-recovery:" + hashlib.sha256(json.dumps([host, thread_id]).encode()).hexdigest()
+
+    @staticmethod
+    def _reconnect_fingerprint(host, thread_id, terminal_id, origin, controller_id):
+        return hashlib.sha256(json.dumps([host, thread_id, terminal_id, origin, controller_id]).encode()).hexdigest()
+
+    def terminal_service_status(self):
+        """Read only the bound display owner; never launch or reconnect workers.
+
+        This browser-facing presentation deliberately excludes descriptor paths,
+        bearer capabilities and process arguments from the client's diagnostics.
+        """
+        try:
+            value = self.terminals.bound_owner_status()
+        except Exception:
+            value = {"state": "unknown", "code": "owner_status_unavailable", "running": False, "can_recover": False}
+        return self._terminal_service_view(value)
+
+    @staticmethod
+    def _terminal_service_view(value):
+        if not isinstance(value, dict):
+            value = {}
+        state = value.get("state") if value.get("state") in ("ready", "offline", "blocked", "unknown") else "unknown"
+        running = value.get("running") is True and state == "ready"
+        available = value.get("can_recover") is True and state == "offline" and not running
+        messages = {
+            "ready": "本机工作终端显示服务正常；恢复服务不会自动重连 agent 或发送任务。",
+            "offline": "本机工作终端显示服务已离线；可恢复绑定的显示服务，远端工作会话不会被重启。",
+            "blocked": "当前不能安全恢复显示服务；请核对原服务身份，不会启动替代 owner。",
+            "unknown": "显示服务状态尚不能确认；请先核对原 owner，不会强制启动或重放输入。",
+        }
+        # Error codes are fixed identifiers, not raw exception messages.
+        code = value.get("code", "owner_status_unavailable")
+        if not isinstance(code, str) or not re.fullmatch(r"[a-z0-9_]{1,80}", code):
+            code = "owner_status_unavailable"
+        result = {"state": state, "code": code, "running": running, "recovery_available": available,
+                  "can_recover": available, "message": messages[state],
+                  "next_action": "reconnect_selected_agent" if running else "recover_display_service" if available else "inspect_display_service",
+                  "owner_recovered": value.get("owner_recovered") is True, "sessions_restored": False}
+        for key in ("pid", "previous_pid"):
+            if type(value.get(key)) is int and value[key] > 0:
+                result[key] = value[key]
+        if value.get("version") == "0.3.0":
+            result["version"] = "0.3.0"
+        recovery_id = value.get("recovery_id")
+        if isinstance(recovery_id, str) and re.fullmatch(r"[a-f0-9]{32}", recovery_id):
+            result["recovery_id"] = recovery_id
+        previous_recovery_id = value.get("previous_recovery_id")
+        if value.get("owner_recovered") is True and isinstance(previous_recovery_id, str) and re.fullmatch(r"[a-f0-9]{32}", previous_recovery_id):
+            result["previous_recovery_id"] = previous_recovery_id
+        result["started_empty"] = value.get("started_empty") is True
+        return result
+
+    def recover_terminal_service(self, confirm=False, expected_owner=None):
+        """Explicit UI action: recover only the dead local display owner.
+
+        Preserve legacy unknown-operation rows. A proven new owner can later
+        reconcile only completed unknown reconnects stamped with the exact old
+        owner's generation, after explicit per-agent confirmation. Unstamped
+        legacy results remain unknown even when the new registry is empty.
+        """
+        if confirm is not True:
+            raise ValueError("请明确确认仅恢复本机终端显示服务；此操作不恢复 agent 或重发任务。")
+        with self.registry_lock:
+            with self.store.lock:
+                rows = self.store.db.execute("select request_key,fingerprint,result from operations where state='done' and request_key like 'agent-reconnect:%'").fetchall()
+            unknowns = {}
+            for row in rows:
+                try:
+                    previous = json.loads(row["result"])
+                    if previous.get("state") == "unknown" and previous.get("recovery", {}).get("code") == "reconnect_unknown":
+                        unknowns[row["request_key"]] = {"fingerprint": row["fingerprint"], "owner_stamp": previous.get("owner_stamp")}
+                except (ValueError, TypeError, AttributeError):
+                    continue
+            try:
+                value = self.terminals.recover_bound_owner(confirm=True, expected_owner=expected_owner)
+            except Exception:
+                value = {"state": "unknown", "code": "owner_recovery_unconfirmed", "running": False, "can_recover": False}
+            result = self._terminal_service_view(value)
+            candidates = {}
+            old_stamp = {"pid": result.get("previous_pid"), "recovery_id": result.get("previous_recovery_id")}
+            if result.get("previous_recovery_id"):
+                # A legacy PID is not a generation proof. Only the current
+                # agent's recorded attempt (or its single unambiguous unknown)
+                # can be reconciled; never unlock an arbitrary historical key.
+                for agent in self.store.agents():
+                    recovery = self.store.setting(self._recovery_key(agent["host"], agent["thread_id"])) or {}
+                    if recovery.get("code") != "reconnect_unknown":
+                        continue
+                    fingerprint = self._reconnect_fingerprint(agent["host"], agent["thread_id"], agent.get("terminal_id"), "ui", None)
+                    matches = [key for key, item in unknowns.items() if item["fingerprint"] == fingerprint]
+                    selected = "agent-reconnect:" + recovery["request_key"] if isinstance(recovery.get("request_key"), str) else matches[0] if len(matches) == 1 else None
+                    if selected in matches and unknowns[selected]["owner_stamp"] == old_stamp:
+                        candidates[selected] = fingerprint
+            if result["running"] and result["owner_recovered"] and result["started_empty"] and result.get("previous_pid") and result.get("pid") and result.get("recovery_id") and result["previous_pid"] != result["pid"]:
+                self.store.setting("terminal-owner-recovery-proof", {"pid": result["pid"], "previous_pid": result["previous_pid"], "recovery_id": result["recovery_id"], "operations": candidates})
+            return result
+
+    def reconcile_reconnect(self, host, thread_id, request_key, confirm=False):
+        """Recheck a legacy unknown result without attaching or sending input.
+
+        An empty broker listing alone is not proof: the failed operation must
+        predate our confirmed recovery of its dead owner, with the same target
+        fingerprint and the same currently authenticated replacement owner.
+        Started operations, different targets and fresh unknowns stay fenced.
+        """
+        if confirm is not True:
+            raise ValueError("请明确确认核对原重连结果；此操作不会附着终端或发送任务。")
+        self._request_key(request_key)
+        if not request_key:
+            raise ValueError("请提供原重连的稳定 request_key，不要创建新键。")
+        with self.registry_lock:
+            agent = self.get_agent(host, thread_id)
+            self._require_open(agent)
+            operation = "agent-reconnect:" + request_key
+            fingerprint = self._reconnect_fingerprint(host, thread_id, agent.get("terminal_id"), "ui", None)
+            with self.store.lock:
+                row = self.store.db.execute("select * from operations where request_key=?", (operation,)).fetchone()
+            if not row or row["fingerprint"] != fingerprint:
+                raise ValueError("原重连请求与该工作终端不匹配；不能使用其他会话或主控的请求键。")
+            if row["state"] != "done":
+                raise ValueError("原重连可能仍在执行；不能核销或重放。")
+            previous = json.loads(row["result"])
+            if (previous.get("state") == "blocked" and previous.get("recovery", {}).get("code") == "local_display_unavailable"
+                    and previous["recovery"].get("reconciled") is True):
+                result = agent | {"operation": "reconcile_reconnect", "operation_id": request_key,
+                                  "operation_state": "blocked", "recovery": previous["recovery"]}
+                result["management"] = self._management(result)
+                return result
+            proof = self.store.setting("terminal-owner-recovery-proof") or {}
+            owner = self.terminal_service_status()
+            if (previous.get("state") != "unknown" or previous.get("recovery", {}).get("code") != "reconnect_unknown"
+                    or proof.get("operations", {}).get(operation) != fingerprint
+                    or not owner["running"] or owner.get("pid") != proof.get("pid")
+                    or not proof.get("recovery_id") or owner.get("recovery_id") != proof.get("recovery_id")):
+                raise ValueError("还没有足够证据确认原附着未执行；保留未知结果，不重放连接或任务。")
+            # Unlike sessions(), an unavailable broker must not masquerade as an
+            # authoritative empty registry. Verify the exact owner again after.
+            try:
+                current = self.terminals.request("/sessions", timeout=3)
+            except Exception:
+                raise ValueError("显示服务登记状态不能确认；保留原未知结果，不重复附着。") from None
+            sessions = current.get("sessions") if isinstance(current, dict) else None
+            if not isinstance(sessions, list) or any(not isinstance(item, dict) or not isinstance(item.get("id"), str) for item in sessions):
+                raise ValueError("显示服务登记状态不能确认；保留原未知结果。")
+            if any(item["id"] == agent.get("terminal_id") for item in sessions):
+                raise ValueError("原显示附着已存在；请核对该终端，不重复附着。")
+            after = self.terminal_service_status()
+            if not after["running"] or after.get("pid") != proof.get("pid") or after.get("recovery_id") != proof.get("recovery_id"):
+                raise ValueError("核对期间显示服务身份已改变；不解锁原请求。")
+            recovery = {"code": "local_display_unavailable", "message": "已确认旧显示 owner 已结束，原附着在恢复后的 owner 中不存在；可使用原请求键重试，仅接回原终端。",
+                        "next_action": "reconnect", "retryable": True, "reconciled": True,
+                        "request_key": request_key, "request_origin": "ui"}
+            with self.store.lock, self.store.db:
+                changed = self.store.db.execute("update operations set result=? where request_key=? and fingerprint=? and state='done' and result=?",
+                    (json.dumps({"state": "blocked", "recovery": recovery}, ensure_ascii=False), operation, fingerprint, row["result"])).rowcount
+            if changed != 1:
+                raise ValueError("原重连记录已改变；请重新核对，不重放。")
+            self.store.setting(self._recovery_key(host, thread_id), recovery)
+            result = agent | {"operation": "reconcile_reconnect", "operation_id": request_key, "operation_state": "blocked", "recovery": recovery}
+            result["management"] = self._management(result)
+            return result
 
     def update_agent(self, host, thread_id, alias=None, pinned=None, origin="ui", request_key=None, controller_id=None):
         if origin not in ("ui", "plugin"):
@@ -285,27 +454,52 @@ class Hub:
             agent = self.get_agent(host, thread_id, plugin=origin == "plugin")
             if controller_id is not None:
                 self._require_controller_scope(controller_id, host, thread_id)
-            def finish(code, message, next_action, state="blocked", view=None):
-                recovery = {"code": code, "message": message, "next_action": next_action}
+            owner_stamp = None
+            def finish(code, message, next_action, state="blocked", view=None, retryable=False, persist=True):
+                recovery = {"code": code, "message": message, "next_action": next_action,
+                            "request_key": request_key, "request_origin": origin}
+                if retryable:
+                    recovery["retryable"] = True
                 self.store.setting(self._recovery_key(host, thread_id), recovery)
                 result = (view or self.get_agent(host, thread_id)) | {"recovery": recovery, "operation": "reconnect_agent", "operation_state": state,
                     "operation_id": request_key}
                 result["management"] = self._management(result)
-                if operation:
-                    self.store.finish_operation(operation, {"state": state, "recovery": recovery})
+                if operation and persist:
+                    saved = {"state": state, "recovery": recovery}
+                    if state == "unknown" and owner_stamp is not None:
+                        saved["owner_stamp"] = owner_stamp
+                    self.store.finish_operation(operation, saved)
                 return result
             request_key = request_key or "ui-reconnect-" + str(uuid.uuid4())
             operation = "agent-reconnect:" + request_key
-            fingerprint = hashlib.sha256(json.dumps([host, thread_id, agent.get("terminal_id"), origin, controller_id]).encode()).hexdigest()
+            fingerprint = self._reconnect_fingerprint(host, thread_id, agent.get("terminal_id"), origin, controller_id)
             try:
                 previous = self.store.begin_operation(operation, fingerprint)
             except RuntimeError:
-                return finish("reconnect_unknown", "原重连结果尚未核验；请先检查连接，不使用新请求键强制重试。", "inspect_connection", "unknown")
+                # Do not mark an in-flight operation as completed merely because
+                # another request with its key arrived while it was uncertain.
+                return finish("reconnect_unknown", "原重连结果尚未核验；请先检查连接，不使用新请求键强制重试。", "inspect_connection", "unknown", persist=False)
             if previous is not None:
-                result = self.get_agent(host, thread_id) | {"operation": "reconnect_agent", "operation_state": previous["state"], "operation_id": request_key,
-                    "recovery": previous["recovery"]}
-                result["management"] = self._management(result)
-                return result
+                retryable = previous.get("state") == "blocked" and previous.get("recovery", {}).get("code") == "local_display_unavailable" and previous["recovery"].get("retryable") is True
+                if retryable and self.terminal_service_status()["running"]:
+                    with self.store.lock, self.store.db:
+                        row = self.store.db.execute("select result from operations where request_key=? and fingerprint=? and state='done'", (operation, fingerprint)).fetchone()
+                        changed = bool(row and json.loads(row["result"]) == previous and self.store.db.execute("update operations set state='started',result=null where request_key=? and fingerprint=? and state='done' and result=?",
+                            (operation, fingerprint, row["result"])).rowcount == 1)
+                    if not changed:
+                        return finish("reconnect_unknown", "原重连记录已改变；请先核对连接，不重复附着。", "inspect_connection", "unknown", persist=False)
+                    # The receipt proves only the earlier attempt. Consume its
+                    # candidate before a new attempt so a fresh post-attach
+                    # unknown cannot be incorrectly reconciled with old proof.
+                    proof = self.store.setting("terminal-owner-recovery-proof") or {}
+                    if operation in proof.get("operations", {}):
+                        proof["operations"].pop(operation)
+                        self.store.setting("terminal-owner-recovery-proof", proof)
+                else:
+                    result = self.get_agent(host, thread_id) | {"operation": "reconnect_agent", "operation_state": previous["state"], "operation_id": request_key,
+                        "recovery": previous["recovery"]}
+                    result["management"] = self._management(result)
+                    return result
             if agent.get("mode") in ("closed", "closing", "close_unknown"):
                 return finish("closed", "此终端已结束或关闭结果待核对；不会重新启动。", "none")
             if agent.get("connected"):
@@ -328,9 +522,14 @@ class Hub:
             proof = before["identity"]
             marker = "/.__pronhub_existing__/" + agent["terminal_id"] + "/" + base64.urlsafe_b64encode(json.dumps(proof, sort_keys=True).encode()).decode().rstrip("=")
             self._reconnecting.add(self.agent_id(host, thread_id))
+            attachment_returned = False
             try:
+                owner = self.terminal_service_status()
+                if owner["running"] and owner.get("pid") and owner.get("recovery_id"):
+                    owner_stamp = {"pid": owner["pid"], "recovery_id": owner["recovery_id"]}
                 runtime = self.terminals.create({"session_id": agent["terminal_id"], "host": host, "transport": "ssh", "target": self.host(host)["target"],
                     "cwd": marker, "title": agent["alias"], "cols": 100, "rows": 30})
+                attachment_returned = True
                 after = self._probe_remote_terminal(host, agent["terminal_id"])
                 if not after.get("ok"):
                     return finish("reconnect_unknown", "已请求原显示附着，但后续身份核验暂不可用；不重复重连或发送任务。", "inspect_connection", "unknown")
@@ -344,6 +543,11 @@ class Hub:
                 message = "已重新附着原终端并核验相同 tmux/pane；未重启 agent、未输入任务。" if view["agent_ready"] else "原终端显示已附着且身份一致；前台尚未就绪，请进入终端核对。"
                 self.record_event("agent_reconnected", host=host, thread_id=thread_id, terminal_id=agent["terminal_id"], origin=origin)
                 return finish(code, message, "open_terminal", "done", view)
+            except BrokerError as error:
+                if error.code == "bound_transport_unavailable" and not attachment_returned:
+                    return finish("local_display_unavailable", "本机原工作终端显示服务离线；附着请求尚未发送。请先恢复绑定的显示服务，再用原请求键重连此终端。不会重启远端 agent 或重发任务。",
+                                  "recover_display_service", "blocked", retryable=True)
+                return finish("reconnect_unknown", "原显示连接结果未知；请核对原终端和路由，不重放任务或自动重启。", "inspect_connection", "unknown")
             except Exception:
                 return finish("reconnect_unknown", "原显示连接结果未知；请核对原终端和路由，不重放任务或自动重启。", "inspect_connection", "unknown")
             finally:

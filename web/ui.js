@@ -16,6 +16,12 @@ const agentFilters = {host: typeof workbenchSaved.host === 'string' ? workbenchS
 let restoreAgentKey = agentKeyFromHash() || (typeof workbenchSaved.agent === 'string' ? workbenchSaved.agent : null), renameTarget = null;
 const reconnectOperations = new Map(Array.isArray(workbenchSaved.reconnect) ? workbenchSaved.reconnect.filter(entry => Array.isArray(entry) && typeof entry[0] === 'string' && typeof entry[1]?.requestKey === 'string') : []);
 const agentRecoveryNotices = new Map();
+let displayServiceStatus = null, displayServiceCheck = null, displayServiceCheckedAt = 0, displayServiceApiMissing = false, displayRecoveryTarget = null;
+let reconnectReconcileTarget = null;
+const displayServiceHelp = '本机显示服务离线不等于远端任务退出。恢复只启动显示服务，不重启 Codex、不发送输入，也不重建已经结束的本机终端。';
+function needsDisplayServiceRecovery(recovery) { return recovery?.code === 'local_display_unavailable' || recovery?.next_action === 'recover_display_service'; }
+function needsReconnectReconciliation(recovery) { return ['reconcile', 'reconcile_reconnect'].includes(recovery?.next_action); }
+function displayServiceUnavailable() { return displayServiceStatus?.running === false || displayServiceStatus?.available === false || displayServiceStatus?.online === false || displayServiceStatus?.healthy === false || ['offline', 'unavailable', 'stopped'].includes(displayServiceStatus?.state || displayServiceStatus?.status) || displayServiceStatus?.running !== true && needsDisplayServiceRecovery(currentAgent()?.recovery); }
 const deliveryLabels = {queued: '已排队', waiting_for_agent: '等待在终端中启动工作 agent', human_busy: '等待你完成当前终端输入', blocked: '等待处理终端中的登录或审批', not_sent: '未发送', submitting: '输入提交中', submitted: '已写入终端', delivered: '已写入终端', completed: '该轮已结束', failed: '送达失败', interrupted: '已中断', scope_revoked: '已取消 · CEO 激活已撤销', unknown: '送达结果不确定 · 请核对终端', awaiting_connection: '等待终端连接'};
 const statusLabels = {shell: 'Shell 已就绪', running: '终端运行中', connected: '终端已连接', disconnected: '显示连接已断开', not_connected: '尚未连接终端', exited: '显示连接已结束', closed: '终端已关闭', closing: '正在关闭终端', close_unknown: '关闭结果未确认', error: '连接错误', unknown: '终端状态未知'};
 const disconnectedLabel = '显示连接已断开 · 工作进程未确认';
@@ -201,6 +207,8 @@ function renderDetail() {
   if (terminalSession?.key === selectedAgent) { terminalSession.closed = closed; if (closed || closing) { terminalSession.closing = true; cancelPendingResize(terminalSession); terminalSession.term.blur(); } }
   $('#terminal-help').textContent = closed ? '终端已关闭，保留的输出仍可查看。需要继续工作时请新建终端；这个已关闭的进程不会重新启动。' : closing ? '终端正在关闭或关闭结果尚未确认，输入与重连已暂停。保留的输出仍可查看，请先核对进程状态。' : disconnected ? '显示连接已断开，输入已暂停。保留画面仍可查看和复制；这不能证明远端工作进程退出。可以点击「重新连接」接回原终端，会话和进程是否仍在需重新核对。' : '选中文字后 Ctrl+C 复制，无选中时 Ctrl+C 中断。Ctrl+V 粘贴，也可用 Ctrl+Shift+C/V 或右键菜单。关闭页面会保留任务；「关闭终端」会结束其中的工作进程。';
   $('#terminal-connect').textContent = disconnected ? '重新连接' : '刷新画面';
+  $('#terminal-reconcile').hidden = !terminal || !disconnected || !canReconcileReconnect(agent);
+  $('#terminal-reconcile').disabled = closed || closing;
   const sourceId = agent.resume_thread_id || agent.source_thread_id || (terminal && /^[0-9a-f]{8}-[0-9a-f-]+$/i.test(agent.thread_id) ? agent.thread_id : null);
   const runningAgent = agent.agent_ready === true || agent.state === 'agent' || agent.status === 'agent';
   $('#resume-guide').hidden = !sourceId || !terminal || disconnected || runningAgent;
@@ -215,6 +223,113 @@ function renderDetail() {
 function renderAgentRecoveryNotice(agent = currentAgent()) {
   const message = agent ? agentRecoveryNotices.get(agentKey(agent)) || agent.recovery?.message || '' : '';
   $('#agent-recovery-notice').textContent = message; $('#agent-recovery-notice').hidden = !message;
+  renderDisplayServiceNotice();
+}
+function renderDisplayServiceNotice() {
+  const unavailable = displayServiceUnavailable();
+  $('#terminal-service-notice').hidden = !unavailable;
+  $('#terminal-service-heading').textContent = ['unknown', 'blocked'].includes(displayServiceStatus?.state) ? '本机终端显示服务状态待核验' : '本机终端显示服务未连接';
+  $('#terminal-service-message').textContent = displayServiceStatus?.message || displayServiceHelp;
+  $('#terminal-service-recover').disabled = !!displayRecoveryTarget?.submitting || !displayServiceApiMissing && displayServiceStatus?.can_recover === false;
+  $('#terminal-service-recover').textContent = displayServiceApiMissing ? '查看恢复方法' : '恢复本机显示服务…';
+}
+async function checkDisplayServiceStatus(force = false) {
+  if (displayServiceCheck) return displayServiceCheck;
+  if (!force && displayServiceCheckedAt && Date.now() - displayServiceCheckedAt < 15000) return displayServiceStatus;
+  displayServiceCheckedAt = Date.now();
+  displayServiceCheck = (async () => {
+    try { displayServiceStatus = await request('/api/terminal-service/status'); displayServiceApiMissing = false; }
+    catch (error) { if (error.status === 404) displayServiceApiMissing = true; /* A failed check is not proof that remote agents exited. */ }
+    finally { displayServiceCheck = null; renderDisplayServiceNotice(); }
+    return displayServiceStatus;
+  })();
+  return displayServiceCheck;
+}
+async function openDisplayServiceRecovery() {
+  if (displayRecoveryTarget?.submitting) return;
+  await checkDisplayServiceStatus(true);
+  const agent = currentAgent(), host = state.hosts.find(item => item.id === agent?.host);
+  const remote = host?.transport === 'ssh' && isTerminal(agent) && !isClosedAgent(agent) && !isClosingAgent(agent);
+  displayRecoveryTarget = {key: remote ? agentKey(agent) : null, name: remote ? agent.alias || agent.title || shortId(agent.thread_id) : '', submitting: false};
+  $('#terminal-service-recovery-target').textContent = remote ? `恢复后仅核验并接回当前工作会话：${displayRecoveryTarget.name}（${host.label || host.id}）。旧的未确认请求会先核验原请求键；不会创建替代会话或重发输入。` : '只恢复显示服务，不自动连接任何工作会话。';
+  $('#terminal-service-recovery-error').hidden = true;
+  $('#terminal-service-recovery-error').textContent = '';
+  $('#terminal-service-recovery-submit').hidden = displayServiceApiMissing;
+  $('#terminal-service-recovery-submit').disabled = !displayServiceApiMissing && displayServiceStatus?.can_recover === false;
+  $('#terminal-service-recovery-submit').textContent = remote ? '恢复显示服务并接回所选会话' : '仅恢复本机显示服务';
+  $('#terminal-service-recovery-legacy').hidden = !displayServiceApiMissing;
+  $('#terminal-service-recovery-dialog').showModal();
+}
+async function recoverDisplayService() {
+  const target = displayRecoveryTarget; if (!target || target.submitting || displayServiceApiMissing) return;
+  target.submitting = true; $('#terminal-service-recovery-submit').disabled = true; renderDisplayServiceNotice();
+  $('#terminal-service-recovery-error').hidden = true;
+  let completionMessage = '本机显示服务已恢复；未重启工作 agent、未发送任务。';
+  try {
+    const result = await request('/api/terminal-service/recover', {confirm: true});
+    await checkDisplayServiceStatus(true);
+    if (result.running !== true || displayServiceStatus?.running === false) throw new Error(result.message || result.error || '本机显示服务尚未恢复，请核对服务状态后再试。');
+    await refresh(true);
+    // The service recovery endpoint has no terminal identity and cannot start
+    // Codex. The human's confirmation covers only this captured, still selected
+    // remote view; never batch reconnect other workers or the management session.
+    if (target.key && selectedAgent === target.key) {
+      const agent = currentAgent();
+      if (isTerminal(agent) && !isClosedAgent(agent) && !isClosingAgent(agent) && displayDisconnected(agent)) {
+        if (terminalSession?.key === target.key && terminalSession.input) completionMessage = '显示服务已恢复。当前终端有未发送输入，已保留；请先核对草稿，再点击重新连接。';
+        else {
+          const operation = reconnectOperations.get(target.key);
+          if (operation && !operation.acknowledged && (needsReconnectReconciliation(agent.recovery) || needsReconnectReconciliation({next_action: operation.nextAction}))) {
+            if (result.owner_recovered !== true || !result.recovery_id) throw new Error('显示服务已在线，但没有本次恢复的核验证据。旧请求结果仍未确认，已保留原请求键；不会新建请求或重发输入。');
+            const reconciled = await request('/api/agents/reconcile-reconnect', {host: agent.host, thread_id: agent.thread_id, request_key: operation.requestKey, confirm: true});
+            const recovery = reconciled.recovery || reconciled.agent?.recovery || {};
+            if (!((recovery.retryable === true || reconciled.retryable === true) && (recovery.operation_state || reconciled.operation_state) === 'blocked')) throw new Error(recovery.message || '原请求结果仍未确认，已保留原请求键；不会自动重发。');
+            operation.nextAction = recovery.next_action; operation.recoveryCode = recovery.code; operation.operationState = recovery.operation_state; persistWorkbench();
+            if (reconciled.agent?.host === agent.host && reconciled.agent?.thread_id === agent.thread_id) Object.assign(agent, reconciled.agent);
+            agent.recovery = recovery;
+          }
+          await reconnectTerminal({afterServiceRecovery: true});
+        }
+      }
+    }
+    if (displayRecoveryTarget === target) $('#terminal-service-recovery-dialog').close();
+    toast(completionMessage);
+  } catch (error) {
+    if (displayRecoveryTarget === target) { $('#terminal-service-recovery-error').textContent = error.message; $('#terminal-service-recovery-error').hidden = false; }
+  } finally { target.submitting = false; $('#terminal-service-recovery-submit').disabled = displayServiceStatus?.can_recover === false; renderDisplayServiceNotice(); }
+}
+function reconnectReconcileKeys(agent) { return agent?.recovery?.reconcile_available === true && Array.isArray(agent.recovery.reconcile_request_keys) ? [...new Set(agent.recovery.reconcile_request_keys.filter(key => typeof key === 'string' && key.length > 0))] : []; }
+function canReconcileReconnect(agent) { return isTerminal(agent) && !isClosedAgent(agent) && !isClosingAgent(agent) && state.hosts.some(host => host.id === agent.host && host.transport === 'ssh') && reconnectReconcileKeys(agent).length > 0; }
+function openReconnectReconciliation() {
+  const agent = currentAgent(); if (!canReconcileReconnect(agent) || reconnectReconcileTarget?.submitting) return;
+  const keys = reconnectReconcileKeys(agent);
+  reconnectReconcileTarget = {key: agentKey(agent), host: agent.host, thread_id: agent.thread_id, keys, submitting: false};
+  const select = $('#terminal-reconcile-key'); select.replaceChildren();
+  const placeholder = node('option', '请选择要核验的原重连请求'); placeholder.value = ''; select.append(placeholder);
+  for (const key of keys) { const option = node('option', key); option.value = key; select.append(option); }
+  // Even a unique candidate still needs human confirmation; for multiple
+  // candidates never silently pick the first or a new browser-generated key.
+  const held = reconnectOperations.get(agentKey(agent)); select.value = keys.length === 1 ? keys[0] : keys.includes(held?.requestKey) ? held.requestKey : '';
+  $('#terminal-reconcile-target').textContent = `仅核验并接回：${agent.alias || agent.title || shortId(agent.thread_id)}（${state.hosts.find(host => host.id === agent.host)?.label || agent.host}）。`;
+  $('#terminal-reconcile-error').hidden = true; $('#terminal-reconcile-confirm').disabled = !select.value;
+  $('#terminal-reconcile-dialog').showModal();
+}
+async function reconcileSelectedReconnect() {
+  const target = reconnectReconcileTarget, requestKey = $('#terminal-reconcile-key').value;
+  if (!target || target.submitting || !target.keys.includes(requestKey)) return;
+  if (selectedAgent !== target.key) throw new Error('当前工作会话已改变，请重新选择并核验；不会连接其他 agent。');
+  if (terminalSession?.key === target.key && terminalSession.input) throw new Error('当前终端有未发送输入，已保留；请先核对草稿。');
+  target.submitting = true; $('#terminal-reconcile-confirm').disabled = true; $('#terminal-reconcile-error').hidden = true;
+  try {
+    const result = await request('/api/agents/reconcile-reconnect', {host: target.host, thread_id: target.thread_id, request_key: requestKey, confirm: true});
+    const recovery = result.recovery || result.agent?.recovery || {};
+    if (!((recovery.retryable === true || result.retryable === true) && (recovery.operation_state || result.operation_state) === 'blocked')) throw new Error(recovery.message || '原重连结果仍未确认；不会重新附着或新建请求。');
+    reconnectOperations.set(target.key, {requestKey, acknowledged: false, recoveryCode: recovery.code, nextAction: recovery.next_action, operationState: 'blocked'}); persistWorkbench();
+    const agent = registeredAgent(target.key); if (agent) agent.recovery = recovery;
+    if (selectedAgent === target.key) { await reconnectTerminal(); if (reconnectReconcileTarget === target) $('#terminal-reconcile-dialog').close(); }
+    else toast('原请求核验结果已保留在对应工作会话；选择已改变，未执行重连。');
+  } catch (error) { if (reconnectReconcileTarget === target) { $('#terminal-reconcile-error').textContent = error.message; $('#terminal-reconcile-error').hidden = false; } }
+  finally { target.submitting = false; $('#terminal-reconcile-confirm').disabled = !$('#terminal-reconcile-key').value; }
 }
 function showTerminalError(text) { $('#terminal-error').textContent = text; $('#terminal-error').hidden = !text; }
 function renderTerminalErrors(session) {
@@ -243,7 +358,7 @@ function updateDisplayConnection(session, connected) {
   // Canonical output can reconcile a lost successful reconnect response for
   // this exact registered display. Never use a cached machine check for this.
   const recoveryOperation = reconnectOperations.get(session.key);
-  if (connected && recoveryOperation && !recoveryOperation.acknowledged) { recoveryOperation.acknowledged = true; persistWorkbench(); }
+  if (connected && recoveryOperation && !recoveryOperation.acknowledged) { recoveryOperation.acknowledged = true; recoveryOperation.acknowledgedBy = 'connected_output'; agentRecoveryNotices.set(session.key, '已从原终端的实际输出核验显示连接；未重发任务。'); persistWorkbench(); }
   const changed = session.displayConnected !== connected;
   session.displayConnected = connected;
   if (!connected) {
@@ -474,33 +589,45 @@ async function pollTerminal(session) {
     if (!session.disposed && isTerminalDisplayCurrent(session) && (session.kind !== 'controller' || window.PronController?.canReadDisplay(session))) session.timer = setTimeout(() => pollTerminal(session), delay);
   }
 }
-async function reconnectTerminal() {
+async function reconnectTerminal(options = {}) {
   const agent = currentAgent(); if (!isTerminal(agent)) return;
   if (!displayDisconnected(agent)) { disposeTerminal(); await openTerminal(agent); return; }
   const key = agentKey(agent), previous = reconnectOperations.get(key);
-  const operation = previous && !previous.acknowledged ? previous : {requestKey: crypto.randomUUID(), acknowledged: false}; reconnectOperations.set(key, operation); persistWorkbench();
+  const unknown = ['unknown', 'reconnect_unknown', 'delivery_unknown'].includes(agent.recovery?.code);
+  if (unknown && canReconcileReconnect(agent)) { openReconnectReconciliation(); return; }
+  if (unknown && (!previous || previous.acknowledged && previous.acknowledgedBy !== 'connected_output')) {
+    agentRecoveryNotices.set(key, '原重连结果未确认且本浏览器没有可核验的原请求键。请核对原终端；不会创建新键绕过未知结果，也不会重发输入。'); renderAgentRecoveryNotice(agent); return;
+  }
+  // This recovery belongs to the exact current registry object. Only a known
+  // pre-attach UI failure can repopulate lost browser state; plugin/controller
+  // keys have a different fingerprint and are never adopted as a UI request.
+  const restoredUiKey = needsDisplayServiceRecovery(agent.recovery) && agent.recovery?.retryable === true && agent.recovery.request_origin === 'ui' && typeof agent.recovery.request_key === 'string' && agent.recovery.request_key ? agent.recovery.request_key : null;
+  const operation = previous && !previous.acknowledged ? previous : {requestKey: restoredUiKey || crypto.randomUUID(), acknowledged: false}; reconnectOperations.set(key, operation); persistWorkbench();
   let result;
   try { result = await request('/api/agents/reconnect', {host: agent.host, thread_id: agent.thread_id, request_key: operation.requestKey}); }
   catch (error) {
     const recovery = error.recovery;
     const message = recovery?.message || `重连结果未确认：${error.message}。保留原请求键，请核对这个终端；不会新建、resume 或重发任务。`;
     agentRecoveryNotices.set(key, message); agent.recovery = recovery || {code: 'unknown', message};
+    operation.recoveryCode = agent.recovery.code; operation.nextAction = agent.recovery.next_action; operation.operationState = agent.recovery.operation_state; persistWorkbench();
     if (selectedAgent === key) renderAgentRecoveryNotice(agent);
+    if (selectedAgent === key && needsDisplayServiceRecovery(recovery)) { if (!options.afterServiceRecovery) await openDisplayServiceRecovery(); return {recovery}; }
     throw error;
   }
   const updated = result.agent || result;
   if (updated.host === agent.host && updated.thread_id === agent.thread_id) Object.assign(agent, updated);
   const recovery = result.recovery || {};
+  agent.recovery = recovery; operation.recoveryCode = recovery.code; operation.nextAction = recovery.next_action; operation.operationState = recovery.operation_state;
   agentRecoveryNotices.set(key, recovery.message || '已核对原终端的重连请求。重新连接不代表 Codex 已恢复或任务已完成。');
   if (selectedAgent === key) renderAgentRecoveryNotice(agent);
-  if (!['unknown', 'reconnect_unknown', 'delivery_unknown'].includes(recovery.code) && recovery.next_action !== 'reconcile') operation.acknowledged = true;
+  if (!['unknown', 'reconnect_unknown', 'delivery_unknown'].includes(recovery.code) && !needsReconnectReconciliation(recovery) && !(recovery.retryable === true && recovery.operation_state === 'blocked') && !needsDisplayServiceRecovery(recovery)) operation.acknowledged = true;
   persistWorkbench();
   await refresh(true);
   if (selectedAgent !== key) return result;
   const current = currentAgent() || agent;
   const connected = result.connected === true || updated.connected === true || ['connected', 'already_connected', 'reattached', 'reconnected'].includes(recovery.code);
   if (connected) { disposeTerminal(); await openTerminal(current); }
-  else { if (terminalSession?.key === key) updateDisplayConnection(terminalSession, false); renderDetail(); }
+  else { if (terminalSession?.key === key) updateDisplayConnection(terminalSession, false); renderDetail(); if (needsDisplayServiceRecovery(recovery) && !options.afterServiceRecovery) await openDisplayServiceRecovery(); }
   return result;
 }
 function messageText(message) { if (message.text != null) return String(message.text); if (typeof message.content === 'string') return message.content; return (message.content || []).map(item => item.text || '').filter(Boolean).join('\n'); }
@@ -680,6 +807,9 @@ async function refresh(force = false) {
     const parts = {hosts: JSON.stringify([state.hosts, selectedHost, hostDisplays, agentFilters.host]), agents: JSON.stringify([state.agents, selectedAgent, agentFilters]), outbox: JSON.stringify(state.outbox), detail: JSON.stringify(currentAgent() || null)};
     for (const [key, render] of Object.entries({hosts: renderHosts, agents: renderAgents, outbox: renderOutbox, detail: renderDetail})) if (rendered[key] !== parts[key]) { rendered[key] = parts[key]; render(); }
     renderEvents(next.events); $('#status').textContent = `后台服务在线${next.version ? ' · ' + next.version : ''}`; $('#status').classList.add('online');
+    // Independent diagnostics must not delay the selected terminal's frame
+    // pipeline or a reconnect ACK. This still performs a throttled GET only.
+    void checkDisplayServiceStatus();
   } catch (error) { $('#status').textContent = '后台服务未连接'; $('#status').classList.remove('online'); }
   finally { refreshing = false; }
   })();
@@ -775,8 +905,8 @@ async function closeTerminal(target = closeTarget) {
   }
 }
 $('#machine-settings').onclick = () => openMachine(currentHost()); $('#add-machine').onclick = () => openMachine(); $('#machine-transport').onchange = updateMachineTransport;
-document.querySelectorAll('[data-close]').forEach(element => { element.onclick = () => document.getElementById(element.dataset.close).close(); });
-document.querySelectorAll('dialog').forEach(dialog => { dialog.addEventListener('click', event => { if (event.target === dialog && !(dialog.id === 'close-dialog' && closeTarget?.submitting)) { const rect = dialog.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close(); } }); });
+document.querySelectorAll('[data-close]').forEach(element => { element.onclick = () => { if (element.dataset.close === 'terminal-service-recovery-dialog' && displayRecoveryTarget?.submitting || element.dataset.close === 'terminal-reconcile-dialog' && reconnectReconcileTarget?.submitting) return; document.getElementById(element.dataset.close).close(); }; });
+document.querySelectorAll('dialog').forEach(dialog => { dialog.addEventListener('click', event => { if (event.target === dialog && !(dialog.id === 'close-dialog' && closeTarget?.submitting) && !(dialog.id === 'terminal-service-recovery-dialog' && displayRecoveryTarget?.submitting) && !(dialog.id === 'terminal-reconcile-dialog' && reconnectReconcileTarget?.submitting)) { const rect = dialog.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close(); } }); });
 $('#machine-form').onsubmit = event => { event.preventDefault(); action($('#machine-save'), async () => {
   const id = $('#machine-id').value.trim(); await request('/api/hosts/upsert', {id, label: $('#machine-label').value.trim(), transport: $('#machine-transport').value, target: $('#machine-transport').value === 'ssh' ? $('#machine-target').value.trim() : '', live: true}); selectHost(id); $('#machine-dialog').close(); await refresh(true); toast('机器配置已保存，可以打开工作终端。');
 }); };
@@ -817,6 +947,15 @@ $('#create-form').onsubmit = event => { event.preventDefault(); action($('#creat
 }); };
 $('#refresh-history').onclick = () => action($('#refresh-history'), readHistory);
 $('#terminal-connect').onclick = () => action($('#terminal-connect'), reconnectTerminal);
+$('#terminal-service-recover').onclick = () => action($('#terminal-service-recover'), openDisplayServiceRecovery);
+$('#terminal-service-recovery-form').onsubmit = event => { event.preventDefault(); void recoverDisplayService(); };
+$('#terminal-service-recovery-dialog').addEventListener('cancel', event => { if (displayRecoveryTarget?.submitting) event.preventDefault(); });
+$('#terminal-service-recovery-dialog').addEventListener('close', () => { if (!displayRecoveryTarget?.submitting) displayRecoveryTarget = null; });
+$('#terminal-reconcile').onclick = openReconnectReconciliation;
+$('#terminal-reconcile-key').onchange = () => { $('#terminal-reconcile-confirm').disabled = !$('#terminal-reconcile-key').value || !!reconnectReconcileTarget?.submitting; };
+$('#terminal-reconcile-form').onsubmit = event => { event.preventDefault(); void action($('#terminal-reconcile-confirm'), reconcileSelectedReconnect); };
+$('#terminal-reconcile-dialog').addEventListener('cancel', event => { if (reconnectReconcileTarget?.submitting) event.preventDefault(); });
+$('#terminal-reconcile-dialog').addEventListener('close', () => { if (!reconnectReconcileTarget?.submitting) reconnectReconcileTarget = null; });
 $('#terminal-focus').onclick = () => terminalSession?.term.focus();
 $('#terminal-copy').onclick = () => action($('#terminal-copy'), () => copyTerminal(terminalSession));
 $('#terminal-paste').onclick = () => action($('#terminal-paste'), () => pasteTerminal(terminalSession));

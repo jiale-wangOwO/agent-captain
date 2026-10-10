@@ -150,6 +150,8 @@ python scripts/configure_plugin.py --output .runtime/plugin-marketplace-v2
 
 ## 输入保护与生命周期
 
+**0.6.1 新增本机显示服务恢复入口。** 网页在线但工作终端连不上时，先看工作台的显示服务状态；服务确实已退出时点击「恢复显示服务」并确认，再接回所选原终端。也可在项目目录运行 `python terminal_service.py status` 或 `python terminal_service.py recover --confirm`。不会删除原绑定、重启远端 Codex、批量恢复其他会话或重发任务；旧进程仍在、端口状态不明或所有权变化时拒绝替换。详细边界见 [安全恢复说明](docs/agent-workbench.md)。
+
 普通任务经 bracketed paste 和 Enter 发到同一个前台 Codex，不当作 shell 命令；shell、登录、审批和可识别的启动菜单会阻止任务输入。原始按键只用于用户明确授权的终端操作。
 
 人的草稿优先：`human_busy` 不允许主控覆盖。`submitted` 只证明字节写入，**不证明任务已被接受或完成**。保留原 `request_key`，用 `get_delivery` 核对不确定送达，不用新键盲重发。

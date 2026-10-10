@@ -166,6 +166,8 @@ def create_server(hub, port=8766, token=None):
                     self.respond(200, hub.state(after))
                 except Exception as error:
                     self.respond(400, {"error": str(error)})
+            elif parsed.path == "/api/terminal-service/status" and self.authenticated():
+                self.respond(200, hub.terminal_service_status())
             elif parsed.path == "/api/terminals/output" and self.authenticated():
                 try:
                     args = parse_qs(parsed.query)
@@ -202,6 +204,8 @@ def create_server(hub, port=8766, token=None):
                 body = json.loads(self.rfile.read(length))
                 if plugin_request:
                     self.respond(200, hub.plugin_call(body["tool"], body.get("arguments", {}), controller_id=controller_id))
+                elif self.path == "/api/terminal-service/recover":
+                    self.respond(200, hub.recover_terminal_service(body.get("confirm") is True, expected_owner=body.get("expected_owner")))
                 elif self.path == "/api/controllers/prepare":
                     self.respond(200, hub.controllers.prepare(body))
                 elif self.path in ("/api/controllers/start", "/api/controllers/resume"):
@@ -233,6 +237,8 @@ def create_server(hub, port=8766, token=None):
                         pinned=body.get("pinned"), request_key=body.get("request_key")))
                 elif self.path == "/api/agents/reconnect":
                     self.respond(200, hub.reconnect_agent(body["host"], body["thread_id"], request_key=body.get("request_key")))
+                elif self.path == "/api/agents/reconcile-reconnect":
+                    self.respond(200, hub.reconcile_reconnect(body["host"], body["thread_id"], body.get("request_key"), confirm=body.get("confirm") is True))
                 elif self.path == "/api/terminals/create":
                     self.respond(200, hub.create_terminal(body["host"], body.get("cwd", ""), body["title"], body.get("thread_id"),
                         body.get("cols", 100), body.get("rows", 30), body.get("active") is True, body.get("request_key")))

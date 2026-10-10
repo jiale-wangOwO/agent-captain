@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
+const net = require('node:net');
 const zlib = require('node:zlib');
 const { execFile, spawn: spawnChild } = require('node:child_process');
 const { promisify } = require('node:util');
@@ -684,7 +685,7 @@ async function readBody(request) {
   catch { throw new ApiError(400, 'invalid_json', 'Expected a JSON object'); }
 }
 
-function createServer(broker, token) {
+function createServer(broker, token, recoveryId = null) {
   return http.createServer(async (request, response) => {
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
     response.setHeader('Cache-Control', 'no-store');
@@ -698,7 +699,7 @@ function createServer(broker, token) {
       if (auth.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) throw new ApiError(401, 'unauthorized', 'Authentication required');
       const url = new URL(request.url, 'http://127.0.0.1');
       let result;
-      if (request.method === 'GET' && url.pathname === '/health') result = { ok: true, version: VERSION, pid: process.pid, features: ['direct_program', 'input_busy', 'idle_close'] };
+      if (request.method === 'GET' && url.pathname === '/health') result = { ok: true, version: VERSION, pid: process.pid, recovery_id: recoveryId, features: ['direct_program', 'input_busy', 'idle_close'] };
       else if (request.method === 'GET' && url.pathname === '/sessions') result = { sessions: [...broker.sessions.values()].map(session => broker.describe(session)) };
       else if (request.method === 'POST' && url.pathname === '/sessions/create') result = await broker.create(await readBody(request));
       else {
@@ -720,10 +721,141 @@ function createServer(broker, token) {
   });
 }
 
+function recoverySnapshot(filename, maximum = 65536) {
+  if (fs.realpathSync(filename) !== path.resolve(filename) || fs.lstatSync(filename).isSymbolicLink()) throw new Error('Recovery file is linked');
+  const before = fs.statSync(filename, { bigint: true });
+  if (!before.isFile() || before.size > BigInt(maximum)) throw new Error('Recovery file is invalid');
+  const raw = fs.readFileSync(filename);
+  const after = fs.statSync(filename, { bigint: true });
+  if (raw.length > maximum || before.ino !== after.ino || before.dev !== after.dev || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs || before.size !== after.size) throw new Error('Recovery file changed');
+  return { raw, hash: crypto.createHash('sha256').update(raw).digest('hex'),
+    identity: { ino: String(after.ino), size: String(after.size), mtime_ns: String(after.mtimeNs) } };
+}
+
+function recoveryPidState(pid) {
+  try { process.kill(pid, 0); return 'alive'; }
+  catch (error) { return error.code === 'ESRCH' ? 'dead' : 'unknown'; }
+}
+
+function recoveryGuard(filename, raw = process.env.CEO_HUB_RECOVERY_GUARD, referenceFile = path.resolve(__dirname, '.runtime', 'worker-terminal-reference.json')) {
+  if (!raw) return null;
+  try {
+    if (raw.length > 8192) throw new Error();
+    const guard = JSON.parse(raw);
+    const validIdentity = value => value && Object.keys(value).sort().join(',') === 'ino,mtime_ns,size'
+      && Object.values(value).every(part => typeof part === 'string' && /^[0-9]{1,32}$/.test(part));
+    if (!guard || Object.keys(guard).sort().join(',') !== 'descriptor_file,descriptor_identity,descriptor_sha256,lock_identity,lock_sha256,maintenance_identity,maintenance_sha256,pid,recovery_id,reference_file,reference_identity,reference_sha256'
+        || guard.descriptor_file !== path.resolve(filename) || guard.reference_file !== referenceFile
+        || !Number.isSafeInteger(guard.pid) || guard.pid <= 0 || guard.pid > 2147483647
+        || !/^[a-f0-9]{64}$/.test(guard.descriptor_sha256) || !/^[a-f0-9]{64}$/.test(guard.maintenance_sha256)
+        || (guard.lock_sha256 !== null && !/^[a-f0-9]{64}$/.test(guard.lock_sha256))
+        || !/^[a-f0-9]{32}$/.test(guard.recovery_id) || !/^[a-f0-9]{64}$/.test(guard.reference_sha256)
+        || !validIdentity(guard.descriptor_identity) || !validIdentity(guard.maintenance_identity)
+        || !validIdentity(guard.reference_identity) || (guard.lock_sha256 === null ? guard.lock_identity !== null : !validIdentity(guard.lock_identity))) throw new Error();
+    return guard;
+  } catch { throw new Error('Recovery authorization is invalid'); }
+}
+
+function verifyRecoveryInputs(filename, guard, { ownedLock = false, pidState = recoveryPidState } = {}) {
+  try {
+    const same = (snapshot, hash, identity) => snapshot.hash === hash
+      && snapshot.identity.ino === identity.ino && snapshot.identity.size === identity.size && snapshot.identity.mtime_ns === identity.mtime_ns;
+    if (!same(recoverySnapshot(`${filename}.recovery.lock`, 256), guard.maintenance_sha256, guard.maintenance_identity)) throw new Error();
+    const reference = recoverySnapshot(guard.reference_file, 8192);
+    if (!same(reference, guard.reference_sha256, guard.reference_identity)
+        || JSON.parse(reference.raw).descriptor_file !== filename) throw new Error();
+    const snapshot = recoverySnapshot(filename);
+    if (!same(snapshot, guard.descriptor_sha256, guard.descriptor_identity)) throw new Error();
+    const descriptor = JSON.parse(snapshot.raw);
+    const endpoint = new URL(descriptor.url);
+    if (descriptor.pid !== guard.pid || descriptor.version !== VERSION || endpoint.protocol !== 'http:'
+        || endpoint.hostname !== '127.0.0.1' || !endpoint.port || endpoint.username || endpoint.password
+        || !['', '/'].includes(endpoint.pathname) || endpoint.search || endpoint.hash || pidState(guard.pid) !== 'dead') throw new Error();
+    const lockfile = `${filename}.lock`;
+    if (ownedLock) {
+      if (recoverySnapshot(lockfile, 64).raw.toString('ascii') !== String(process.pid)) throw new Error();
+    } else if (guard.lock_sha256 === null) {
+      if (fs.existsSync(lockfile)) throw new Error();
+    } else {
+      const lock = recoverySnapshot(lockfile, 64);
+      if (!same(lock, guard.lock_sha256, guard.lock_identity) || lock.raw.toString('ascii') !== String(guard.pid)) throw new Error();
+    }
+    return descriptor;
+  } catch { throw new Error('Bound terminal owner changed or cannot be proved dead; recovery refused'); }
+}
+
+async function requireRefusedRecoveryPort(url) {
+  const endpoint = new URL(url);
+  await new Promise((resolve, reject) => {
+    const probe = net.createConnection({ host: '127.0.0.1', port: Number(endpoint.port) });
+    const fail = () => { probe.destroy(); reject(new Error('Bound terminal endpoint is not affirmatively offline; recovery refused')); };
+    probe.setTimeout(1000, fail);
+    probe.once('connect', fail);
+    probe.once('error', error => { probe.destroy(); if (error.code === 'ECONNREFUSED') resolve(); else fail(); });
+  });
+}
+
+function releaseOwnedStartupFile(filename, owned) {
+  if (!owned) return false;
+  try {
+    const current = recoverySnapshot(filename);
+    if (current.hash !== owned.hash || current.identity.ino !== owned.identity.ino
+        || current.identity.size !== owned.identity.size || current.identity.mtime_ns !== owned.identity.mtime_ns) return false;
+    fs.unlinkSync(filename);
+    return true;
+  } catch { return false; }
+}
+
+async function initializeOwnedDisplay(filename, lockfile, guard, options = {}) {
+  // Everything after lease acquisition belongs to one failure-cleanup scope.
+  // In particular constructor/listen failures must not strand a new-child
+  // lease next to the unchanged old descriptor, fencing all future recovery.
+  const ownedLease = options.ownedLease || recoverySnapshot(lockfile, 64);
+  const verify = options.verify || verifyRecoveryInputs;
+  const portProof = options.portProof || requireRefusedRecoveryPort;
+  let server = null, temp = null, ownedTemp = null;
+  try {
+    if (guard) {
+      const old = verify(filename, guard, { ownedLock: true });
+      await portProof(old.url);
+      verify(filename, guard, { ownedLock: true });
+    }
+    const token = (options.tokenFactory || (() => crypto.randomBytes(32).toString('hex')))();
+    const broker = (options.brokerFactory || (() => new TerminalBroker()))();
+    server = (options.serverFactory || createServer)(broker, token, guard?.recovery_id || null);
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+    const descriptor = { url: `http://127.0.0.1:${server.address().port}`, token, pid: process.pid, version: VERSION };
+    if (guard) descriptor.recovery_id = guard.recovery_id;
+    temp = `${filename}.${process.pid}.tmp`;
+    if (guard) verify(filename, guard, { ownedLock: true });
+    fs.writeFileSync(temp, JSON.stringify(descriptor), { mode: 0o600, flag: 'wx' });
+    ownedTemp = recoverySnapshot(temp);
+    if (guard) verify(filename, guard, { ownedLock: true });
+    fs.renameSync(temp, filename);
+    return { broker, server, descriptor };
+  } catch (error) {
+    // There are no initialized work sessions until publication. Close only
+    // this unpublished empty server, never a remote tmux/model or other owner.
+    if (server) await new Promise(resolve => {
+      try { server.close(() => resolve()); } catch { resolve(); }
+    });
+    if (temp) releaseOwnedStartupFile(temp, ownedTemp);
+    if (ownedLease.raw.toString('ascii') === String(process.pid)) releaseOwnedStartupFile(lockfile, ownedLease);
+    throw error;
+  }
+}
+
 async function main() {
   const filename = descriptorPath();
+  const guard = recoveryGuard(filename);
+  if (!guard && fs.existsSync(`${filename}.recovery.lock`)) throw new Error('Bound terminal maintenance is in progress');
+  if (guard) {
+    const old = verifyRecoveryInputs(filename, guard);
+    await requireRefusedRecoveryPort(old.url);
+    verifyRecoveryInputs(filename, guard);
+  }
   fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
-  try {
+  if (!guard) try {
     const existing = JSON.parse(fs.readFileSync(filename, 'utf8'));
     if (/^http:\/\/127\.0\.0\.1:\d+$/.test(existing.url)) {
       const result = await fetch(`${existing.url}/health`, { headers: { Authorization: `Bearer ${existing.token}` }, signal: AbortSignal.timeout(1000) });
@@ -735,22 +867,17 @@ async function main() {
   try { lock = fs.openSync(lockfile, 'wx', 0o600); }
   catch (error) {
     if (error.code !== 'EEXIST') throw error;
+    if (guard) verifyRecoveryInputs(filename, guard);
     let alive = false;
     try { const owner = Number(fs.readFileSync(lockfile, 'utf8')); if (owner > 0) { process.kill(owner, 0); alive = true; } } catch {}
     if (alive) { process.stdout.write('CEO Hub terminal broker is already starting.\n'); return; }
+    if (guard) verifyRecoveryInputs(filename, guard);
     fs.unlinkSync(lockfile);
     lock = fs.openSync(lockfile, 'wx', 0o600);
   }
   fs.writeFileSync(lock, String(process.pid));
   fs.closeSync(lock);
-  const token = crypto.randomBytes(32).toString('hex');
-  const broker = new TerminalBroker();
-  const server = createServer(broker, token);
-  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-  const descriptor = { url: `http://127.0.0.1:${server.address().port}`, token, pid: process.pid, version: VERSION };
-  const temp = `${filename}.${process.pid}.tmp`;
-  fs.writeFileSync(temp, JSON.stringify(descriptor), { mode: 0o600 });
-  fs.renameSync(temp, filename);
+  const { broker, server, descriptor } = await initializeOwnedDisplay(filename, lockfile, guard);
   process.stdout.write(`CEO Hub terminal broker listening on ${descriptor.url}\n`);
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => {
     for (const session of broker.sessions.values()) if (session.connected) try { session.pty.kill(); } catch {}
@@ -760,5 +887,5 @@ async function main() {
   });
 }
 
-module.exports = { TerminalBroker, ApiError, createServer, descriptorPath, shellQuote, classifyCommand, updateHumanInput, blockedScreen, spawnSshPipe, remoteBridgeCommand, directRootIdentity, nativeRootKind };
+module.exports = { TerminalBroker, ApiError, createServer, descriptorPath, shellQuote, classifyCommand, updateHumanInput, blockedScreen, spawnSshPipe, remoteBridgeCommand, directRootIdentity, nativeRootKind, recoveryGuard, verifyRecoveryInputs, initializeOwnedDisplay };
 if (require.main === module) main().catch(error => { process.stderr.write(`Terminal broker failed: ${error.message}\n`); process.exitCode = 1; });

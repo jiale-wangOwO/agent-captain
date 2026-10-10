@@ -11,11 +11,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from terminal_hub import Hub
+from terminal_client import BrokerError
 from store import Store
 from tests.test_terminal_hub import FakeTerminals
 from tests.test_controller_scope import Controllers
 from app import create_server
 from urllib.request import Request, ProxyHandler, build_opener
+from urllib.error import HTTPError
 
 TERMINAL = "ceohub-0123456789abcdef01234567"
 IDENTITY = {"name": TERMINAL, "session": "$11", "created": 1234, "pane": "%20", "pane_pid": 777777, "pane_start_ticks": 888888}
@@ -319,6 +321,303 @@ class AgentManagementTests(unittest.TestCase):
         self.assertEqual(original["events"][0]["data"]["index"], 0)
         self.assertEqual(original["events"][-1]["data"]["index"], 399)
         self.assertEqual(self.hub.state(after=440)["events"][0]["id"], 441)
+
+    def service_fixture(self):
+        status = {"state": "offline", "code": "bound_owner_offline", "running": False, "can_recover": True,
+                  "pid": 12345, "version": "0.3.0", "recovery_id": "c" * 32, "token": "PRIVATE_CAPABILITY", "descriptor_file": "PRIVATE_PATH"}
+        self.service_calls = []
+        self.terminals.bound_owner_status = lambda: dict(status)
+        def recover(**kwargs):
+            self.service_calls.append(kwargs)
+            self.terminals.records.clear()
+            status.update(state="ready", code="bound_owner_recovered", running=True, can_recover=False,
+                          previous_pid=12345, pid=67890, owner_recovered=True, recovery_id="a" * 32,
+                          previous_recovery_id="c" * 32, started_empty=True)
+            return dict(status)
+        self.terminals.recover_bound_owner = recover
+        self.terminals.request = lambda path, **kwargs: {"sessions": self.terminals.sessions()}
+        return status
+
+    def make_unknown(self, key="legacy-unknown"):
+        self.disconnected()
+        status = self.terminals.bound_owner_status()
+        with patch.object(self.terminals, "bound_owner_status", return_value=status | {"state": "ready", "running": True}), \
+             patch.object(self.terminals, "create", side_effect=RuntimeError("PRIVATE_FAILURE")):
+            result = self.hub.reconnect_agent("remote", "worker", request_key=key)
+        self.assertEqual(result["operation_state"], "unknown")
+        return result
+
+    def test_service_status_is_read_only_and_never_returns_private_capabilities(self):
+        self.service_fixture()
+        status = self.hub.terminal_service_status()
+        self.assertTrue(status["can_recover"])
+        self.assertTrue(status["recovery_available"])
+        self.assertEqual(status["state"], "offline")
+        self.assertNotIn("PRIVATE_", json.dumps(status))
+        self.assertNotIn("descriptor_file", status)
+        self.assertEqual(self.service_calls, [])
+        self.assertEqual(self.probes, [])
+        self.assertEqual(self.creates(), [])
+        self.assertEqual(self.terminals.writes, [])
+
+    def test_service_recovery_requires_explicit_boolean_and_only_recovers_owner(self):
+        self.service_fixture()
+        for confirm in (None, False, 1, "true"):
+            with self.assertRaises(ValueError):
+                self.hub.recover_terminal_service(confirm=confirm)
+        result = self.hub.recover_terminal_service(confirm=True, expected_owner={"pid": 12345, "version": "0.3.0"})
+        self.assertTrue(result["running"])
+        self.assertTrue(result["owner_recovered"])
+        self.assertFalse(result["sessions_restored"])
+        self.assertEqual(self.service_calls, [{"confirm": True, "expected_owner": {"pid": 12345, "version": "0.3.0"}}])
+        self.assertEqual(self.hub.store.agent("remote", "worker")["terminal_id"], TERMINAL)
+        self.assertEqual(self.hub.store.agent("remote", "worker")["active"], 1)
+        self.assertEqual(self.probes, [])
+        self.assertEqual(self.creates(), [])
+        self.assertEqual(self.terminals.writes, [])
+
+    def test_unconfirmed_service_start_keeps_unknown_and_does_not_expose_errors(self):
+        self.service_fixture()
+        with patch.object(self.terminals, "recover_bound_owner", side_effect=RuntimeError("PRIVATE_CAPABILITY_AND_PATH")):
+            result = self.hub.recover_terminal_service(confirm=True)
+        self.assertEqual(result["state"], "unknown")
+        self.assertFalse(result["running"])
+        self.assertFalse(result["owner_recovered"])
+        self.assertNotIn("PRIVATE_", json.dumps(result))
+        self.assertIsNone(self.hub.store.setting("terminal-owner-recovery-proof"))
+        self.assertEqual(self.creates(), [])
+        self.assertEqual(self.terminals.writes, [])
+
+    def test_known_pre_attach_owner_failure_is_blocked_and_retryable_same_key(self):
+        status = self.service_fixture()
+        self.disconnected()
+        with patch.object(self.terminals, "create", side_effect=BrokerError("PRIVATE_ERROR", "bound_transport_unavailable")):
+            result = self.hub.reconnect_agent("remote", "worker", request_key="known-owner-failure")
+        self.assertEqual(result["operation_state"], "blocked")
+        self.assertEqual(result["recovery"]["code"], "local_display_unavailable")
+        self.assertTrue(result["recovery"]["retryable"])
+        self.assertEqual(result["recovery"]["next_action"], "recover_display_service")
+        self.assertEqual(result["recovery"]["request_origin"], "ui")
+        self.assertNotIn("PRIVATE_", json.dumps(result))
+        count = len(self.probes)
+        repeated = self.hub.reconnect_agent("remote", "worker", request_key="known-owner-failure")
+        self.assertEqual(repeated["operation_state"], "blocked")
+        self.assertEqual(len(self.probes), count, "Offline repeated keys must not retry attachment")
+        self.hub.recover_terminal_service(confirm=True)
+        retried = self.hub.reconnect_agent("remote", "worker", request_key="known-owner-failure")
+        self.assertEqual(retried["operation_state"], "done")
+        self.assertTrue(retried["connected"])
+        self.assertEqual(len(self.creates()), 1)
+        self.assertEqual(self.terminals.writes, [])
+        self.assertEqual(status["pid"], 67890)
+
+    def test_post_attach_owner_error_stays_unknown_and_same_key_never_replays(self):
+        self.service_fixture()
+        self.disconnected()
+        with patch.object(self.terminals, "snapshot", side_effect=BrokerError("PRIVATE_ERROR", "bound_transport_unavailable")):
+            result = self.hub.reconnect_agent("remote", "worker", request_key="post-attach")
+        self.assertEqual(result["operation_state"], "unknown")
+        self.assertEqual(result["recovery"]["code"], "reconnect_unknown")
+        self.hub.reconnect_agent("remote", "worker", request_key="post-attach")
+        self.assertEqual(len(self.creates()), 1)
+        self.assertEqual(self.terminals.writes, [])
+
+    def test_started_operation_is_not_forged_completed_by_same_key_request(self):
+        key = "in-flight"
+        fingerprint = self.hub._reconnect_fingerprint("remote", "worker", TERMINAL, "ui", None)
+        self.hub.store.begin_operation("agent-reconnect:" + key, fingerprint)
+        result = self.hub.reconnect_agent("remote", "worker", request_key=key)
+        self.assertEqual(result["operation_state"], "unknown")
+        row = self.hub.store.db.execute("select state,result from operations where request_key=?", ("agent-reconnect:" + key,)).fetchone()
+        self.assertEqual(row["state"], "started")
+        self.assertIsNone(row["result"])
+        self.assertEqual(self.creates(), [])
+
+    def test_legacy_unknown_reconciliation_is_explicit_absence_proven_and_preserves_key(self):
+        self.service_fixture()
+        self.make_unknown()
+        self.hub.recover_terminal_service(confirm=True)
+        self.assertEqual(self.hub.get_agent("remote", "worker")["recovery"]["code"], "reconnect_unknown", "Service recovery must not reset old operation results")
+        self.assertTrue(self.hub.get_agent("remote", "worker")["recovery"]["reconcile_available"])
+        with self.assertRaises(ValueError):
+            self.hub.reconcile_reconnect("remote", "worker", "legacy-unknown")
+        before = len(self.probes)
+        result = self.hub.reconcile_reconnect("remote", "worker", "legacy-unknown", confirm=True)
+        self.assertEqual(result["operation_state"], "blocked")
+        self.assertTrue(result["recovery"]["retryable"])
+        self.assertEqual(len(self.probes), before)
+        self.assertEqual(self.creates(), [])
+        self.assertEqual(self.terminals.writes, [])
+        self.assertEqual(self.hub.store.db.execute("select count(*) from operations where request_key='agent-reconnect:legacy-unknown'").fetchone()[0], 1)
+        repeated = self.hub.reconcile_reconnect("remote", "worker", "legacy-unknown", confirm=True)
+        self.assertEqual(repeated["recovery"], result["recovery"])
+        retried = self.hub.reconnect_agent("remote", "worker", request_key="legacy-unknown")
+        self.assertEqual(retried["operation_state"], "done")
+        self.assertEqual(len(self.creates()), 1)
+        self.assertEqual(self.terminals.writes, [])
+
+    def test_unknown_without_confirmed_owner_recovery_never_unlocks(self):
+        status = self.service_fixture()
+        self.make_unknown()
+        status.update(state="ready", running=True)
+        self.terminals.records.clear()
+        with self.assertRaises(ValueError):
+            self.hub.reconcile_reconnect("remote", "worker", "legacy-unknown", confirm=True)
+        self.assertEqual(self.creates(), [])
+        self.assertEqual(self.hub.reconnect_agent("remote", "worker", request_key="legacy-unknown")["operation_state"], "unknown")
+
+    def test_reconcile_requires_exact_target_old_done_operation_owner_and_absence(self):
+        status = self.service_fixture()
+        self.make_unknown()
+        self.hub.recover_terminal_service(confirm=True)
+        self.hub.store.remember("remote", "other", "Other", active=True, mode="terminal", terminal_id=TERMINAL, cwd="/work/project")
+        with self.assertRaises(ValueError):
+            self.hub.reconcile_reconnect("remote", "other", "legacy-unknown", confirm=True)
+        self.terminals.add(TERMINAL, "remote")
+        with self.assertRaises(ValueError):
+            self.hub.reconcile_reconnect("remote", "worker", "legacy-unknown", confirm=True)
+        self.terminals.records.clear()
+        status["pid"] = 78901
+        with self.assertRaises(ValueError):
+            self.hub.reconcile_reconnect("remote", "worker", "legacy-unknown", confirm=True)
+        status["pid"] = 67890
+        status["recovery_id"] = "b" * 32
+        with self.assertRaises(ValueError):
+            self.hub.reconcile_reconnect("remote", "worker", "legacy-unknown", confirm=True)
+        self.assertEqual(self.creates(), [])
+        self.assertEqual(self.terminals.writes, [])
+
+    def test_ui_reconciliation_cannot_rearm_a_controller_operation(self):
+        self.service_fixture()
+        self.disconnected()
+        self.hub.controllers.shutdown()
+        self.hub.controllers = Controllers(self.hub)
+        self.hub.controllers.grants["a"] = {"remote::worker"}
+        with patch.object(self.terminals, "create", side_effect=RuntimeError("Unconfirmed attachment")):
+            result = self.hub.plugin_call("reconnect_agent", {"agent_id": "remote::worker", "request_key": "controller-unknown"}, controller_id="a")
+        self.assertEqual(result["operation_state"], "unknown")
+        self.assertEqual(result["recovery"]["request_origin"], "plugin")
+        self.hub.recover_terminal_service(confirm=True)
+        with self.assertRaises(ValueError):
+            self.hub.reconcile_reconnect("remote", "worker", "controller-unknown", confirm=True)
+        self.assertEqual(self.creates(), [])
+        self.assertEqual(self.terminals.writes, [])
+
+    def test_legacy_unknown_without_owner_generation_remains_unknown_after_recovery(self):
+        status = self.service_fixture()
+        status["recovery_id"] = None
+        self.make_unknown()
+        row = self.hub.store.db.execute("select result from operations where request_key='agent-reconnect:legacy-unknown'").fetchone()
+        self.assertNotIn("owner_stamp", json.loads(row[0]))
+        self.hub.recover_terminal_service(confirm=True)
+        self.assertFalse(self.hub.get_agent("remote", "worker")["recovery"].get("reconcile_available", False))
+        with self.assertRaises(ValueError):
+            self.hub.reconcile_reconnect("remote", "worker", "legacy-unknown", confirm=True)
+        self.assertEqual(json.loads(self.hub.store.db.execute("select result from operations where request_key='agent-reconnect:legacy-unknown'").fetchone()[0])["state"], "unknown")
+        self.assertEqual(self.creates(), [])
+
+    def test_unknown_stamp_must_match_real_previous_owner_generation(self):
+        self.service_fixture()
+        self.make_unknown()
+        recover = self.terminals.recover_bound_owner
+        self.terminals.recover_bound_owner = lambda **kwargs: recover(**kwargs) | {"previous_recovery_id": "d" * 32}
+        self.hub.recover_terminal_service(confirm=True)
+        with self.assertRaises(ValueError):
+            self.hub.reconcile_reconnect("remote", "worker", "legacy-unknown", confirm=True)
+        self.assertEqual(self.creates(), [])
+        self.assertEqual(self.terminals.writes, [])
+
+    def test_receipt_only_marks_current_attempt_not_all_historical_unknown_keys(self):
+        self.service_fixture()
+        self.make_unknown("historical-unknown")
+        self.make_unknown("current-unknown")
+        self.hub.recover_terminal_service(confirm=True)
+        proof = self.hub.store.setting("terminal-owner-recovery-proof")
+        self.assertEqual(set(proof["operations"]), {"agent-reconnect:current-unknown"})
+        with self.assertRaises(ValueError):
+            self.hub.reconcile_reconnect("remote", "worker", "historical-unknown", confirm=True)
+        result = self.hub.reconcile_reconnect("remote", "worker", "current-unknown", confirm=True)
+        self.assertEqual(result["operation_state"], "blocked")
+        self.assertEqual(self.creates(), [])
+        self.assertEqual(self.terminals.writes, [])
+
+    def test_reconcile_unavailable_registry_is_not_assumed_empty(self):
+        self.service_fixture()
+        self.make_unknown()
+        self.hub.recover_terminal_service(confirm=True)
+        self.terminals.request = lambda *args, **kwargs: (_ for _ in ()).throw(BrokerError("PRIVATE_DETAIL", "unavailable"))
+        with self.assertRaises(ValueError) as error:
+            self.hub.reconcile_reconnect("remote", "worker", "legacy-unknown", confirm=True)
+        self.assertNotIn("PRIVATE_", str(error.exception))
+        row = self.hub.store.db.execute("select result from operations where request_key='agent-reconnect:legacy-unknown'").fetchone()
+        self.assertEqual(json.loads(row[0])["state"], "unknown")
+        self.assertEqual(self.creates(), [])
+
+    def test_completed_unknown_after_recovery_cannot_use_prior_owner_receipt(self):
+        self.service_fixture()
+        self.hub.recover_terminal_service(confirm=True)
+        self.terminals.add(TERMINAL, "remote")
+        self.make_unknown("fresh-unknown")
+        self.terminals.records.clear()
+        with self.assertRaises(ValueError):
+            self.hub.reconcile_reconnect("remote", "worker", "fresh-unknown", confirm=True)
+        self.assertEqual(self.creates(), [])
+
+    def test_reconciled_same_key_fresh_unknown_cannot_reuse_old_recovery_proof(self):
+        self.service_fixture()
+        self.make_unknown()
+        self.hub.recover_terminal_service(confirm=True)
+        self.hub.reconcile_reconnect("remote", "worker", "legacy-unknown", confirm=True)
+        with patch.object(self.terminals, "create", side_effect=RuntimeError("New attachment became uncertain")):
+            result = self.hub.reconnect_agent("remote", "worker", request_key="legacy-unknown")
+        self.assertEqual(result["operation_state"], "unknown")
+        with self.assertRaises(ValueError):
+            self.hub.reconcile_reconnect("remote", "worker", "legacy-unknown", confirm=True)
+        self.assertEqual(self.creates(), [])
+        self.assertEqual(self.terminals.writes, [])
+
+    def test_service_http_endpoint_is_browser_only_origin_and_confirm_protected(self):
+        self.service_fixture()
+        server = create_server(self.hub, 0, token="fake-browser-token")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        opener = build_opener(ProxyHandler({}))
+        try:
+            url = server.origin + "/api/terminal-service/recover"
+            valid = {"Origin": server.origin, "Cookie": "ceo_session=fake-browser-token", "Content-Type": "application/json"}
+            for headers in ({"Content-Type": "application/json"}, {**valid, "Origin": "http://evil.invalid"},
+                            {"Authorization": "Bearer fake-browser-token", "Content-Type": "application/json"}):
+                with self.assertRaises(HTTPError) as error:
+                    opener.open(Request(url, data=b'{"confirm":true}', headers=headers), timeout=5)
+                self.assertEqual(error.exception.code, 403)
+                with self.assertRaises(HTTPError) as error:
+                    opener.open(Request(server.origin + "/api/agents/reconcile-reconnect", data=b'{"host":"remote","thread_id":"worker","request_key":"unknown","confirm":true}', headers=headers), timeout=5)
+                self.assertEqual(error.exception.code, 403)
+            with self.assertRaises(HTTPError) as error:
+                opener.open(Request(url, data=b'{}', headers=valid), timeout=5)
+            self.assertEqual(error.exception.code, 400)
+            with self.assertRaises(HTTPError) as error:
+                opener.open(Request(server.origin + "/api/agents/reconcile-reconnect", data=b'{"host":"remote","thread_id":"worker","request_key":"unknown"}', headers=valid), timeout=5)
+            self.assertEqual(error.exception.code, 400)
+            self.assertEqual(self.service_calls, [])
+            with opener.open(Request(server.origin + "/api/terminal-service/status", headers={"Cookie": valid["Cookie"]}), timeout=5) as reply:
+                self.assertTrue(json.load(reply)["can_recover"])
+            with self.assertRaises(HTTPError):
+                opener.open(Request(server.origin + "/api/terminal-service/status"), timeout=5)
+            with opener.open(Request(url, data=b'{"confirm":true}', headers=valid), timeout=5) as reply:
+                self.assertTrue(json.load(reply)["running"])
+            with self.assertRaises(HTTPError) as error:
+                opener.open(Request(server.origin + "/api/plugin", data=b'{"tool":"recover_terminal_service","arguments":{"confirm":true}}',
+                    headers={"Authorization": "Bearer fake-browser-token", "Content-Type": "application/json"}), timeout=5)
+            self.assertEqual(error.exception.code, 400)
+            self.assertEqual(len(self.service_calls), 1)
+            self.assertEqual(self.probes, [])
+            self.assertEqual(self.creates(), [])
+            self.assertEqual(self.terminals.writes, [])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(3)
 
 
 if __name__ == "__main__":

@@ -209,3 +209,143 @@ test('inline rename uses backend-compatible 200-character limit without acceptin
   h.context.openAgentRename(h.agents[0]); vm.runInContext('renameTarget.value = "x".repeat(201)', h.context); await assert.rejects(h.context.saveAgentRename(h.agents[0]), /200/);
   assert.equal(h.calls.filter(call => call.url === '/api/agents/update').length, 1);
 });
+
+const displayOffline = {state: 'offline', running: false, can_recover: true, recovery_available: true, code: 'bound_owner_offline', message: '本机显示服务已离线；远端任务未确认。'};
+const displayReady = {state: 'ready', running: true, can_recover: false, owner_recovered: false};
+const localDisplayBlocked = {code: 'local_display_unavailable', message: '本机显示服务离线，原连接尚未附着。', next_action: 'recover_display_service', operation_state: 'blocked', retryable: true};
+
+test('offline display status is read-only on load and refresh, with no automatic recover or reconnect', async () => {
+  const h = await harness({agents: [worker('remote', 'two', '316 original', {connected: false})], handle: async (call, backend) => call.url === '/api/terminal-service/status' ? backend.reply(displayOffline) : null});
+  assert.equal(h.get('#terminal-service-notice').hidden, false); assert.match(h.get('#terminal-service-message').textContent, /远端任务未确认/);
+  await h.context.selectAgent(h.agents[0]); await h.context.refresh(true); await h.context.checkDisplayServiceStatus(true);
+  assert.equal(h.calls.filter(c => c.options.method === 'POST').length, 0);
+  assert.equal(h.calls.some(c => c.url === '/api/agents/reconcile-reconnect'), false);
+});
+
+test('readonly service polling preserves selected terminal, rename draft and focus', async () => {
+  const h = await harness({handle: async (call, backend) => call.url === '/api/terminal-service/status' ? backend.reply(displayOffline) : null});
+  await h.context.selectAgent(h.agents[0]); h.context.openAgentRename(h.agents[0]); const session = vm.runInContext('terminalSession', h.context); session.input = 'pending human text';
+  vm.runInContext('renameTarget.value="My retained rename"', h.context); await h.context.checkDisplayServiceStatus(true); await h.context.refresh(true);
+  assert.equal(vm.runInContext('terminalSession', h.context), session); assert.equal(session.input, 'pending human text'); assert.equal(session.term.focusCount, 0);
+  assert.equal(vm.runInContext('renameTarget.value', h.context), 'My retained rename'); assert.equal(vm.runInContext('selectedAgent', h.context), 'local:one');
+  assert.equal(h.calls.some(c => /recover|reconcile|\/input/.test(c.url)), false);
+});
+
+test('known local display block has clear recovery action and keeps stable reconnect key until human confirmation', async () => {
+  let running = false, attempts = 0;
+  const h = await harness({agents: [worker('remote', 'two', '316 original', {connected: false}), worker('remote', 'spark', 'Spark original', {connected: false})], handle: async (call, backend) => {
+    if (call.url === '/api/terminal-service/status') return backend.reply(running ? displayReady : displayOffline);
+    if (call.url === '/api/terminal-service/recover') { assert.deepEqual(call.body, {confirm: true}); running = true; return backend.reply({...displayReady, owner_recovered: true, recovery_id: 'actual-service-proof'}); }
+    if (call.url === '/api/agents/reconnect' && attempts++ === 0) return backend.reply({...backend.agents[0], operation_state: 'blocked', recovery: localDisplayBlocked});
+  }});
+  await h.context.selectAgent(h.agents[0]); await h.context.reconnectTerminal();
+  assert.equal(h.get('#terminal-service-recovery-dialog').open, true); assert.match(h.get('#agent-recovery-notice').textContent, /本机显示服务离线/); assert.doesNotMatch(h.get('#agent-recovery-notice').textContent, /结果未确认/);
+  assert.equal(h.calls.filter(c => c.url === '/api/terminal-service/recover').length, 0); assert.equal(vm.runInContext('reconnectOperations.get("remote:two").acknowledged', h.context), false);
+  assert.match(h.get('#terminal-service-recovery-target').textContent, /仅核验.*316 original/);
+  await h.context.recoverDisplayService();
+  const reconnect = h.calls.filter(c => c.url === '/api/agents/reconnect'); assert.equal(reconnect.length, 2); assert.equal(reconnect[0].body.request_key, reconnect[1].body.request_key);
+  assert.equal(h.agents[1].connected, false); assert.equal(reconnect.every(c => c.body.thread_id === 'two'), true);
+  assert.equal(h.calls.some(c => /\/input|\/create|resume|controllers/.test(c.url)), false);
+});
+
+test('explicit service recovery does not reconnect a selection changed while recovery is pending', async () => {
+  let finish; let running = false;
+  const h = await harness({agents: [worker('remote', 'two', '316', {connected: false}), worker('remote', 'spark', 'Spark', {connected: false})], handle: async (call, backend) => {
+    if (call.url === '/api/terminal-service/status') return backend.reply(running ? displayReady : displayOffline);
+    if (call.url === '/api/terminal-service/recover') return new Promise(resolve => { finish = () => { running = true; resolve(backend.reply({...displayReady, owner_recovered: true, recovery_id: 'proof'})); }; });
+  }});
+  await h.context.selectAgent(h.agents[0]); await h.context.openDisplayServiceRecovery(); const restoring = h.context.recoverDisplayService(); await settle();
+  await h.context.selectAgent(h.agents[1]); finish(); await restoring;
+  assert.equal(h.calls.some(c => c.url === '/api/agents/reconnect'), false); assert.equal(vm.runInContext('selectedAgent', h.context), 'remote:spark');
+});
+
+test('service recovery with retained unsent input does not send it or reconnect the terminal', async () => {
+  let running = false;
+  const h = await harness({agents: [worker('remote', 'two', '316', {connected: false})], handle: async (call, backend) => {
+    if (call.url === '/api/terminal-service/status') return backend.reply(running ? displayReady : displayOffline);
+    if (call.url === '/api/terminal-service/recover') { running = true; return backend.reply({...displayReady, owner_recovered: true, recovery_id: 'proof'}); }
+  }});
+  await h.context.selectAgent(h.agents[0]); const session = vm.runInContext('terminalSession', h.context); session.input = 'unsent'; await h.context.openDisplayServiceRecovery(); await h.context.recoverDisplayService();
+  assert.equal(session.input, 'unsent'); assert.equal(vm.runInContext('terminalSession', h.context), session); assert.equal(session.term.focusCount, 0);
+  assert.equal(h.calls.some(c => /\/input|\/reconnect|\/create|controllers/.test(c.url)), false);
+});
+
+test('legacy backend 404 offers manual explicit helper and never POSTs a missing recovery API', async () => {
+  const h = await harness({agents: [worker('remote', 'two', '316', {connected: false, recovery: localDisplayBlocked})], handle: async call => call.url === '/api/terminal-service/status' ? {ok: false, status: 404, json: async () => ({error: 'missing endpoint'})} : null});
+  await h.context.selectAgent(h.agents[0]); await h.context.openDisplayServiceRecovery(); assert.equal(h.get('#terminal-service-recovery-legacy').hidden, false); assert.equal(h.get('#terminal-service-recovery-submit').hidden, true);
+  await h.context.recoverDisplayService(); assert.equal(h.calls.some(c => c.options.method === 'POST'), false);
+  const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8'); assert.match(html, /python terminal_service\.py recover --confirm/); assert.match(html, /本机 PTY 不会重建/);
+});
+
+for (const freshProof of [true, false]) test(`legacy unknown recovery ${freshProof ? 'uses real proof and same key after explicit reconcile' : 'keeps unknown without fabricating proof on already-running service'}`, async () => {
+  let running = false;
+  const storage = new Map([['pron-hub.worker-workbench.v1', JSON.stringify({agent: 'remote:two', reconnect: [['remote:two', {requestKey: 'original-unknown-key', acknowledged: false, nextAction: 'reconcile'}]]})]]);
+  const unknown = {code: 'reconnect_unknown', message: '原请求结果未确认', next_action: 'reconcile'};
+  const h = await harness({storage, agents: [worker('remote', 'two', '316', {connected: false, recovery: unknown})], handle: async (call, backend) => {
+    if (call.url === '/api/terminal-service/status') return backend.reply(running ? displayReady : displayOffline);
+    if (call.url === '/api/terminal-service/recover') { running = true; return backend.reply(freshProof ? {...displayReady, owner_recovered: true, recovery_id: 'real-proof'} : displayReady); }
+    if (call.url === '/api/agents/reconcile-reconnect') { assert.deepEqual(call.body, {host: 'remote', thread_id: 'two', request_key: 'original-unknown-key', confirm: true}); return backend.reply({...backend.agents[0], operation_state: 'blocked', recovery: {...localDisplayBlocked, next_action: 'reconnect'}}); }
+  }});
+  assert.equal(h.calls.some(c => /reconcile|recover|reconnect/.test(c.url)), false);
+  await h.context.openDisplayServiceRecovery(); await h.context.recoverDisplayService();
+  if (freshProof) { assert.equal(h.calls.filter(c => c.url === '/api/agents/reconcile-reconnect').length, 1); assert.equal(h.calls.find(c => c.url === '/api/agents/reconnect').body.request_key, 'original-unknown-key'); }
+  else { assert.equal(h.calls.some(c => /reconcile-reconnect|\/agents\/reconnect/.test(c.url)), false); assert.match(h.get('#terminal-service-recovery-error').textContent, /没有本次恢复的核验证据/); assert.equal(vm.runInContext('reconnectOperations.get("remote:two").acknowledged', h.context), false); }
+  assert.equal(h.calls.some(c => /\/input|\/create|resume/.test(c.url)), false);
+});
+
+test('unknown or blocked owner status stays fenced and cannot be presented as a recoverable dead process', async () => {
+  const h = await harness({handle: async (call, backend) => call.url === '/api/terminal-service/status' ? backend.reply({state: 'unknown', running: false, can_recover: false, message: '原 owner 身份待核验'}) : null});
+  assert.equal(h.get('#terminal-service-notice').hidden, false); assert.match(h.get('#terminal-service-heading').textContent, /状态待核验/); assert.equal(h.get('#terminal-service-recover').disabled, true); assert.equal(h.calls.filter(c => c.options.method === 'POST').length, 0);
+});
+
+test('lost browser storage plus unknown backend result never creates a new reconnect key', async () => {
+  const h = await harness({agents: [worker('remote', 'two', '316', {connected: false, recovery: {code: 'reconnect_unknown', next_action: 'reconcile', message: '旧重连未知'}})]});
+  await h.context.selectAgent(h.agents[0]); await h.context.reconnectTerminal();
+  assert.equal(h.calls.some(c => /\/agents\/reconnect|reconcile-reconnect/.test(c.url)), false); assert.equal(vm.runInContext('reconnectOperations.size', h.context), 0);
+  assert.match(h.get('#agent-recovery-notice').textContent, /不会创建新键绕过未知结果/);
+});
+
+test('server-proven original key offers manual reconciliation after storage loss, never acts before confirmation', async () => {
+  const h = await harness({agents: [worker('remote', 'two', '316', {connected: false, recovery: {code: 'reconnect_unknown', next_action: 'reconcile_reconnect', reconcile_available: true, reconcile_request_keys: ['original-backend-key']}})], handle: async (call, backend) => {
+    if (call.url === '/api/agents/reconcile-reconnect') return backend.reply({...backend.agents[0], operation_state: 'blocked', recovery: {...localDisplayBlocked, next_action: 'reconnect'}});
+  }});
+  await h.context.selectAgent(h.agents[0]); assert.equal(h.get('#terminal-reconcile').hidden, false); await h.context.reconnectTerminal();
+  assert.equal(h.get('#terminal-reconcile-dialog').open, true); assert.equal(h.get('#terminal-reconcile-key').value, 'original-backend-key');
+  assert.equal(h.calls.filter(c => c.options.method === 'POST').length, 0);
+  await h.context.reconcileSelectedReconnect();
+  assert.deepEqual(h.calls.find(c => c.url === '/api/agents/reconcile-reconnect').body, {host: 'remote', thread_id: 'two', request_key: 'original-backend-key', confirm: true});
+  assert.equal(h.calls.find(c => c.url === '/api/agents/reconnect').body.request_key, 'original-backend-key');
+  assert.equal(h.calls.some(c => /terminal-service\/recover|\/input|\/create|controllers/.test(c.url)), false);
+});
+
+test('multiple server-known keys require human selection, not first-key guessing; invalid key is inert', async () => {
+  const h = await harness({agents: [worker('remote', 'two', '316', {connected: false, recovery: {code: 'reconnect_unknown', reconcile_available: true, reconcile_request_keys: ['first-old-key', 'second-old-key']}})], handle: async (call, backend) => call.url === '/api/agents/reconcile-reconnect' ? backend.reply({...backend.agents[0], operation_state: 'blocked', recovery: {...localDisplayBlocked, next_action: 'reconnect'}}) : null});
+  await h.context.selectAgent(h.agents[0]); h.context.openReconnectReconciliation(); assert.equal(h.get('#terminal-reconcile-key').value, ''); assert.equal(h.get('#terminal-reconcile-confirm').disabled, true);
+  await h.context.reconcileSelectedReconnect(); assert.equal(h.calls.filter(c => c.options.method === 'POST').length, 0);
+  h.get('#terminal-reconcile-key').value = 'invented-key'; await h.context.reconcileSelectedReconnect(); assert.equal(h.calls.filter(c => c.options.method === 'POST').length, 0);
+  h.get('#terminal-reconcile-key').value = 'second-old-key'; h.get('#terminal-reconcile-key').onchange(); await h.context.reconcileSelectedReconnect();
+  assert.equal(h.calls.find(c => c.url === '/api/agents/reconcile-reconnect').body.request_key, 'second-old-key'); assert.equal(h.calls.find(c => c.url === '/api/agents/reconnect').body.request_key, 'second-old-key');
+});
+
+test('manual reconciliation refusal or switched target never attaches another worker', async () => {
+  const h = await harness({agents: [worker('remote', 'two', '316', {connected: false, recovery: {code: 'reconnect_unknown', reconcile_available: true, reconcile_request_keys: ['original-key']}}), worker('remote', 'spark', 'Spark', {connected: false})], handle: async call => call.url === '/api/agents/reconcile-reconnect' ? {ok: false, status: 409, json: async () => ({error: '没有原 owner 的足够证据'})} : null});
+  await h.context.selectAgent(h.agents[0]); h.context.openReconnectReconciliation(); await h.context.reconcileSelectedReconnect();
+  assert.match(h.get('#terminal-reconcile-error').textContent, /足够证据/); assert.equal(h.calls.some(c => c.url === '/api/agents/reconnect'), false);
+  await h.context.selectAgent(h.agents[1]); await assert.rejects(h.context.reconcileSelectedReconnect(), /当前工作会话已改变/);
+  assert.equal(h.calls.filter(c => c.url === '/api/agents/reconcile-reconnect').length, 1); assert.equal(h.agents[1].connected, false);
+});
+
+test('selection changed during per-agent reconciliation keeps key on original worker without reattaching either', async () => {
+  let finish;
+  const h = await harness({agents: [worker('remote', 'two', '316', {connected: false, recovery: {code: 'reconnect_unknown', reconcile_available: true, reconcile_request_keys: ['original-key']}}), worker('remote', 'spark', 'Spark', {connected: false})], handle: async (call, backend) => call.url === '/api/agents/reconcile-reconnect' ? new Promise(resolve => { finish = () => resolve(backend.reply({...backend.agents[0], operation_state: 'blocked', recovery: {...localDisplayBlocked, next_action: 'reconnect'}})); }) : null});
+  await h.context.selectAgent(h.agents[0]); h.context.openReconnectReconciliation(); const pending = h.context.reconcileSelectedReconnect(); await settle(); await h.context.selectAgent(h.agents[1]); finish(); await pending;
+  assert.equal(h.calls.some(c => c.url === '/api/agents/reconnect'), false); assert.equal(vm.runInContext('reconnectOperations.get("remote:two").requestKey', h.context), 'original-key'); assert.equal(vm.runInContext('reconnectOperations.has("remote:spark")', h.context), false);
+});
+
+for (const origin of ['ui', 'plugin', undefined]) test(`known blocked ${origin || 'unspecified'} recovery only restores an exact UI-origin request key after storage loss`, async () => {
+  const h = await harness({agents: [worker('remote', 'two', '316', {connected: false, recovery: {...localDisplayBlocked, request_origin: origin, request_key: 'exact-old-key'}}), worker('remote', 'spark', 'Spark', {connected: false, recovery: {...localDisplayBlocked, request_origin: 'ui', request_key: 'different-agent-key'}})]});
+  await h.context.selectAgent(h.agents[0]); await h.context.reconnectTerminal(); const operation = h.calls.find(c => c.url === '/api/agents/reconnect');
+  assert.equal(operation.body.host, 'remote'); assert.equal(operation.body.thread_id, 'two');
+  if (origin === 'ui') assert.equal(operation.body.request_key, 'exact-old-key'); else assert.notEqual(operation.body.request_key, 'exact-old-key');
+  assert.notEqual(operation.body.request_key, 'different-agent-key'); assert.equal(h.calls.some(c => /\/input|\/create|controllers/.test(c.url)), false);
+});
