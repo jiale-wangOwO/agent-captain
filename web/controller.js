@@ -203,6 +203,7 @@
   function disposeDisplay() {
     const session = model.terminal; if (!session) return;
     // There is intentionally no close, resume, or flush-on-destroy request.
+    disposeTerminalScroll(session);
     session.disposed = true; clearTimeout(session.timer); clearTimeout(session.inputTimer); clearTimeout(session.resizeTimer); session.observer?.disconnect(); session.term.dispose(); model.terminal = null; $('#controller-terminal').replaceChildren();
   }
   async function showTerminal(c = model.controller) {
@@ -218,6 +219,7 @@
     const fit = new window.FitAddon.FitAddon(); term.loadAddon(fit); term.open($('#controller-terminal'));
     const session = {kind: 'controller', controllerId: c.id, terminalId: c.terminal_id, key: c.id, agent: c, term, fit, seq: 0, initialized: false, disposed: false, displayConnected: c.connected !== false, closing: false, closed: c.state === 'closed', pasteReading: false, wheelRemainder: 0, wheelBuffer: null, frameGeneration: 0, forceSnapshot: true, writingFrame: false, restoringFrame: false, fitPending: false, resizeGeneration: 0, resizePending: false, targetSize: '', timer: null, inputTimer: null, resizeTimer: null, input: '', inputChain: Promise.resolve(), size: '', observer: null, inputError: '', pollError: '', resizeError: ''};
     model.terminal = session;
+    initializeTerminalScroll(session);
     term.attachCustomKeyEventHandler(event => handleTerminalKey(session, event)); term.attachCustomWheelEventHandler?.(() => false);
     term.onData(data => { if (!canWriteTerminal(session)) return; session.input += data; if (!session.inputTimer) session.inputTimer = setTimeout(() => flushTerminalInput(session), 12); });
     term.onResize(({cols, rows}) => scheduleResize(session, cols, rows));
@@ -270,6 +272,9 @@
   $('#controller-copy').onclick = () => action($('#controller-copy'), () => copyTerminal(model.terminal));
   $('#controller-paste').onclick = () => action($('#controller-paste'), () => pasteTerminal(model.terminal));
   $('#controller-terminal').addEventListener('wheel', event => handleTerminalWheel(model.terminal, event), {capture: true, passive: false});
+  $('#controller-page-up').onclick = () => scrollTerminalView(model.terminal, 'page-up');
+  $('#controller-page-down').onclick = () => scrollTerminalView(model.terminal, 'page-down');
+  $('#controller-latest').onclick = () => scrollTerminalView(model.terminal, 'latest');
   $('#controller-host-directory-home').onclick = () => void loadHostDirectory('');
   $('#controller-host-directory-parent').onclick = () => { if (model.directory?.view?.parent) void loadHostDirectory(model.directory.view.parent); };
   $('#controller-host-directory-select').onclick = () => { const target = model.directory; if (target?.view?.path && target.form === model.form) { model.form.hostRoots[target.host] = [target.view.path]; $('#controller-host-directory-dialog').close(); renderChoices(); } };

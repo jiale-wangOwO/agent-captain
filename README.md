@@ -151,6 +151,8 @@ Long messages are chunked rather than silently clipped. Incomplete or malformed 
 
 ## Input and lifecycle safeguards
 
+**Terminals support safe scrollback and paging.** Use the wheel, PageUp / PageDown, and Previous page / Next page / Back to latest in worker and management displays. Incoming output preserves the reading position. If an SSH/tmux outer alternate screen has no browser-local history, Terminal history opens a read-only snapshot of the exact pane's retained text. Complete Codex responses remain available through the precisely associated Conversation output. Scrolling never sends remote keys, mouse reports, or tasks. See the [terminal reading boundaries](docs/agent-workbench.md).
+
 **0.6.1 adds explicit local display-service recovery.** If the web page is online but worker displays are disconnected, check the workbench's separate service status. When the bound owner is affirmatively offline, confirm **Restore display service**, then reattach only the selected original terminal. The equivalent maintenance commands are `python terminal_service.py status` and `python terminal_service.py recover --confirm`. Recovery never deletes the binding, restarts remote Codex, batch-restores other sessions, or replays tasks; a live PID, ambiguous endpoint, or changed ownership blocks replacement. See the [recovery boundaries](docs/agent-workbench.md).
 
 Ordinary task messages use bracketed paste and Enter in the same foreground Codex terminal. They are not shell commands and are blocked at a shell, login prompt, approval screen, or recognized startup menu. Raw keys are reserved for terminal actions explicitly authorized by the human.

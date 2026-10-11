@@ -143,6 +143,7 @@ def create_server(hub, port=8766, token=None):
             assets = {"/": ("index.html", "text/html; charset=utf-8"),
                       "/ui.js": ("ui.js", "text/javascript; charset=utf-8"),
                       "/controller.js": ("controller.js", "text/javascript; charset=utf-8"),
+                      "/terminal_history.js": ("terminal_history.js", "text/javascript; charset=utf-8"),
                       "/style.css": ("style.css", "text/css; charset=utf-8"),
                       "/prose.css": ("prose.css", "text/css; charset=utf-8")}
             vendors = {"/vendor/xterm.js": ("@xterm/xterm/lib/xterm.js", "text/javascript; charset=utf-8"),
@@ -172,6 +173,14 @@ def create_server(hub, port=8766, token=None):
                 try:
                     args = parse_qs(parsed.query)
                     self.respond(200, hub.terminal_output(args["host"][0], args["thread_id"][0], int(args.get("after", ["0"])[0])))
+                except Exception as error:
+                    self.respond(400, {"error": str(error)})
+            elif parsed.path == "/api/terminals/history" and self.authenticated():
+                try:
+                    args = parse_qs(parsed.query)
+                    self.respond(200, hub.terminal_history(args["host"][0], args["thread_id"][0], int(args.get("lines", ["5000"])[0])))
+                except PermissionError as error:
+                    self.respond(403, {"error": str(error)})
                 except Exception as error:
                     self.respond(400, {"error": str(error)})
             elif parsed.path in ("/api/controllers", "/api/controllers/get", "/api/controllers/output") and self.authenticated():

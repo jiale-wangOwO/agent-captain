@@ -17,6 +17,7 @@ from directory_browser import DirectoryBrowser
 from store import Store
 from terminal_client import BrokerError, TerminalClient
 from controllers import ControllerService, default_workspace_root
+import remote_terminal_history
 
 ROOT = Path(__file__).resolve().parent
 VERSION = "0.6.1"
@@ -899,6 +900,71 @@ class Hub:
         agent = self.get_agent(host, thread_id)
         self._require_open(agent)
         return self.terminals.write(agent["terminal_id"], "resize", {"cols": cols, "rows": rows})
+
+    def terminal_history(self, host, thread_id, lines=5000):
+        """One explicit selected SSH pane read, never terminal input/attachment."""
+        if type(lines) is not int or not 1 <= lines <= remote_terminal_history.MAX_LINES:
+            raise ValueError("终端历史行数必须为 1 至 5000。")
+        with self.registry_lock:
+            agent = self.get_agent(host, thread_id)
+            self._require_open(agent)
+            terminal_id = agent.get("terminal_id")
+            if not isinstance(terminal_id, str) or not remote_terminal_history.SESSION.fullmatch(terminal_id):
+                raise ValueError("此登记没有可读取历史的共享终端。")
+            config = dict(self.host(host))
+            if config["transport"] != "ssh":
+                raise ValueError("本机终端请使用本地滚动区查看已保留的历史；完整 Codex 输出可使用「会话输出」。")
+            target = config.get("target", "")
+            if (not isinstance(target, str) or not target or target.startswith("-")
+                    or any(char.isspace() or ord(char) < 32 for char in target)):
+                raise ValueError("SSH 目标无效，未读取终端历史。")
+        source = (ROOT / "remote_terminal_history.py").read_text(encoding="utf-8")
+        try:
+            reply = subprocess.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ConnectTimeout=10",
+                target, "python3 - --session " + shlex.quote(terminal_id) + " --lines " + str(lines)],
+                input=source, text=True, encoding="utf-8", errors="replace", capture_output=True,
+                timeout=25, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if not isinstance(reply.stdout, str) or len(reply.stdout.encode("utf-8")) > remote_terminal_history.MAX_RESPONSE_BYTES:
+                raise ValueError()
+            payloads = [line[len(remote_terminal_history.RESULT_MARKER):] for line in reply.stdout.splitlines()
+                        if line.startswith(remote_terminal_history.RESULT_MARKER)]
+            payload = json.loads(payloads[0]) if len(payloads) == 1 else None
+            if reply.returncode or not isinstance(payload, dict) or payload.get("ok") is not True:
+                reason = payload.get("reason") if isinstance(payload, dict) else None
+                if reason == "identity_changed":
+                    raise remote_terminal_history.HistoryError("identity_changed")
+                raise ValueError()
+            result = payload.get("result")
+            expected_keys = {"source", "text", "lines", "line_count", "history_size", "alternate_on", "cols", "rows",
+                "truncated", "history_complete", "terminal_id", "identity", "captured_at", "note"}
+            if (not isinstance(result, dict) or set(result) != expected_keys
+                    or result.get("source") != "tmux_pane_history" or result.get("terminal_id") != terminal_id
+                    or not remote_terminal_history.valid_identity(result.get("identity"), terminal_id)
+                    or type(result.get("lines")) is not int or result["lines"] != lines
+                    or type(result.get("line_count")) is not int or not 0 <= result["line_count"] <= lines
+                    or type(result.get("history_size")) is not int or not 0 <= result["history_size"] <= 2 ** 31 - 1
+                    or type(result.get("alternate_on")) is not bool or type(result.get("truncated")) is not bool
+                    or result.get("history_complete") is not False
+                    or type(result.get("cols")) is not int or not 1 <= result["cols"] <= 500
+                    or type(result.get("rows")) is not int or not 1 <= result["rows"] <= 200
+                    or not isinstance(result.get("captured_at"), str) or len(result["captured_at"]) > 128
+                    or not isinstance(result.get("text"), str)
+                    or len(result["text"].encode("utf-8")) > remote_terminal_history.MAX_TEXT_BYTES
+                    or any(ord(char) < 32 and char not in "\n\t" or 127 <= ord(char) <= 159 for char in result["text"])
+                    or result["line_count"] != (len(result["text"].split("\n")) if result["text"] else 0)):
+                raise ValueError()
+        except remote_terminal_history.HistoryError:
+            raise ValueError("读取期间原 tmux/pane 身份或显示状态已变化，未返回历史；请重新核对所选终端。") from None
+        except (OSError, UnicodeError, ValueError, subprocess.TimeoutExpired):
+            # Do not echo SSH banners, provider errors, terminal text or paths in
+            # failures. No connection/auth settings or worker state are changed.
+            raise ValueError("只读终端历史暂不可用；请检查 SSH 路由或原终端，或使用「会话输出」。未重连、输入或启动任何会话。") from None
+        with self.registry_lock:
+            current = self.get_agent(host, thread_id)
+            self._require_open(current)
+            if current.get("terminal_id") != terminal_id or dict(self.host(host)) != config:
+                raise ValueError("读取期间所选终端登记已变化，未返回历史；请重新核对。")
+        return {key: value for key, value in result.items() if key not in ("identity", "note")} | {"note": remote_terminal_history.NOTE}
 
     def terminal_close(self, host, thread_id, confirm=False):
         if confirm is not True:

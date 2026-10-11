@@ -205,7 +205,7 @@ function renderDetail() {
   for (const id of ['terminal-focus', 'terminal-connect', 'terminal-copy', 'terminal-paste', 'terminal-close']) $(`#${id}`).disabled = closed || closing;
   if (disconnected) { $('#terminal-focus').disabled = true; $('#terminal-paste').disabled = true; }
   if (terminalSession?.key === selectedAgent) { terminalSession.closed = closed; if (closed || closing) { terminalSession.closing = true; cancelPendingResize(terminalSession); terminalSession.term.blur(); } }
-  $('#terminal-help').textContent = closed ? '终端已关闭，保留的输出仍可查看。需要继续工作时请新建终端；这个已关闭的进程不会重新启动。' : closing ? '终端正在关闭或关闭结果尚未确认，输入与重连已暂停。保留的输出仍可查看，请先核对进程状态。' : disconnected ? '显示连接已断开，输入已暂停。保留画面仍可查看和复制；这不能证明远端工作进程退出。可以点击「重新连接」接回原终端，会话和进程是否仍在需重新核对。' : '选中文字后 Ctrl+C 复制，无选中时 Ctrl+C 中断。Ctrl+V 粘贴，也可用 Ctrl+Shift+C/V 或右键菜单。关闭页面会保留任务；「关闭终端」会结束其中的工作进程。';
+  $('#terminal-help').textContent = '滚轮、PageUp / PageDown 只滚动翻页，不输入到 agent。Shift+Home 查看最早保留历史，Shift+End 回到最新。' + (closed ? '终端已关闭，保留的输出仍可查看。需要继续工作时请新建终端；这个已关闭的进程不会重新启动。' : closing ? '终端正在关闭或关闭结果尚未确认，输入与重连已暂停。保留的输出仍可查看，请先核对进程状态。' : disconnected ? '显示连接已断开，输入已暂停。保留画面仍可查看和复制；这不能证明远端工作进程退出。可以点击「重新连接」接回原终端，会话和进程是否仍在需重新核对。' : '选中文字后 Ctrl+C 复制，无选中时 Ctrl+C 中断。Ctrl+V 粘贴，也可用 Ctrl+Shift+C/V 或右键菜单。关闭页面会保留任务；「关闭终端」会结束其中的工作进程。');
   $('#terminal-connect').textContent = disconnected ? '重新连接' : '刷新画面';
   $('#terminal-reconcile').hidden = !terminal || !disconnected || !canReconcileReconnect(agent);
   $('#terminal-reconcile').disabled = closed || closing;
@@ -341,6 +341,7 @@ function disposeTerminal() {
   if (!terminalSession) return;
   if (terminalSession.input) flushTerminalInput(terminalSession);
   terminalSession.disposed = true; clearTimeout(terminalSession.timer); clearTimeout(terminalSession.inputTimer); clearTimeout(terminalSession.resizeTimer);
+  disposeTerminalScroll(terminalSession);
   terminalSession.observer.disconnect(); terminalSession.term.dispose(); terminalSession = null; $('#terminal').replaceChildren(); showTerminalError('');
   hideTerminalContext();
 }
@@ -349,7 +350,7 @@ function isCurrentTerminal(session) {
   return !!session && terminalSession === session && selectedAgent === session.key && !session.disposed && !session.closing && !session.closed && session.initialized;
 }
 function isTerminalDisplayCurrent(session) { return session?.kind === 'controller' ? !!window.PronController?.isTerminalCurrent(session) : terminalSession === session; }
-function canWriteTerminal(session) { return isCurrentTerminal(session) && sessionConnected(session) && (session.kind !== 'controller' || window.PronController?.canWriteTerminal(session)); }
+function canWriteTerminal(session) { return isCurrentTerminal(session) && sessionConnected(session) && !window.PronTerminalHistory?.isActive?.(session) && (session.kind !== 'controller' || window.PronController?.canWriteTerminal(session)); }
 function terminalApiPath(session, operation) { return `/api/${session.kind === 'controller' ? 'controllers' : 'terminals'}/${operation}`; }
 function terminalApiIdentity(session) { return session.kind === 'controller' ? {id: session.controllerId} : {host: session.agent.host, thread_id: session.agent.thread_id}; }
 function terminalStatusElement(session) { return $(session.kind === 'controller' ? '#controller-terminal-status' : '#terminal-status'); }
@@ -366,7 +367,7 @@ function updateDisplayConnection(session, connected) {
     clearTimeout(session.inputTimer); session.inputTimer = null; session.input = '';
     session.term.blur();
   }
-  if (session.term.options) session.term.options.disableStdin = !connected || session.closing || session.closed;
+  if (session.term.options) session.term.options.disableStdin = !connected || session.closing || session.closed || !!window.PronTerminalHistory?.isActive?.(session);
   if (changed && !session.disposed && terminalSession === session) { renderDetail(); renderAgents(); renderHosts(); }
 }
 function isDisconnectedError(error) { return /(?:Terminal (?:is )?disconnected|SSH transport disconnected)/i.test(error.message || ''); }
@@ -380,6 +381,14 @@ function classifyTerminalKey(event, hasSelection) {
   return null;
 }
 function handleTerminalKey(session, event) {
+  const pageIntent = classifyTerminalScrollKey(event);
+  if (pageIntent) {
+    // Navigation is a display action even while disconnected. Do not encode it
+    // as an agent key, focus the textarea, fit the terminal, or flush a draft.
+    event.preventDefault(); event.stopPropagation();
+    scrollTerminalView(session, pageIntent);
+    return false;
+  }
   const intent = classifyTerminalKey(event, session.term.hasSelection());
   if (!intent) return true;
   // xterm must not turn Ctrl+V into ^V or selected Ctrl+C into ^C.
@@ -388,6 +397,156 @@ function handleTerminalKey(session, event) {
   event.preventDefault(); event.stopPropagation();
   if (intent === 'copy') void copyTerminal(session); else void pasteTerminal(session);
   return false;
+}
+function classifyTerminalScrollKey(event) {
+  if (event.type !== 'keydown' || event.altKey || event.metaKey || event.ctrlKey) return null;
+  if (event.key === 'PageUp') return 'page-up';
+  if (event.key === 'PageDown') return 'page-down';
+  if (event.shiftKey && event.key === 'Home') return 'top';
+  if (event.shiftKey && event.key === 'End') return 'latest';
+  return null;
+}
+function terminalScrollPosition(session) {
+  const buffer = session?.term?.buffer?.active;
+  if (!buffer) return null;
+  const bottom = Math.max(0, Number(buffer.baseY) || 0);
+  const position = Math.max(0, Math.min(bottom, Number(buffer.viewportY) || 0));
+  return {buffer, position, bottom, following: position >= bottom, alternate: buffer.type === 'alternate'};
+}
+function terminalScrollControls(session) {
+  const prefix = session?.kind === 'controller' ? 'controller' : 'terminal';
+  return {up: $(`#${prefix}-page-up`), down: $(`#${prefix}-page-down`), latest: $(`#${prefix}-latest`), status: $(`#${prefix}-scroll-status`)};
+}
+function renderTerminalScroll(session) {
+  if (!session || session.disposed || !isTerminalDisplayCurrent(session)) return;
+  const view = terminalScrollPosition(session), controls = terminalScrollControls(session);
+  const unavailable = !view;
+  if (controls.up) controls.up.disabled = unavailable || view.position <= 0;
+  if (controls.down) controls.down.disabled = unavailable || view.following;
+  if (controls.latest) controls.latest.disabled = unavailable || view.following;
+  if (!controls.status) return;
+  const text = !view ? '本地翻页尚未就绪' : view.bottom > 0
+    ? view.following ? `正在跟随最新画面 · 本地保留 ${view.bottom} 行历史` : `正在查看历史 · 距最新 ${view.bottom - view.position} 行；新输出不会跳回底部`
+    : view.alternate ? session.kind === 'controller'
+      ? '当前全屏画面没有本地历史；终端画面不是完整会话记录。'
+      : '当前全屏画面没有本地历史；较早的对话请用「会话输出」。'
+    : '当前已在最新画面 · 暂无本地历史';
+  if (controls.status.textContent !== text) controls.status.textContent = text;
+  controls.latest?.setAttribute('aria-pressed', String(!!view?.following));
+  window.PronTerminalHistory?.render?.(session);
+}
+function disposeTerminalScroll(session) {
+  window.PronTerminalHistory?.dispose?.(session);
+  session.scrollView?.marker?.dispose?.(); session.scrollView = null;
+  session.scrollSubscription?.dispose?.(); session.scrollSubscription = null;
+  for (const [element, type, handler] of session.scrollGestureListeners || []) element.removeEventListener?.(type, handler, true);
+  session.scrollGestureListeners = []; session.scrollGesture = null;
+}
+function captureTerminalScroll(session) {
+  const view = terminalScrollPosition(session); if (!view) return null;
+  const anchor = [];
+  // Real buffer lines, not a retained stream of TUI redraws. Markers keep a
+  // viewport anchored when xterm trims normal scrollback during new output.
+  if (!view.following && view.buffer.getLine) for (let line = 0; line < 3; line++) {
+    const value = view.buffer.getLine(view.position + line)?.translateToString?.(true);
+    if (typeof value === 'string') anchor.push(value);
+  }
+  const marker = !view.following && !view.alternate && session.term.registerMarker
+    ? session.term.registerMarker(view.position - (view.bottom + (Number(view.buffer.cursorY) || 0))) : null;
+  return {...view, anchor, marker, distance: view.bottom - view.position};
+}
+function rememberTerminalScroll(session) {
+  const next = captureTerminalScroll(session);
+  session.scrollView?.marker?.dispose?.(); session.scrollView = next;
+  renderTerminalScroll(session);
+}
+function initializeTerminalScroll(session) {
+  session.scrollIntentVersion = 0;
+  const container = session.term.element || $(session.kind === 'controller' ? '#controller-terminal' : '#terminal');
+  const markGestureEvent = gesture => {
+    gesture.eventActive = true;
+    const revision = gesture.eventRevision = (gesture.eventRevision || 0) + 1;
+    // xterm's scrollbar reacts synchronously to this captured DOM event.
+    // A later parser task is not human input, even if the button is held down
+    // and full scrollback trims viewportY without changing capped baseY.
+    Promise.resolve().then(() => { if (session.scrollGesture === gesture && gesture.eventRevision === revision) gesture.eventActive = false; });
+  };
+  const beginGesture = event => {
+    if (session.disposed || !isTerminalDisplayCurrent(session) || event.button != null && event.button !== 0) return;
+    const scrollbar = event.target?.closest?.('.xterm-scrollable-element .scrollbar, .xterm-viewport');
+    if (!scrollbar || container?.contains && !container.contains(scrollbar)) return;
+    const view = terminalScrollPosition(session); if (!view) return;
+    session.scrollGesture = {buffer: view.buffer, bottom: view.bottom, position: view.position, pointerId: event.pointerId};
+    markGestureEvent(session.scrollGesture);
+  };
+  const moveGesture = event => {
+    const gesture = session.scrollGesture;
+    if (!gesture || event.pointerId != null && gesture.pointerId != null && event.pointerId !== gesture.pointerId) return;
+    markGestureEvent(gesture);
+  };
+  const endGesture = event => {
+    const gesture = session.scrollGesture;
+    if (!gesture || event.pointerId != null && gesture.pointerId != null && event.pointerId !== gesture.pointerId) return;
+    // A scrollbar's last movement can run later in this same pointer-up event.
+    Promise.resolve().then(() => { if (session.scrollGesture === gesture) session.scrollGesture = null; });
+  };
+  session.scrollGestureListeners = [[container, 'pointerdown', beginGesture], [container, 'mousedown', beginGesture],
+    [document, 'pointermove', moveGesture], [document, 'mousemove', moveGesture],
+    [document, 'pointerup', endGesture], [document, 'pointercancel', endGesture], [document, 'mouseup', endGesture]].filter(([element]) => element?.addEventListener);
+  for (const [element, type, handler] of session.scrollGestureListeners) element.addEventListener(type, handler, true);
+  session.scrollSubscription = session.term.onScroll?.(() => {
+    const view = terminalScrollPosition(session), gesture = session.scrollGesture;
+    // Parser auto-scroll changes baseY (or activates a different buffer). A
+    // captured scrollbar drag changes viewportY at unchanged geometry. Only
+    // that genuine human gesture can override a pending frame checkpoint.
+    const humanGesture = !!gesture?.eventActive && !!view && gesture.buffer === view.buffer && gesture.bottom === view.bottom && gesture.position !== view.position;
+    if (gesture && view) { gesture.buffer = view.buffer; gesture.bottom = view.bottom; gesture.position = view.position; }
+    if (session.disposed || session.scrollApplying || session.writingFrame && !humanGesture) return;
+    session.scrollIntentVersion++; rememberTerminalScroll(session);
+  });
+  rememberTerminalScroll(session);
+}
+function restoreTerminalScroll(session, saved, reset = false) {
+  const view = terminalScrollPosition(session);
+  if (!saved || !view || session.disposed || !isTerminalDisplayCurrent(session)) { saved?.marker?.dispose?.(); renderTerminalScroll(session); return; }
+  // Alternate screens are not the normal scrollback history. Do not search or
+  // apply a normal-buffer anchor to a newly activated full-screen TUI (or vice
+  // versa); retain the newly active buffer's own actual viewport instead.
+  if (saved.alternate !== view.alternate) { saved.marker?.dispose?.(); rememberTerminalScroll(session); return; }
+  let target = view.bottom;
+  if (!saved.following) {
+    if (!reset && saved.buffer === view.buffer) target = saved.marker && !saved.marker.isDisposed ? saved.marker.line : saved.marker?.isDisposed ? 0 : saved.position;
+    else {
+      target = Math.max(0, view.bottom - saved.distance);
+      // A canonical snapshot/reset invalidates markers. Recover the retained
+      // top lines if they still exist; otherwise retain the distance to latest.
+      if (saved.anchor?.some(line => line.trim()) && view.buffer.getLine) {
+        let closest = null;
+        for (let position = 0; position <= view.bottom; position++) {
+          if (saved.anchor.every((line, offset) => view.buffer.getLine(position + offset)?.translateToString?.(true) === line)
+            && (closest === null || Math.abs(position - target) < Math.abs(closest - target))) closest = position;
+        }
+        if (closest !== null) target = closest;
+      }
+    }
+  }
+  target = Math.max(0, Math.min(view.bottom, Number(target) || 0));
+  session.scrollApplying = true;
+  try { if (target !== view.position) session.term.scrollToLine?.(target); }
+  finally { session.scrollApplying = false; saved.marker?.dispose?.(); }
+  rememberTerminalScroll(session);
+}
+function scrollTerminalView(session, intent) {
+  if (!session || session.disposed || !isTerminalDisplayCurrent(session)) return;
+  if (window.PronTerminalHistory?.page?.(session, intent)) return;
+  const view = terminalScrollPosition(session); if (!view) { renderTerminalScroll(session); return; }
+  session.scrollIntentVersion = (session.scrollIntentVersion || 0) + 1;
+  session.wheelRemainder = 0;
+  const page = Math.max(1, (Number(session.term.rows) || 1) - 1);
+  const target = intent === 'latest' ? view.bottom : intent === 'top' ? 0 : view.position + (intent === 'page-up' ? -page : page);
+  const amount = Math.max(0, Math.min(view.bottom, target)) - view.position;
+  if (amount) session.term.scrollLines?.(amount);
+  rememberTerminalScroll(session);
 }
 function terminalWheelLineHeight(term) {
   const screen = term.element?.querySelector('.xterm-screen');
@@ -401,6 +560,7 @@ function handleTerminalWheel(session, event) {
   // or into mouse/SGR reports. Wheels here only change the local display.
   event.stopImmediatePropagation();
   if (!session || session.disposed || !isTerminalDisplayCurrent(session) || event.ctrlKey) return;
+  if (window.PronTerminalHistory?.wheel?.(session, event)) return;
   const delta = Number(event.deltaY); if (!Number.isFinite(delta) || delta === 0) return;
   const buffer = session.term.buffer?.active; if (!buffer) return;
   if (session.wheelBuffer !== buffer) { session.wheelBuffer = buffer; session.wheelRemainder = 0; }
@@ -417,7 +577,10 @@ function handleTerminalWheel(session, event) {
   if (!wholeLines) return;
   session.wheelRemainder -= wholeLines;
   const amount = Math.max(-position, Math.min(wholeLines, bottom - position));
-  if (amount) session.term.scrollLines(amount);
+  if (amount) {
+    session.scrollIntentVersion = (session.scrollIntentVersion || 0) + 1;
+    session.term.scrollLines(amount); rememberTerminalScroll(session);
+  }
 }
 function openClipboardFallback(session, mode, text = '') {
   if (!isCurrentTerminal(session) || mode === 'paste' && !canWriteTerminal(session)) { toast('终端已切换、关闭或断开，本次剪贴板操作已取消。'); return; }
@@ -430,7 +593,9 @@ function openClipboardFallback(session, mode, text = '') {
 }
 async function copyTerminal(session = terminalSession) {
   if (!isCurrentTerminal(session)) { toast('请先连接一个正在运行的终端。'); return; }
-  const text = session.term.getSelection(); if (!text) { toast('请先用鼠标选中要复制的终端文字。'); return; }
+  const text = window.PronTerminalHistory?.isActive?.(session)
+    ? window.PronTerminalHistory?.selection?.(session) || '' : session.term.getSelection();
+  if (!text) { toast('请先用鼠标选中要复制的终端文字。'); return; }
   try {
     if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
     await navigator.clipboard.writeText(text); toast('终端选中文字已复制。');
@@ -462,12 +627,16 @@ function showTerminalContext(event) {
 }
 function safeFit(session) {
   if (session.disposed || !isTerminalDisplayCurrent(session) || !sessionConnected(session)) return;
+  if (window.PronTerminalHistory?.isActive?.(session)) return;
   if (session.kind === 'controller' && !window.PronController?.isDisplayVisible(session)) return;
   if (session.writingFrame) { session.fitPending = true; return; }
   session.fitPending = false;
+  const view = captureTerminalScroll(session);
   session.fit.fit();
+  restoreTerminalScroll(session, view);
 }
 async function writeTerminalFrame(session, data, reset, cols, rows) {
+  const view = captureTerminalScroll(session), scrollVersion = session.scrollIntentVersion || 0;
   session.writingFrame = true;
   session.restoringFrame = !!reset;
   try {
@@ -479,6 +648,8 @@ async function writeTerminalFrame(session, data, reset, cols, rows) {
   } finally {
     session.restoringFrame = false;
     session.writingFrame = false;
+    if (scrollVersion === (session.scrollIntentVersion || 0)) restoreTerminalScroll(session, view, reset);
+    else { view?.marker?.dispose?.(); rememberTerminalScroll(session); }
   }
 }
 async function openTerminal(agent, options = {}) {
@@ -494,6 +665,7 @@ async function openTerminal(agent, options = {}) {
   const fit = new window.FitAddon.FitAddon(); term.loadAddon(fit); term.open($('#terminal'));
   const session = {key: agentKey(agent), agent, term, fit, seq: 0, initialized: false, disposed: false, displayConnected: agent.connected !== false, closing: false, closed: isClosedAgent(agent), pasteReading: false, wheelRemainder: 0, wheelBuffer: null, frameGeneration: 0, forceSnapshot: true, writingFrame: false, restoringFrame: false, fitPending: false, resizeGeneration: 0, resizePending: false, targetSize: '', timer: null, inputTimer: null, resizeTimer: null, input: '', inputChain: Promise.resolve(), size: '', observer: null, inputError: '', pollError: '', resizeError: ''};
   terminalSession = session;
+  initializeTerminalScroll(session);
   term.attachCustomKeyEventHandler(event => handleTerminalKey(session, event));
   term.attachCustomWheelEventHandler?.(() => false);
   term.onData(data => { if (!canWriteTerminal(session)) return; session.input += data; if (!session.inputTimer) session.inputTimer = setTimeout(() => flushTerminalInput(session), 12); });
@@ -522,6 +694,7 @@ function cancelPendingResize(session) {
 }
 function scheduleResize(session, cols, rows) {
   if (session.disposed || session.closing || session.closed || session.restoringFrame || !session.initialized || !sessionConnected(session) || cols < 2 || rows < 2) return;
+  if (window.PronTerminalHistory?.isActive?.(session)) return;
   if (session.kind === 'controller' && !window.PronController?.isDisplayVisible(session)) return;
   const size = `${cols}:${rows}`;
   if ((session.resizePending && session.targetSize === size) || (!session.resizePending && session.size === size)) return;
@@ -532,6 +705,7 @@ function scheduleResize(session, cols, rows) {
   clearTimeout(session.resizeTimer); session.resizeTimer = setTimeout(async () => {
     if (session.disposed || !isTerminalDisplayCurrent(session) || generation !== session.resizeGeneration) return;
     session.resizeTimer = null;
+    if (window.PronTerminalHistory?.isActive?.(session)) { cancelPendingResize(session); return; }
     if (session.closing || session.closed || !sessionConnected(session)) { cancelPendingResize(session); return; }
     try {
       await request(terminalApiPath(session, 'resize'), {...terminalApiIdentity(session), cols, rows});
@@ -959,6 +1133,9 @@ $('#terminal-reconcile-dialog').addEventListener('close', () => { if (!reconnect
 $('#terminal-focus').onclick = () => terminalSession?.term.focus();
 $('#terminal-copy').onclick = () => action($('#terminal-copy'), () => copyTerminal(terminalSession));
 $('#terminal-paste').onclick = () => action($('#terminal-paste'), () => pasteTerminal(terminalSession));
+$('#terminal-page-up').onclick = () => scrollTerminalView(terminalSession, 'page-up');
+$('#terminal-page-down').onclick = () => scrollTerminalView(terminalSession, 'page-down');
+$('#terminal-latest').onclick = () => scrollTerminalView(terminalSession, 'latest');
 $('#terminal-close').onclick = openCloseTerminal;
 $('#terminal-output').onclick = () => action($('#terminal-output'), () => readConversationOutput());
 $('#terminal-bind-output').onclick = openBindOutput;
