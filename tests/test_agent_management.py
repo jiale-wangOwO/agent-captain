@@ -83,25 +83,33 @@ class AgentManagementTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.hub.update_agent("remote", "worker")
 
-    def test_ui_metadata_does_not_activate_inactive_worker(self):
+    def test_ui_metadata_keeps_stored_activation_but_open_worker_is_automatically_managed(self):
         self.hub.store.set_active("remote", "worker", False)
         result = self.hub.update_agent("remote", "worker", pinned=True)
-        self.assertFalse(result["active"])
+        self.assertTrue(result["active"])
         self.assertTrue(result["pinned"])
+        self.assertEqual(self.hub.store.agent("remote", "worker")["active"], 0)
 
-    def test_plugin_metadata_and_reconnect_enforce_activation_and_scope(self):
+    def test_plugin_metadata_and_reconnect_ignore_worker_grants_but_enforce_controller_identity(self):
         self.hub.controllers.shutdown()
         self.hub.controllers = Controllers(self.hub)
         self.hub.controllers.grants["a"] = {"remote::worker"}
         self.hub.controllers.grants["b"] = set()
         updated = self.hub.plugin_call("update_agent", {"agent_id": "remote::worker", "alias": "Scoped", "request_key": "a-update"}, controller_id="a")
         self.assertEqual(updated["alias"], "Scoped")
+        # Both authenticated ready managers can use connected workers without
+        # selecting old per-worker grants; revoking manager identity still
+        # fences every tool, independent of automatic worker access.
+        updated_b = self.hub.plugin_call("update_agent", {"agent_id": "remote::worker", "alias": "Shared", "request_key": "b-update"}, controller_id="b")
+        self.assertEqual(updated_b["alias"], "Shared")
+        self.hub.controllers.active.remove("b")
         for tool, kwargs in (("update_agent", {"alias": "No"}), ("reconnect_agent", {})):
             with self.assertRaises(PermissionError):
                 self.hub.plugin_call(tool, {"agent_id": "remote::worker", "request_key": "b-request", **kwargs}, controller_id="b")
         self.hub.store.set_active("remote", "worker", False)
-        with self.assertRaises(PermissionError):
-            self.hub.plugin_call("reconnect_agent", {"agent_id": "remote::worker", "request_key": "inactive"}, controller_id="a")
+        result = self.hub.plugin_call("reconnect_agent", {"agent_id": "remote::worker", "request_key": "inactive"}, controller_id="a")
+        self.assertTrue(result["active"])
+        self.assertEqual(result["recovery"]["code"], "already_connected")
         self.assertEqual(self.probes, [])
         self.assertEqual(self.creates(), [])
 

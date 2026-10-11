@@ -63,20 +63,20 @@ class Controllers:
     def view_context(self, cid):
         if cid not in self.active:
             raise PermissionError("revoked")
-        return {"mode": "scoped", "controller_id": cid, "controller": {"state": self.state,
+        return {"mode": "scoped", "controller_id": cid, "worker_access": "automatic", "controller": {"state": self.state,
                 "session_id": "11111111-1111-4111-8111-111111111111", "tools_ready": True}}
 
     def mark_tool_seen(self, cid):
         self.seen.append(cid)
 
     def allowed_agents(self, cid):
-        return sorted(self.grants[cid])
+        return sorted(self.hub.agent_id(row["host"], row["thread_id"]) for row in self.hub.managed_worker_rows())
 
     def allowed_hosts(self, cid):
         return self.roots[cid]
 
     def authorize(self, cid, host, thread_id):
-        return cid in self.active and host + "::" + thread_id in self.grants[cid]
+        return cid in self.active and self.state == "ready" and self.hub.is_managed_worker(self.hub.store.agent(host, thread_id))
 
     def authorize_creation(self, cid, host, cwd):
         if cid not in self.active:
@@ -113,22 +113,33 @@ class ControllerScopeTests(unittest.TestCase):
     def call(self, tool, cid="a", **arguments):
         return self.hub.plugin_call(tool, arguments, controller_id=cid)
 
-    def test_scope_filters_inventory_hosts_reads_and_inactive_workers(self):
+    def test_automatic_inventory_includes_all_open_workers_without_legacy_activation(self):
         result = self.call("list_active_agents")
-        self.assertEqual([r["agent_id"] for r in result["agents"]], ["local::one"])
+        self.assertEqual(set(r["agent_id"] for r in result["agents"]), {"local::one", "local::two", "local::inactive"})
         self.assertEqual(result["connected_hosts"], ["local"])
         self.assertFalse(result["legacy_scope_shared"])
         for name in ("two", "inactive"):
-            with self.assertRaises(PermissionError):
-                self.call("get_agent", agent_id="local::" + name)
+            self.assertEqual(self.call("get_agent", agent_id="local::" + name)["agent_id"], "local::" + name)
         legacy = self.hub.plugin_call("list_active_agents", {})
         self.assertTrue(legacy["legacy_scope_shared"])
-        self.assertEqual(len(legacy["agents"]), 2)
+        self.assertEqual(len(legacy["agents"]), 3)
 
     def test_self_context_marks_real_tool_use_not_model_claim(self):
         self.assertEqual(self.call("get_controller_context")["controller_id"], "a")
         self.assertEqual(self.hub.controllers.seen, ["a"])
         self.assertEqual(self.hub.plugin_call("get_controller_context", {})["mode"], "legacy")
+
+    def test_future_and_disconnected_original_workers_join_without_creation_roots(self):
+        tid = "ceohub-" + "4" * 24
+        self.terminals.add(tid, "hidden").update(connected=False, state="disconnected", agent_ready=False)
+        self.hub.store.remember("hidden", "later", "Later", active=False, terminal_id=tid, mode="terminal", cwd="/work")
+        result = self.call("list_active_agents")
+        self.assertIn("hidden::later", [r["agent_id"] for r in result["agents"]])
+        self.assertFalse(self.call("get_agent", agent_id="hidden::later")["connected"])
+        self.assertEqual(self.hub.controllers.allowed_hosts("b"), {})
+        self.assertTrue(self.hub.controllers.authorize("b", "hidden", "later"))
+        self.assertEqual(self.terminals.creates, [])
+        self.assertEqual(self.terminals.writes, [])
 
     def test_bootstrap_can_only_read_self_context_not_worker_inventory_or_dispatch(self):
         self.hub.controllers.state = "initializing"
@@ -151,38 +162,42 @@ class ControllerScopeTests(unittest.TestCase):
             self.call("get_delivery", request_id=other["request_id"])
         self.assertEqual(self.call("get_delivery", request_id=first["request_id"])["state"], "submitted")
 
-    def test_revocation_cancels_only_own_uncommitted_outbox_and_blocks_retry(self):
+    def test_prior_revoked_delivery_never_replays_after_automatic_management(self):
         self.hub.controllers.grants["b"].add("local::one")
         self.terminals.error = BrokerError("human is typing", "human_busy", 409)
         one = self.call("send_agent_message", agent_id="local::one", text="queued", request_key="pending")
         two = self.call("send_agent_message", cid="b", agent_id="local::one", text="queued", request_key="pending")
         self.assertEqual(one["state"], "human_busy")
         with self.hub.registry_lock:
-            self.hub.controllers.grants["a"].clear()
             self.hub.scope_revoking("a", ["local::one"])
         self.assertEqual(self.hub.store.delivery(one["request_id"])["state"], "scope_revoked")
         self.assertEqual(self.hub.store.delivery(two["request_id"])["state"], "human_busy")
         self.terminals.error = None
-        with self.assertRaises(PermissionError):
-            self.call("send_agent_message", agent_id="local::one", text="queued", request_key="pending")
+        retry = self.call("send_agent_message", agent_id="local::one", text="queued", request_key="pending")
+        self.assertEqual(retry["state"], "scope_revoked")
         self.assertEqual(self.terminals.writes, [])
 
     def test_last_moment_scope_recheck_prevents_write_after_enqueue(self):
         enqueue = self.hub.store.enqueue
         def revoke(*args, **kwargs):
             result = enqueue(*args, **kwargs)
-            self.hub.controllers.grants["a"].clear()
+            self.hub.controllers.active.remove("a")
             return result
         with patch.object(self.hub.store, "enqueue", side_effect=revoke):
             result = self.call("send_agent_message", agent_id="local::one", text="must not write", request_key="race")
         self.assertEqual(result["state"], "scope_revoked")
         self.assertEqual(self.terminals.writes, [])
 
-    def test_events_do_not_expose_other_workers(self):
+    def test_events_include_all_workers_but_not_history_or_manager_references(self):
         self.hub.record_event("terminal_output", host="local", thread_id="two")
         self.hub.record_event("terminal_output", host="local", thread_id="one")
+        self.hub.store.remember("local", "history", "History", active=True, mode="history")
+        self.hub.record_event("terminal_output", host="local", thread_id="history")
+        self.hub.controllers.manager_refs.add("manager")
+        self.hub.store.remember("local", "manager", "Manager", active=True, mode="terminal", terminal_id="ceohub-" + "f" * 24)
+        self.hub.record_event("terminal_output", host="local", thread_id="manager")
         result = self.call("poll_events")
-        self.assertEqual([e["data"]["thread_id"] for e in result["events"]], ["one"])
+        self.assertEqual([e["data"]["thread_id"] for e in result["events"]], ["two", "one"])
 
     def test_manager_reference_cannot_be_registered_bound_or_read(self):
         self.hub.controllers.manager_refs.add("manager-session")
@@ -207,8 +222,9 @@ class ControllerScopeTests(unittest.TestCase):
         with patch.object(self.hub.directories, "list", return_value={"path": args["cwd"]}):
             result = self.call("create_agent", **args)
         self.assertTrue(result["created"])
-        self.assertIn(result["agent_id"], self.hub.controllers.grants["a"])
-        self.assertNotIn(result["agent_id"], self.hub.controllers.grants["b"])
+        self.assertIn(result["agent_id"], self.hub.controllers.allowed_agents("a"))
+        self.assertIn(result["agent_id"], self.hub.controllers.allowed_agents("b"))
+        self.assertFalse(self.hub.controllers.authorize_creation("b", "local", "C:/scope/other"))
         self.assertEqual(self.terminals.writes, [])
 
     def test_http_auth_identity_not_body_identity_and_browser_cannot_use_cap(self):
@@ -216,8 +232,8 @@ class ControllerScopeTests(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         opener = build_opener(ProxyHandler({}))
-        def request(token, arguments, origin=None):
-            body = {"tool": "get_agent", "controller_id": "b", "arguments": arguments}
+        def request(token, arguments, origin=None, tool="get_agent"):
+            body = {"tool": tool, "controller_id": "b", "arguments": arguments}
             headers = {"Authorization": "Bearer " + token}
             if origin:
                 headers["Origin"] = origin
@@ -225,7 +241,9 @@ class ControllerScopeTests(unittest.TestCase):
                 return json.load(reply)
         try:
             self.assertEqual(request("cap-a", {"agent_id": "local::one"})["agent_id"], "local::one")
-            for token, args, origin in (("cap-a", {"agent_id": "local::two"}, None),
+            self.assertEqual(request("cap-a", {"agent_id": "local::two"})["agent_id"], "local::two")
+            self.assertEqual(request("cap-a", {}, tool="get_controller_context")["controller_id"], "a")
+            for token, args, origin in (("cap-a", {"agent_id": "local::missing"}, None),
                                         ("cap-a", {"agent_id": "local::one"}, server.origin),
                                         ("invalid", {"agent_id": "local::one"}, None)):
                 with self.assertRaises(HTTPError) as error:

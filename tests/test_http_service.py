@@ -36,7 +36,7 @@ class HttpServiceTests(unittest.TestCase):
             return json.load(response)
 
     def test_plugin_read_is_authorized_without_browser_cookie_or_model(self):
-        self.hub.store.remember("local", "active", "test", active=True)
+        self.hub.store.remember("local", "active", "test", active=False, mode="terminal", terminal_id="ceohub-" + "a" * 32)
         result = self.request("/api/plugin", {"tool": "list_active_agents", "arguments": {}}, Authorization="Bearer test-private-token")
         self.assertEqual(result["agents"][0]["agent_id"], "local::active")
         self.assertFalse(hasattr(self.hub, "servers"))
@@ -57,7 +57,7 @@ class HttpServiceTests(unittest.TestCase):
         cookie = "ceo_session=test-private-token"
         with self.assertRaises(HTTPError):
             self.request("/api/agents/activate", {"host": "local", "thread_id": "t", "active": True}, Cookie=cookie)
-        self.hub.store.remember("local", "t", "test")
+        self.hub.store.remember("local", "t", "test", active=False, mode="terminal", terminal_id="ceohub-" + "b" * 32)
         row = self.request("/api/agents/activate", {"host": "local", "thread_id": "t", "active": True}, Cookie=cookie, Origin=self.server.origin)
         self.assertTrue(row["active"])
 
@@ -67,6 +67,16 @@ class HttpServiceTests(unittest.TestCase):
         self.assertEqual(error.exception.code, 403)
         with self.assertRaises(HTTPError):
             self.request("/api/terminals/output?host=local&thread_id=t&after=0")
+
+    def test_legacy_worker_scope_body_does_not_clear_creation_directory_permissions(self):
+        self.hub.controllers.set_scope = Mock(return_value={"worker_access": "automatic"})
+        cookie = "ceo_session=test-private-token"
+        self.request("/api/controllers/scope", {"id": "fixture", "agent_ids": []}, Cookie=cookie, Origin=self.server.origin)
+        self.hub.controllers.set_scope.assert_called_once_with("fixture", [], allowed_hosts=None, host_roots=None)
+        self.hub.controllers.set_scope.reset_mock()
+        roots = {"local": ["C:/synthetic-project"]}
+        self.request("/api/controllers/scope", {"id": "fixture", "host_roots": roots}, Cookie=cookie, Origin=self.server.origin)
+        self.hub.controllers.set_scope.assert_called_once_with("fixture", [], allowed_hosts=None, host_roots=roots)
 
     def test_terminal_routes_forward_same_identity_and_do_not_persist_ui_keys(self):
         calls = []

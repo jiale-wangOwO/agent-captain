@@ -165,6 +165,30 @@ class Store:
             self.db.execute("update outbox set state='scope_revoked',error=? where host=? and thread_id=? and origin='plugin' and state in (" + placeholders + ")",
                             ("已移出 CEO 管理范围；未提交的输入不会执行。", host, thread_id, *states))
 
+    def fence_pending_policy_upgrade(self, agents, states, migration_key, reason):
+        """Once-only durable not-sent fence, with an audit for each old input.
+
+        This runs before new automatic management becomes usable. It retains
+        delivery IDs/keys/text and terminal metadata, never calls a transport,
+        and leaves submitted, unknown and previously cancelled rows intact.
+        """
+        with self.lock, self.db:
+            if self.db.execute("select 1 from settings where key=?", (migration_key,)).fetchone():
+                return []
+            fenced = []
+            placeholders = ",".join("?" for _ in states)
+            for host, thread_id in agents:
+                rows = self.db.execute("select id from outbox where host=? and thread_id=? and origin='plugin' and state in ("
+                    + placeholders + ")", (host, thread_id, *states)).fetchall()
+                for row in rows:
+                    self.db.execute("update outbox set state='not_sent',error=? where id=?", (reason, row["id"]))
+                    self.db.execute("insert into events(time,kind,data) values(?,?,?)", (time.time(), "management_policy_input_fenced",
+                        json.dumps({"host": host, "thread_id": thread_id, "request_id": row["id"], "policy": "connected_workers",
+                                    "state": "not_sent", "reason": "previously_inactive"}, ensure_ascii=False)))
+                    fenced.append(row["id"])
+            self.db.execute("insert into settings(key,value) values(?,?)", (migration_key, json.dumps({"version": 1, "fenced_count": len(fenced)})))
+            return fenced
+
     def outbox(self, state=None):
         with self.lock:
             if state:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import os
 import re
@@ -93,6 +94,14 @@ class FakeHub:
     def scope_revoking(self, cid, removed):
         self.revoked.append((cid, removed))
 
+    def is_managed_worker(self, row):
+        return bool(row and row.get("mode") == "terminal"
+                    and re.fullmatch(r"ceohub-[a-f0-9]{16,48}", row.get("terminal_id") or "")
+                    and not self.controllers.is_controller_reference(row["host"], row["thread_id"], row.get("cwd")))
+
+    def managed_worker_rows(self):
+        return [row for row in self.store.agents() if self.is_managed_worker(row)]
+
 
 class FakeTerminals:
     def __init__(self):
@@ -172,6 +181,7 @@ class ControllerTests(unittest.TestCase):
         self.code, self.handshake, self.timeout, self.pause = 0, True, False, None
         self.processes = []
         self.service = ControllerService(self.hub, terminals=self.terminals, launcher=self.launch)
+        self.hub.controllers = self.service
         self.terminals.on_create = lambda body: self.service.mark_tool_seen(body["controller_id"])
         self.service.command_resolver = lambda: [str(Path(self.temp.name) / "fake-codex.exe")]
         self.service.set_origin("http://127.0.0.1:12345")
@@ -194,7 +204,9 @@ class ControllerTests(unittest.TestCase):
         return process
 
     def worker(self, tid="worker", active=True, host="local", cwd=None):
-        self.hub.store.remember(host, tid, "Worker", active=active, mode="terminal", cwd=cwd or str(Path(self.temp.name) / "business"))
+        terminal_id = "ceohub-" + hashlib.sha256((host + tid).encode()).hexdigest()[:24]
+        self.hub.store.remember(host, tid, "Worker", active=active, mode="terminal", terminal_id=terminal_id,
+                                cwd=cwd or str(Path(self.temp.name) / "business"))
         return host + "::" + tid
 
     def prepare(self, **body):
@@ -216,6 +228,7 @@ class ControllerTests(unittest.TestCase):
         c = self.prepare()
         row = self.service._row(c["id"])
         descriptor = json.loads(Path(row["descriptor_file"]).read_text())
+        self.assertEqual(descriptor["version"], "0.7.0")
         self.assertEqual(c["state"], "prepared")
         self.assertEqual(self.service.authenticate(descriptor["token"]), c["id"])
         self.assertIsNone(self.service.authenticate("wrong" * 10))
@@ -237,7 +250,7 @@ class ControllerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.prepare(title="a different manager")
 
-    def test_created_worker_attaches_without_revalidating_inactive_old_grants(self):
+    def test_created_worker_joins_automatic_management_with_legacy_inactive_workers(self):
         old = self.worker('old-worker')
         c = self.prepare(agent_ids=[old])
         with self.hub.store.lock, self.hub.store.db:
@@ -245,6 +258,12 @@ class ControllerTests(unittest.TestCase):
         new = self.worker('new-worker')
         self.service.add_created_agent(c['id'], 'local', 'new-worker')
         self.assertEqual(set(self.service.allowed_agents(c['id'])), {old, new})
+        self.service._update(c["id"], state="ready", session_id=SID, tools_ready=1)
+        self.assertTrue(self.service.authorize(c['id'], 'local', 'old-worker'))
+
+    def test_uninitialized_manager_cannot_authorize_automatically_enrolled_workers(self):
+        self.worker('old-worker', active=False)
+        c = self.prepare()
         self.assertFalse(self.service.authorize(c['id'], 'local', 'old-worker'))
 
     def test_manager_ancestor_directory_does_not_block_home_or_other_work(self):
@@ -301,34 +320,54 @@ class ControllerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.prepare(title="Two", request_key="prepare-1")
 
-    def test_scope_known_active_and_single_owner(self):
+    def test_automatic_access_ignores_old_narrow_grants_and_legacy_activation(self):
         aid = self.worker()
+        other = self.worker("other", active=False)
         c = self.prepare(agent_ids=[aid])
+        self.assertEqual(set(c["scope"]), {aid, other})
         self.assertFalse(self.service.authorize(c["id"], "local", "worker"))
         self.service.start(c["id"], "start-scope")
         self.settled(c["id"])
         self.assertTrue(self.service.authorize(c["id"], "local", "worker"))
-        with self.assertRaises(PermissionError):
-            self.prepare(new=True, agent_ids=[aid])
-        c2 = self.prepare(new=True)
-        self.assertFalse(self.service.authorize(c2["id"], "local", "worker"))
-        self.assertFalse(self.service.authorize(c["id"], "local", "other"))
+        c2 = self.prepare(new=True, agent_ids=[aid])
+        self.service._update(c2["id"], state="ready", session_id=OTHER, tools_ready=1)
+        self.assertTrue(self.service.authorize(c2["id"], "local", "worker"))
+        self.assertTrue(self.service.authorize(c["id"], "local", "other"))
         self.hub.store.set_active("local", "worker", False)
-        self.assertFalse(self.service.authorize(c["id"], "local", "worker"))
+        self.assertTrue(self.service.authorize(c["id"], "local", "worker"))
+        later = self.worker("connected-later", active=False, host="remote")
+        self.assertIn(later, self.service.allowed_agents(c["id"]))
+        self.assertTrue(self.service.authorize(c["id"], "remote", "connected-later"))
+        self.assertEqual(self.service.allowed_hosts(c["id"]), {})
 
-    def test_scope_rejects_inactive_unknown_and_closed(self):
+    def test_legacy_scope_is_compatible_but_missing_closed_history_are_not_workers(self):
         aid = self.worker(active=False)
-        with self.assertRaises(ValueError):
-            self.prepare(agent_ids=[aid])
-        with self.assertRaises(ValueError):
-            self.prepare(agent_ids=["local::missing"])
+        c = self.prepare(agent_ids=[aid, "local::missing"])
+        self.service._update(c["id"], state="ready", session_id=SID, tools_ready=1)
+        self.assertTrue(self.service.authorize(c["id"], "local", "worker"))
+        self.assertFalse(self.service.authorize(c["id"], "local", "missing"))
+        for mode in ("closed", "closing", "close_unknown", "history"):
+            with self.hub.store.lock, self.hub.store.db:
+                self.hub.store.db.execute("update agents set mode=? where thread_id='worker'", (mode,))
+            self.assertFalse(self.service.authorize(c["id"], "local", "worker"), mode)
+            self.assertEqual(self.service.allowed_agents(c["id"]), [])
+        self.assertEqual(self.prepare(agent_ids=[])["id"], c["id"])
 
-    def test_revoke_hook_before_scope_changes(self):
+    def test_legacy_scope_changes_neither_shrink_automatic_access_nor_revoke_pending(self):
         aid = self.worker()
-        c = self.prepare(agent_ids=[aid])
+        c = self.prepare(agent_ids=[aid], host_roots={"remote": ["/work"]})
+        self.service._update(c["id"], state="ready", session_id=SID, tools_ready=1)
+        pending = self.hub.store.enqueue("local", "worker", "pending", origin="plugin", request_key="pending")
         self.service.set_scope(c["id"], [])
-        self.assertEqual(self.hub.revoked, [(c["id"], [aid])])
-        self.assertFalse(self.service.authorize(c["id"], "local", "worker"))
+        self.assertEqual(self.hub.revoked, [])
+        self.assertTrue(self.service.authorize(c["id"], "local", "worker"))
+        self.assertEqual(self.hub.store.delivery(pending)["state"], "queued")
+        self.assertEqual(self.service.allowed_agents(c["id"]), [aid])
+        self.assertEqual(self.service.allowed_hosts(c["id"]), {"remote": ["/work"]})
+        legacy = self.hub.store.db.execute("select host,thread_id from controller_worker_scope where controller_id=?", (c["id"],)).fetchall()
+        self.assertEqual([tuple(row) for row in legacy], [("local", "worker")])
+        self.service.set_scope(c["id"], [], host_roots={})
+        self.assertEqual(self.service.allowed_hosts(c["id"]), {})
 
     def test_manager_cannot_be_worker_by_id_or_workspace(self):
         c = self.started()
@@ -337,6 +376,9 @@ class ControllerTests(unittest.TestCase):
         aid = self.worker(tid="bad-alias", cwd=c["workspace"])
         with self.assertRaises(PermissionError):
             self.service.set_scope(c["id"], [aid])
+        self.assertNotIn(aid, self.service.allowed_agents(c["id"]))
+        self.assertFalse(self.service.authorize(c["id"], "local", "bad-alias"))
+        self.assertFalse(self.service.authorize(c["id"], "local", SID))
 
     def test_host_permission_requires_explicit_canonical_root(self):
         c = self.prepare(allowed_hosts=["remote"])
@@ -595,8 +637,65 @@ class ControllerTests(unittest.TestCase):
         context = self.service.view_context(c["id"])
         self.assertEqual(context["mode"], "scoped")
         self.assertEqual(context["controller_id"], c["id"])
+        self.assertEqual(context["worker_access"], "automatic")
+        self.assertEqual(context["controller"]["worker_access"], "automatic")
+        self.assertTrue(context["policy"]["scope_enforced_by_hub"])
         self.assertFalse(context["policy"]["operating_system_isolation"])
         self.assertEqual(self.hub.store.agents(), [])
+
+    def test_generated_bootstrap_explains_automatic_workers_and_explicit_creation_roots(self):
+        c = self.prepare()
+        role = (Path(c["workspace"]) / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("automatically manageable", role)
+        self.assertIn("No worker activation", role)
+        self.assertIn("explicit allowed project roots", role)
+        self.assertIn("Initialization only calls get_controller_context", role)
+        self.assertIn("All registered open shared worker terminals", INITIALIZATION)
+        self.assertIn("Call only", INITIALIZATION)
+
+    def test_authentication_initialization_and_identity_fences_survive_automatic_access(self):
+        self.worker(active=False)
+        c = self.prepare()
+        for state in ("prepared", "bootstrapping", "initializing", "attaching", "unknown", "closed"):
+            self.service._update(c["id"], state=state, session_id=SID, tools_ready=1)
+            self.assertFalse(self.service.authorize(c["id"], "local", "worker"), state)
+        self.service._update(c["id"], state="ready", cap_active=0)
+        self.assertFalse(self.service.authorize(c["id"], "local", "worker"))
+        self.service._update(c["id"], cap_active=1, tools_ready=0)
+        self.assertFalse(self.service.authorize(c["id"], "local", "worker"))
+        self.service._update(c["id"], tools_ready=1, session_id=None)
+        self.assertFalse(self.service.authorize(c["id"], "local", "worker"))
+        self.service._update(c["id"], session_id=SID)
+        self.assertTrue(self.service.authorize(c["id"], "local", "worker"))
+        self.assertFalse(self.service.authorize("invalid", "local", "worker"))
+
+    def test_upgrade_fences_old_out_of_scope_pending_without_replaying_final_states(self):
+        granted = self.worker("granted")
+        self.worker("not-granted")
+        self.worker("inactive", active=False)
+        c = self.prepare(agent_ids=[granted])
+        with self.hub.store.lock, self.hub.store.db:
+            self.hub.store.db.execute("delete from settings where key='controller-automatic-worker-access-v1'")
+        deliveries = {}
+        for index, (tid, state) in enumerate((("granted", "human_busy"), ("not-granted", "queued"),
+                ("inactive", "waiting_for_agent"), ("not-granted", "submitted"),
+                ("not-granted", "unknown"), ("not-granted", "scope_revoked"))):
+            key = "controller:" + c["id"] + ":" + str(index) * 64
+            rid = self.hub.store.enqueue("local", tid, "old text", origin="plugin", request_key=key)
+            self.hub.store.update_outbox(rid, state)
+            deliveries[(tid, state)] = rid
+        service = ControllerService(self.hub, terminals=self.terminals, launcher=self.launch)
+        for (tid, old), rid in deliveries.items():
+            expected = "not_sent" if old in ("queued", "waiting_for_agent") else old
+            self.assertEqual(self.hub.store.delivery(rid)["state"], expected)
+        self.assertEqual(self.terminals.writes, [])
+        self.assertEqual(self.terminals.creates, [])
+        self.assertEqual(self.launches, [])
+        self.assertEqual(self.hub.store.setting("controller-automatic-worker-access-v1"), {"fenced": 2})
+        fresh = self.hub.store.enqueue("local", "not-granted", "fresh authorized text", origin="plugin",
+            request_key="controller:" + c["id"] + ":" + "f" * 64)
+        ControllerService(self.hub, terminals=self.terminals, launcher=self.launch)
+        self.assertEqual(self.hub.store.delivery(fresh)["state"], "queued")
 
     def test_context_ready_uses_current_owned_terminal_observation(self):
         c = self.started()

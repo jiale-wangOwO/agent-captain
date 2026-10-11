@@ -1,5 +1,5 @@
 'use strict';
-// A management conversation is not a worker. Keep its identity, scope, and
+// A management conversation is not a worker. Keep its identity and creation roots
 // display separate, while sharing the already-tested terminal rendering/input
 // protections from ui.js. Viewing or hiding never ends a process.
 (() => {
@@ -9,7 +9,7 @@
   try { model.operation = JSON.parse(window.sessionStorage?.getItem(storageKey) || 'null'); } catch (_) { /* Storage can be disabled; server prepare remains idempotent. */ }
   function persist() { try { if (model.operation) window.sessionStorage?.setItem(storageKey, JSON.stringify(model.operation)); else window.sessionStorage?.removeItem(storageKey); } catch (_) {} }
   const controllerOf = result => result?.controller || result;
-  const scopedWorkers = () => state.agents.filter(agent => agent.active && !isClosedAgent(agent) && !isClosingAgent(agent) && agent.mode !== 'controller' && agent.kind !== 'controller');
+  const registeredWorkers = () => state.agents.filter(agent => isTerminal(agent) && !isClosedAgent(agent) && !isClosingAgent(agent) && agent.mode !== 'controller' && agent.kind !== 'controller');
   const connectedHosts = () => state.hosts.filter(host => host.connected);
   const errorText = error => typeof error === 'string' ? error : error?.message || error?.code || '';
   const displayError = (selector, text) => { $(selector).textContent = text; $(selector).hidden = !text; };
@@ -33,8 +33,8 @@
       if (!canReadDisplay(model.terminal)) { clearTimeout(model.terminal.timer); model.terminal.timer = null; }
     }
     render();
-    // Refresh permission badges only. The workbench keeps its selected display
-    // and human draft; scope reads never attach a terminal or take focus.
+    // Refresh registered-work summaries only, without attaching a terminal or
+    // taking focus from a human draft.
     if (typeof renderAgents === 'function') renderAgents();
     return next;
   }
@@ -58,7 +58,7 @@
     $('#controller-state').textContent = model.unsupported ? '后台尚未加载管理会话功能' : !model.loaded ? '正在检查管理会话' : !c ? '尚未创建管理会话' : c.state === 'ready' && !isReady(c) ? '身份或工具尚未核验' : labels[c.state] || '状态待核对';
     $('#controller-owner').textContent = c ? c.input_owner === 'hub' ? '当前入口：PRON Hub' : c.input_owner === 'desktop' ? '当前入口：Codex（待核验）' : '当前没有输入入口' : '';
     $('#controller-phase').textContent = c?.phase ? `阶段：${c.phase}` : '';
-    $('#controller-scope-count').textContent = c ? `已授权 ${Number(c.scope_count ?? c.scope?.length ?? 0)} 个工作会话` : '只管理你明确授权的工作会话';
+    $('#controller-scope-count').textContent = `自动管理 ${Number(c?.effective_worker_count ?? registeredWorkers().length)} 个工作会话`;
     $('#controller-primary').textContent = model.busy ? '正在处理原请求…' : c ? '继续管理' : '启动管理会话';
     $('#controller-primary').disabled = model.busy || model.unsupported || !model.loaded;
     $('#controller-name').disabled = !!model.form?.scopeOnly || model.busy;
@@ -66,9 +66,9 @@
     $('#controller-desktop').disabled = model.busy || !c?.session_id || c.input_owner !== 'hub' || !isReady(c);
     displayError('#controller-error', model.error || errorText(c?.error));
     if (model.unsupported) $('#controller-description').textContent = '当前后台尚不支持管理会话。已有工作终端仍可使用；请在空闲时按维护流程更新服务，不会自动重启或创建另一套后台。';
-    else $('#controller-description').textContent = c ? '这是一条本机 Codex 的真实管理会话。工作 agent 保持原来的使用方式，你保留最终决策权。' : '在本机创建真实的 Codex 管理会话。PRON Hub 准备角色、工具和授权范围，你只需交代目标。';
+    else $('#controller-description').textContent = c ? '已连接的工作会话自动交给管理者协调，无需逐个激活或授权。工作 agent 保持原来的使用方式，你保留最终决策权。' : '在本机创建真实的 Codex 管理会话，自动管理已连接的工作会话。PRON Hub 准备角色和工具，你只需交代目标。';
     $('#controller-panel-title').textContent = c?.title || '管理会话';
-    $('#controller-panel-note').textContent = c?.state === 'desktop_unverified' ? '已释放 Hub 输入入口并提供同一会话链接；尚未验证 Codex 桌面端已接管，Hub 不会继续写入。返回 Hub 时恢复准确的原 Session，不 fork 或重发任务。' : c?.state === 'needs_attention' ? '请在下面的真实终端完成登录、信任或权限确认。系统不会自动审批；完成后继续核验身份与管理工具。' : '这是本机 Codex 的真实终端。只初始化管理角色、工具和范围，首次不派发业务任务；“终端连接”不等于“管理工具已就绪”。';
+    $('#controller-panel-note').textContent = c?.state === 'desktop_unverified' ? '已释放 Hub 输入入口并提供同一会话链接；尚未验证 Codex 桌面端已接管，Hub 不会继续写入。返回 Hub 时恢复准确的原 Session，不 fork 或重发任务。' : c?.state === 'needs_attention' ? '请在下面的真实终端完成登录、信任或权限确认。系统不会自动审批；完成后继续核验身份与管理工具。' : '这是本机 Codex 的真实终端。只初始化管理角色和工具，首次不派发业务任务；“终端连接”不等于“管理工具已就绪”。';
     const details = $('#controller-details'); details.replaceChildren();
     if (c) for (const [label, value] of [['Session', c.session_id || '身份尚未核验'], ['管理工作区', c.workspace], ['终端 ID', c.terminal_id || '尚未创建'], ['工具握手', c.tools_ready ? '已核验' : '尚未核验'], ['桌面接管', c.desktop_verified ? '已核验' : '尚未核验']]) { details.append(node('dt', label), node('dd', value || '—')); }
     const term = model.terminal;
@@ -105,34 +105,22 @@
   function openSettings(scopeOnly = false) {
     if (model.busy) return;
     const c = model.controller;
-    model.form = {scopeOnly, selected: new Set(scopeOnly ? c.scope || [] : model.operation?.body?.agent_ids || []), hostRoots: structuredClone(scopeOnly ? c.allowed_hosts || {} : model.operation?.body?.host_roots || {}), submitted: false};
+    model.form = {scopeOnly, hostRoots: structuredClone(scopeOnly ? c.allowed_hosts || {} : model.operation?.body?.host_roots || {}), submitted: false};
     $('#controller-name').value = scopeOnly ? c.title : model.operation?.body?.title || '我的管理会话'; $('#controller-name').disabled = scopeOnly;
-    $('#controller-dialog-heading').textContent = scopeOnly ? '调整管理范围' : '启动管理会话'; $('#controller-save').textContent = scopeOnly ? '保存管理范围' : '准备并启动';
+    $('#controller-dialog-heading').textContent = scopeOnly ? '管理设置' : '启动管理会话'; $('#controller-save').textContent = scopeOnly ? '保存设置' : '准备并启动';
     displayError('#controller-dialog-error', ''); renderChoices(); $('#controller-dialog').showModal();
   }
   function renderChoices() {
     const form = model.form; if (!form) return;
-    const workers = $('#controller-workers'); workers.replaceChildren();
-    for (const agent of scopedWorkers()) {
-      const id = agent.agent_id || `${agent.host}::${agent.thread_id}`, row = node('label', null, 'controller-choice'), checkbox = node('input');
-      checkbox.type = 'checkbox'; checkbox.checked = form.selected.has(id); checkbox.disabled = form.submitted;
-      checkbox.onchange = () => { if (checkbox.checked) form.selected.add(id); else form.selected.delete(id); };
-      const copy = node('span', null, 'controller-choice-copy'); copy.append(node('strong', agent.alias || agent.title || shortId(agent.thread_id)), node('span', `${state.hosts.find(h => h.id === agent.host)?.label || agent.host} · ${agent.cwd || '未记录项目目录'}`)); row.append(checkbox, copy); workers.append(row);
-    }
-    if (!workers.childElementCount) empty(workers, '没有已激活的工作会话。可以先启动空范围管理者，稍后再授权。');
-    // Preserve existing grants even if their worker is presently inactive. They
-    // remain visible and removable, instead of disappearing on an unrelated refresh.
-    for (const id of form.selected) if (!scopedWorkers().some(a => (a.agent_id || `${a.host}::${a.thread_id}`) === id)) {
-      const row = node('label', null, 'controller-choice'), checkbox = node('input'); checkbox.type = 'checkbox'; checkbox.checked = true; checkbox.disabled = form.submitted; checkbox.onchange = () => { form.selected.delete(id); renderChoices(); }; row.append(checkbox, node('span', `${id} · 已授权，当前未激活`, 'controller-choice-copy')); workers.append(row);
-    }
+    $('#controller-worker-summary').textContent = registeredWorkers().length ? `${registeredWorkers().length} 个已登记工作会话自动可管理；以后连接的会话也会自动加入。临时断线只影响连接，原会话仍保留。` : '连接工作终端后会自动加入，不需要逐个设置。现在也可以先创建管理会话。';
     const hosts = $('#controller-hosts'); hosts.replaceChildren();
     for (const host of connectedHosts()) {
-      const roots = form.hostRoots[host.id] || [], row = node('div', null, 'controller-choice'), copy = node('span', null, 'controller-choice-copy'); copy.append(node('strong', host.label || host.id), node('span', roots.length ? roots.join('\n') : '未授权新建工作会话'));
-      const browse = button(roots.length ? '修改目录' : '选择授权目录', 'subtle', async () => openHostDirectory(host.id)); browse.disabled = form.submitted;
+      const roots = form.hostRoots[host.id] || [], row = node('div', null, 'controller-choice'), copy = node('span', null, 'controller-choice-copy'); copy.append(node('strong', host.label || host.id), node('span', roots.length ? roots.join('\n') : '尚未设置新建工作的项目目录'));
+      const browse = button(roots.length ? '修改目录' : '选择项目目录', 'subtle', async () => openHostDirectory(host.id)); browse.disabled = form.submitted;
       row.append(copy, browse);
       if (roots.length) { const remove = button('撤销', 'text-button', async () => { if (form.submitted) return; delete form.hostRoots[host.id]; renderChoices(); }); remove.disabled = form.submitted; row.append(remove); } hosts.append(row);
     }
-    if (!hosts.childElementCount) empty(hosts, '当前没有已连接机器；新建工作会话默认禁止。');
+    if (!hosts.childElementCount) empty(hosts, '当前没有已连接机器，暂时不能设置新建工作的目录。');
     for (const [host, roots] of Object.entries(form.hostRoots)) if (!connectedHosts().some(h => h.id === host)) { const row = node('div', null, 'controller-choice'), remove = button('撤销', 'text-button', async () => { if (form.submitted) return; delete form.hostRoots[host]; renderChoices(); }); remove.disabled = form.submitted; row.append(node('span', `${host} · ${roots.join(', ')} · 当前未连接`, 'controller-choice-copy'), remove); hosts.append(row); }
   }
   async function openHostDirectory(host) {
@@ -148,7 +136,7 @@
       if (model.directory !== target || generation !== model.directoryGeneration || model.form !== target.form) return;
       target.view = view; $('#controller-host-directory-path').textContent = view.path; $('#controller-host-directory-parent').disabled = !view.parent; $('#controller-host-directory-select').disabled = !view.path;
       for (const directory of view.directories || []) $('#controller-host-directory-list').append(button(directory.name, 'directory-row', async () => loadHostDirectory(directory.path)));
-      if (!$('#controller-host-directory-list').childElementCount) empty($('#controller-host-directory-list'), '没有子目录。可以授权当前目录。');
+      if (!$('#controller-host-directory-list').childElementCount) empty($('#controller-host-directory-list'), '没有子目录。可以选择当前目录。');
     } catch (error) { if (model.directory === target && generation === model.directoryGeneration) displayError('#controller-host-directory-error', error.message); }
   }
   function operationFor(kind, id) {
@@ -181,8 +169,11 @@
   }
   async function submitSettings() {
     const form = model.form; if (!form || model.busy) return;
-    const body = {title: $('#controller-name').value.trim(), agent_ids: [...form.selected].sort(), host_roots: form.hostRoots};
+    let body = {title: $('#controller-name').value.trim(), host_roots: form.hostRoots};
     if (!body.title) throw new Error('请填写管理会话名称。');
+    // Keep an uncertain legacy prepare request byte-for-byte compatible. Old
+    // worker IDs are not a new selection and do not control automatic access.
+    if (!form.scopeOnly && model.operation?.kind === 'prepare' && model.operation.body && model.operation.body.title === body.title && JSON.stringify(model.operation.body.host_roots || {}) === JSON.stringify(body.host_roots)) body = model.operation.body;
     const fingerprint = JSON.stringify(body);
     if (!form.scopeOnly) {
       if (model.operation?.kind === 'prepare' && model.operation.fingerprint !== fingerprint) throw new Error('此前启动请求的结果尚未核对。请先使用原设置重试并核查，不会提交不同设置创建第二个管理者。');
@@ -191,7 +182,7 @@
     }
     form.submitted = true; model.busy = true; $('#controller-save').disabled = true; renderChoices(); render();
     try {
-      if (form.scopeOnly) accept(await api('/api/controllers/scope', {id: model.controller.id, agent_ids: body.agent_ids, host_roots: body.host_roots}));
+      if (form.scopeOnly) accept(await api('/api/controllers/scope', {id: model.controller.id, host_roots: body.host_roots}));
       else {
         const op = model.operation; const prepared = accept(await api('/api/controllers/prepare', {...body, request_key: op.requestKey})); op.id = prepared.id; persist();
         const started = accept(await api('/api/controllers/start', {id: prepared.id, request_key: op.startKey})); acknowledgeOperation('start', started, op.startKey);

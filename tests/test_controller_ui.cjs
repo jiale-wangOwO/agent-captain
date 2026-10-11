@@ -12,7 +12,7 @@ function element(tag = 'div') {
     classList: {add() {}, remove() {}, toggle() {}}, append(...items) { this.children.push(...items); this.childElementCount = this.children.length; }, replaceChildren(...items) { this.children = items; this.childElementCount = items.length; }, setAttribute() {},
     addEventListener(type, handler, options) { this.listeners[type] = {handler, options}; }, removeEventListener() {}, contains() { return false; }, showModal() { this.open = true; }, close() { this.open = false; this.listeners.close?.handler(); }, reset() {}, focus() { this.focused = true; }, select() {}, getBoundingClientRect: () => ({left: 0, top: 0, right: 900, bottom: 600})};
 }
-const ready = {id: 'manager-1', title: '我的管理会话', state: 'ready', phase: 'verified', session_id: '019abcdef-abcd-1234-abcd-019abcdefabc', workspace: 'C:/private/manager-1', terminal_id: 'manager-terminal-1', input_owner: 'hub', tools_ready: true, scope_count: 1, scope: ['local::worker-1'], allowed_hosts: {}, desktop_verified: false, connected: true, agent_ready: true, error: null};
+const ready = {id: 'manager-1', title: '我的管理会话', state: 'ready', phase: 'verified', session_id: '019abcdef-abcd-1234-abcd-019abcdefabc', workspace: 'C:/private/manager-1', terminal_id: 'manager-terminal-1', input_owner: 'hub', tools_ready: true, worker_access: 'automatic', effective_worker_count: 2, scope_count: 2, scope: ['local::worker-1', 'remote::inactive-worker'], allowed_hosts: {}, desktop_verified: false, connected: true, agent_ready: true, error: null};
 async function harness(options = {}) {
   const elements = new Map(), calls = [], intervals = [], timers = new Map(), stored = options.stored || new Map(), clipboard = {writes: [], readCount: 0}; let requestNumber = 0, uuid = 0, manager = options.manager ? {...options.manager} : null;
   const get = selector => { if (!elements.has(selector)) { const e = element(); e.id = selector.slice(1); elements.set(selector, e); } return elements.get(selector); };
@@ -37,11 +37,11 @@ async function harness(options = {}) {
       if (url.startsWith('/api/state')) return reply({hosts: [{id: 'local', label: '本机', transport: 'local', connected: true}, {id: 'remote', label: '远程', transport: 'ssh', connected: false}], agents: workers, events: [], outbox: []});
       if (url === '/api/controllers') return reply({controllers: manager ? [manager] : []});
       if (url.startsWith('/api/controllers/get')) return reply(manager);
-      if (url === '/api/controllers/prepare') { manager = {...ready, title: body.title, state: 'prepared', phase: 'prepared', session_id: null, terminal_id: null, input_owner: 'none', tools_ready: false, scope: body.agent_ids, scope_count: body.agent_ids.length, allowed_hosts: body.host_roots}; return reply(manager); }
+      if (url === '/api/controllers/prepare') { manager = {...ready, title: body.title, state: 'prepared', phase: 'prepared', session_id: null, terminal_id: null, input_owner: 'none', tools_ready: false, allowed_hosts: body.host_roots}; return reply(manager); }
       if (url === '/api/controllers/start' || url === '/api/controllers/resume') { manager = {...ready, title: manager?.title || ready.title, scope: manager?.scope || ready.scope, allowed_hosts: manager?.allowed_hosts || {}, scope_count: manager?.scope?.length ?? 1}; return reply(manager); }
       if (url.startsWith('/api/controllers/output')) return reply({data: 'real manager PTY', ansi: 'real manager PTY', seq: 2, reset: true, cols: 100, rows: 30, connected: manager.connected, command: 'codex'});
       if (url === '/api/controllers/input' || url === '/api/controllers/resize') return reply({ok: true});
-      if (url === '/api/controllers/scope') { manager = {...manager, scope: body.agent_ids, scope_count: body.agent_ids.length, allowed_hosts: body.host_roots}; return reply(manager); }
+      if (url === '/api/controllers/scope') { manager = {...manager, allowed_hosts: body.host_roots}; return reply(manager); }
       if (url === '/api/controllers/desktop') { manager = {...manager, state: 'desktop_unverified', input_owner: 'desktop', connected: false}; return reply({...manager, url: `codex://threads/${manager.session_id}`}); }
       if (url === '/api/controllers/close') { manager = {...manager, state: 'closed', connected: false, input_owner: 'none'}; return reply(manager); }
       if (url === '/api/directories/list') return reply({path: body.path || 'C:/Users/example', parent: body.path ? 'C:/Users/example' : 'C:/Users', directories: [{name: 'project', path: 'C:/Users/example/project'}]});
@@ -64,13 +64,13 @@ test('startup checks list only; no implicit prepare, history scan, tools or work
   assert.equal(calls.some(c => /discover|history|input|\/start|\/resume|\/close/.test(c.url)), false);
 });
 
-test('first scope shows active registered workers only and grants no new-worker host by default', async () => {
+test('first settings automatically includes registered workers with no checklist or new-worker roots by default', async () => {
   const {ui, get, calls} = await harness(); ui.openSettings();
-  assert.equal(get('#controller-name').value, '我的管理会话'); assert.equal(get('#controller-workers').children.length, 1);
-  assert.deepEqual([...ui.model.form.selected], []); assert.equal(Object.keys(ui.model.form.hostRoots).length, 0);
+  assert.equal(get('#controller-name').value, '我的管理会话'); assert.match(get('#controller-worker-summary').textContent, /2.*自动.*以后连接/);
+  assert.equal(Object.hasOwn(ui.model.form, 'selected'), false); assert.equal(Object.keys(ui.model.form.hostRoots).length, 0);
   assert.equal(calls.some(c => /discover|directories/.test(c.url)), false);
-  ui.model.form.selected.add('local::worker-1'); await ui.submitSettings();
-  assert.deepEqual(calls.find(c => c.url === '/api/controllers/prepare').body.agent_ids, ['local::worker-1']);
+  await ui.submitSettings();
+  assert.equal(Object.hasOwn(calls.find(c => c.url === '/api/controllers/prepare').body, 'agent_ids'), false);
   assert.deepEqual(calls.find(c => c.url === '/api/controllers/prepare').body.host_roots, {});
   assert.equal(get('#controller-state').textContent, '可对话');
 });
@@ -93,6 +93,22 @@ test('lost prepare response keeps operation body and keys across retry and reloa
   assert.equal(h.calls.filter(c => c.url === '/api/controllers/prepare')[1].body.request_key, key);
   const reload = await harness({stored: h.stored}); assert.equal(reload.ui.model.operation.requestKey, key);
   assert.equal(reload.calls.filter(c => c.url === '/api/controllers/prepare').length, 0);
+});
+
+test('uncertain legacy prepare keeps its original IDs and key as retry evidence, not an editable worker checklist', async () => {
+  const body = {title: 'Legacy manager', agent_ids: ['local::worker-1'], host_roots: {}};
+  const operation = {kind: 'prepare', body, fingerprint: JSON.stringify(body), requestKey: 'original-legacy-key', startKey: 'original-start-key'};
+  const stored = new Map([['pron-hub.management-operation.v1', JSON.stringify(operation)]]);
+  const h = await harness({stored}); h.ui.openSettings(); assert.equal(Object.hasOwn(h.ui.model.form, 'selected'), false);
+  await h.ui.submitSettings();
+  assert.deepEqual(h.calls.find(c => c.url === '/api/controllers/prepare').body, {...body, request_key: 'original-legacy-key'});
+  assert.equal(h.calls.find(c => c.url === '/api/controllers/start').body.request_key, 'original-start-key');
+});
+
+test('manager reports automatic backend count rather than an old private grant subset', async () => {
+  const h = await harness({manager: {...ready, scope: [], scope_count: 0, effective_worker_count: 7}});
+  assert.equal(h.get('#controller-scope-count').textContent, '自动管理 7 个工作会话');
+  assert.equal(h.calls.some(c => /activate|scope/.test(c.url)), false);
 });
 
 test('lost start response continues with same stored start key, never prepares another manager', async () => {
@@ -124,10 +140,11 @@ test('unsupported old service is truthful and never starts another server or dis
   await ui.primary(); assert.equal(calls.filter(c => c.options.method === 'POST').length, 0);
 });
 
-test('scope edit is scoped CRUD, never initializes again or scans histories', async () => {
-  const {ui, calls, get} = await harness({manager: ready}); ui.openSettings(true); ui.model.form.selected.clear(); await ui.submitSettings();
-  assert.deepEqual(calls.find(c => c.url === '/api/controllers/scope').body, {id: 'manager-1', agent_ids: [], host_roots: {}});
-  assert.equal(calls.some(c => /prepare|\/start|\/resume|discover|history/.test(c.url)), false); assert.equal(get('#controller-scope-count').textContent, '已授权 0 个工作会话');
+test('management settings only changes create-project roots, not ordinary existing-worker access', async () => {
+  const {ui, calls, get} = await harness({manager: ready}); ui.openSettings(true); await ui.submitSettings();
+  assert.deepEqual(calls.find(c => c.url === '/api/controllers/scope').body, {id: 'manager-1', host_roots: {}});
+  assert.equal(calls.some(c => /prepare|\/start|\/resume|discover|history/.test(c.url)), false); assert.equal(get('#controller-scope-count').textContent, '自动管理 2 个工作会话');
+  assert.equal(get('#controller-dialog-heading').textContent, '管理设置');
 });
 
 test('manager wheel uses local display only and shares clipboard protections without worker writes', async () => {

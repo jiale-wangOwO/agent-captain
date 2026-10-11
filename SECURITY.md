@@ -6,14 +6,21 @@ the web interface or terminal broker directly to a LAN or the Internet. SSH is t
 remote-machine boundary, including when an independent tunnel service provides
 an SSH-compatible endpoint.
 
-## Management identity and grants (0.5 MVP)
+## Personal management identity and automatic worker access (0.7)
 
 Hub-created management sessions receive independent local capability credentials.
 The gateway derives identity from that credential, not a tool argument, request
-body, model statement, or terminal title. Worker list/read/write, events, and
-delivery queries are filtered by server-side grants. The scoped-only
-`get_controller_context` tool reports the authenticated manager and scope; it is
-not available using legacy plugin credentials.
+body, model statement, or terminal title. The service checks that identity,
+native Session ID and tool readiness before allowing worker operations. Every
+registered, open shared **worker** terminal is automatically available to ready,
+authenticated management sessions. This includes newly connected workers and
+temporarily disconnected workers bound to their original terminal; it does not
+scan remote machines or enroll their other conversations. Independent manager
+credentials identify callers, but do **not** isolate workers from other managers
+of this single-user personal Hub. `get_controller_context` reports the verified
+identity and effective automatic-worker policy. Delivery queries retain their
+authenticated manager's request namespace rather than exposing another
+manager's private delivery records.
 
 The default UI creates one management conversation and restores its exact saved
 native Session ID. Its first, read-only bootstrap is restricted to self-context
@@ -23,18 +30,34 @@ process existence alone does not. Startup failures and unknown results must not
 be handled by guessing the newest session, deleting locks, forking, or restarting
 a shared daemon.
 
-Selecting a worker for a scoped manager is a separate grant from its activation.
-Revoking scope cancels still-unsubmitted queued writes. A worker belongs to at
-most one scoped manager in this MVP; explicit multiple-manager sharing is not
-supported. Managers are not workers: manager-to-manager reads/writes and recursive
-manager registration or creation are rejected by the service, not merely hidden
-by the UI.
+There is no separate worker activation, ownership assignment, or per-worker grant
+step. The legacy activation endpoint is a compatibility no-op: it cannot change
+connections, shrink management access, revoke pending work, or submit inputs.
+Only enrolled open worker terminals with their real terminal identity qualify.
+History-only records, closed/closing/close-unknown terminals and manager
+identities/workspaces are excluded. Managers are not workers: manager-to-manager
+reads/writes and recursive manager registration or creation are rejected by the
+service, not merely hidden by the UI.
 
-New-worker creation requires a separately authorized, already-connected host and
-an explicit canonical project directory. Being connected to a machine is not a
-blanket creation grant. The service validates the resolved directory against the
-grant and assigns the resulting worker to that manager. Ordinary business task
+Hub-created managers' new-worker creation requires a separately authorized,
+already-connected host and an explicit canonical project directory. Being
+connected to a machine is not a blanket creation grant. The service validates the
+resolved directory against the grant; the resulting worker joins the personal
+Hub. Ordinary business task
 text is never used as a shell command or launch template.
+
+The creation grant is independent of automatic existing-worker access. Removing
+or narrowing a manager's allowed creation directories does not unmanage already
+enrolled workers. Conversely, access to an existing worker never grants permission
+to create another terminal on its host or in its directory. Newly created workers
+join the same personal Hub automatically; no exclusive worker owner is assigned.
+
+At the policy upgrade, legacy retryable plugin deliveries that were outside their
+old manager grant or belonged to an inactive worker are fenced as audited
+`not_sent` records. Their request identities and contents are retained. Submitted,
+uncertain/`unknown`, and already cancelled/revoked records are not revived or
+rewritten. Migration performs no terminal input, process start, SSH attachment,
+or task replay. Automatic management is not retroactive consent to send old work.
 
 These boundaries apply to **PRON Hub APIs only**. They do not sandbox Codex's
 other native tools, other plugins, or the operating-system privileges of its
@@ -44,20 +67,24 @@ isolation. Preserve Codex's own sandbox and human approvals.
 
 ### Legacy existing-chat integration
 
-The manually installed compatibility plugin still has the **shared global
-activation list**, not the new per-manager scope. Multiple legacy controller
-chats may access the same activated workers. Do not advertise them as isolated
-or use them as evidence that the scoped manager's narrower grant is the user's
-only access path. Prefer a Hub-created management session for independent
-identity and grants. Migration does not silently delete working legacy plugins
-or revoke existing worker connections.
+The manually installed compatibility plugin has the same automatic existing-
+worker access, but its shared service credential is **not** an independent
+manager identity. The creation-root policy described above applies to Hub-created
+management identities; legacy service credentials retain their compatibility
+creation channel and must not be advertised as enforcing an independently scoped
+manager's roots. Keep those credentials private and prefer a Hub-created
+management session for an independently authenticated identity and explicit
+creation directories. Neither integration provides worker or operating-system
+isolation from other same-user management conversations. Migration does not
+silently delete working legacy plugins or revoke existing worker connections.
 
 ## What terminal access authorizes
 
-Workbench metadata changes are not grants: renaming or pinning cannot activate a
-worker or add it to a manager's scope. The new metadata and reconnect MCP tools
-enforce the same activation and independent-controller checks as reads and
-writes, including after a previous request's result has been cached.
+Workbench metadata changes are presentation only: renaming or pinning changes
+neither worker identity, terminal/Codex Session ID, output binding nor creation
+permissions. Metadata and reconnect tools enforce the same enrolled-open-worker,
+authenticated-identity and initialization/readiness checks as other manager
+operations, including before replaying a cached operation result.
 
 Reconnect means restoring the display of an existing owned remote tmux, not
 replacing a missing terminal or resuming another Codex. Strict attachment checks
@@ -68,14 +95,18 @@ are not a recovery mechanism.
 
 A shared terminal has the privileges of the account running its shell and SSH
 connection. A management agent that can write to that terminal can effectively
-run the same commands as that user. Terminal activation is a significant trust
-decision, not a read-only permission. The human user keeps final decision-making
-authority and must review consequential actions.
+run the same commands as that user. Connecting/enrolling a shared worker in this
+personal Hub therefore enables management access; it is not a read-only grant.
+The human user keeps final decision-making authority and must review
+consequential actions. Automatic worker access does not bypass the broker's
+foreground-Codex confirmation, human-typing lease, geometry checks or stable
+request-key/uncertain-result fences. A normal business task cannot become a shell
+command simply because the terminal is connected.
 
-- Only activate terminals and grant managers access when you intentionally want
-  those conversations to use them. Selecting a machine must not imply scanning
-  every conversation on it. For the legacy plugin, activation remains the global
-  access decision rather than a per-manager permission.
+- Only connect/enroll shared worker terminals you intentionally want your
+  management conversations to use. Selecting a machine must not imply scanning
+  every conversation on it. Opening a normal shell is distinct from having a
+  ready Codex agent; the user starts Codex and handles its startup prompts.
 - Complete sign-in, credential entry, provider selection, and approval prompts
   yourself. PRON Hub must not automatically accept worker permissions, bypass
   approval dialogs, or answer startup menus as ordinary task text.
@@ -104,8 +135,9 @@ or start a second writer to mask an occupancy error.
 
 Unit and stubbed UI tests do not certify a seamless desktop transfer or every
 installed Codex version. Perform explicit version-specific validation with a
-disposable manager, initially with zero worker grants, before relying on that
-workflow. Never use real worker business as a startup or transfer smoke test.
+disposable manager in an isolated runtime with no enrolled workers, before relying
+on that workflow. Never use real worker business as a startup or transfer smoke
+test.
 
 ## Private local data
 

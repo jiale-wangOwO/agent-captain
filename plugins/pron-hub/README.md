@@ -3,18 +3,19 @@
 This package provides the `pron-hub` skill for acting as the user's CEO in the
 current Codex chat. It does not start another model or select a model provider.
 
-The management tools provide a scoped cached overview, worker display aliases /
+The management tools provide an enrolled-worker cached overview, display aliases /
 pins (`update_agent`), and user-requested display reattachment to an existing
 SSH tmux session (`reconnect_agent`). A reconnect never starts Codex, resumes a
 conversation, replays input, restarts an external tunnel, or substitutes a new
-worker if the original tmux session is missing. Metadata changes do not grant
-access. Inspect live evidence for the selected worker rather than treating the
+worker if the original tmux session is missing. Every enrolled open worker is
+automatically manageable; naming changes display metadata, not native identity.
+Inspect live evidence for the selected worker rather than treating the
 cached overview as a fresh connectivity check.
 
-This is the **legacy existing-chat integration**. Its service credential can
-access the Hub's shared global activation list; it is not automatically narrowed
-by a new management session's per-controller grants. For scoped management,
-start a management conversation in the Hub UI instead. That workflow prepares
+This is the **existing-chat integration**. It manages the same enrolled workers
+as a Hub-created manager, without activation or per-worker grants. A Hub manager
+retains independent authentication and explicit new-work directory permissions.
+Starting a management conversation in the Hub UI prepares
 its own MCP connection and does not require installing this package.
 
 The source package deliberately contains no machine-specific MCP command. Its
@@ -49,7 +50,7 @@ To upgrade an existing `ceo-hub@ceo-hub-local` installation without introducing
 a second plugin identity, explicitly generate a compatibility package instead:
 
 ```sh
-python scripts/configure_plugin.py --legacy-ceo-identity --output .runtime/plugin-marketplace-ceo-v0.6.0
+python scripts/configure_plugin.py --legacy-ceo-identity --output .runtime/plugin-marketplace-ceo-v0.7.0
 ```
 
 This keeps the plugin name `ceo-hub`, skill name `ceo-hub`, marketplace name
@@ -62,7 +63,7 @@ identity you intend to use, not both, to avoid duplicate tools.
 Review the generated commands before registration. A running MCP process and
 its discovered tool list do not hot-reload after source changes: reload that
 MCP connection or reopen the controlling chat and verify `tools/list` includes
-`update_agent` and `reconnect_agent`, with server version `0.6.0`. Updating the
+`update_agent` and `reconnect_agent`, with server version `0.7.0`. Updating the
 installed skill/manifest is separate from replacing a bridge file; local plugin
 cache loading may require an app reload or restart. Do not restart the terminal
 broker or a worker to refresh plugin tools.

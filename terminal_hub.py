@@ -20,7 +20,7 @@ from controllers import ControllerService, default_workspace_root
 import remote_terminal_history
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "0.6.1"
+VERSION = "0.7.0"
 RETRYABLE = ("queued", "waiting_for_agent", "human_busy", "awaiting_connection", "blocked")
 MANAGEMENT_EVENTS = ("host_configured", "host_connected", "host_unavailable", "agent_attached",
                      "agent_created", "agent_activated", "agent_deactivated", "message_submitted",
@@ -47,6 +47,13 @@ class Hub:
         # trust must not implicitly grant access to the entire Hub repository.
         # Explicit runtimes (including tests) keep all state in that namespace.
         self.controllers = ControllerService(self, workspace_root=default_workspace_root(runtime))
+        # The management policy changes visibility, not execution consent. Old
+        # inactive-worker deliveries must never become newly eligible merely
+        # because the activation checkbox no longer exists.
+        self.store.fence_pending_policy_upgrade(
+            [(row["host"], row["thread_id"]) for row in self.managed_worker_rows() if not row.get("active")],
+            RETRYABLE, "automatic-worker-management-v1",
+            "连接即管理升级已保留原记录；旧未激活终端的待发送输入未提交，不会自动执行。")
         self._watcher = threading.Thread(target=self._watch_terminals, name="ceo-terminal-events", daemon=True)
         # Metadata reads never start the broker, SSH, a model, or a conversation.
         self._watcher.start()
@@ -149,6 +156,25 @@ class Hub:
         if row.get("mode") in ("closed", "closing", "close_unknown"):
             raise ValueError("此终端已关闭或关闭结果尚未确认，不能再输入或重新连接。请新建终端；需要原对话时可在新终端运行 codex resume。")
 
+    def is_managed_worker(self, row):
+        """Registered open worker identity; cheap metadata, never live probing.
+
+        A disconnected attachment stays in the management list for exact
+        reconnect and metadata. History-only rows, closing fences and manager
+        identities/workspaces are never promoted to workers by this policy.
+        The old stored ``active`` field is deliberately not an authority.
+        """
+        if (not isinstance(row, dict) or row.get("mode") != "terminal"
+                or not isinstance(row.get("terminal_id"), str)
+                or not re.fullmatch(r"ceohub-[a-f0-9]{16,48}", row["terminal_id"])
+                or not row.get("host") or not row.get("thread_id")):
+            return False
+        return not self.controllers.is_controller_reference(row["host"], row["thread_id"], cwd=row.get("cwd"))
+
+    def managed_worker_rows(self):
+        """Only enrolled worker rows, without broker startup or machine scans."""
+        return [row for row in self.store.agents() if self.is_managed_worker(row)]
+
     def get_agent(self, host, thread_id, plugin=False, sessions=None):
         if self.controllers.is_controller_reference(host, thread_id):
             raise PermissionError("管理会话不是工作 agent；请使用主控专用入口。")
@@ -157,12 +183,13 @@ class Hub:
             raise ValueError("未登记的工作终端；请先在 UI 打开或连接。")
         if self.controllers.is_controller_reference(host, thread_id, cwd=row.get("cwd")):
             raise PermissionError("管理工作区不能作为工作 agent 读取。")
-        if plugin and not row["active"]:
-            raise PermissionError("该终端未激活；请在 UI 纳入 CEO 管理范围。")
+        if plugin and not self.is_managed_worker(row):
+            raise PermissionError("只有已连接登记且未关闭的共享工作终端可被管理；历史记录和管理会话不是工作终端。")
         safe = {key: value for key, value in row.items() if key not in ("access", "owned")}
         runtime = next((s for s in (self.terminals.sessions() if sessions is None else sessions) if s["id"] == row.get("terminal_id")), {})
         binding = self.store.setting(self._output_key(host, row.get("terminal_id"))) if row.get("terminal_id") else None
-        result = {**safe, "pinned": bool(row.get("pinned")), "host_label": self.host(host).get("label", host),
+        result = {**safe, "active": self.is_managed_worker(row), "management_policy": "connected_workers",
+                "pinned": bool(row.get("pinned")), "host_label": self.host(host).get("label", host),
                 "agent_id": self.agent_id(host, thread_id), "source": "terminal" if row.get("terminal_id") else "history",
                 "output_binding": {"state": "recorded", "session_id": binding["session_id"], "method": binding.get("method"),
                                    "note": "上次关联；读取时重新核验当前进程。"} if binding else {"state": "unbound"},
@@ -211,9 +238,9 @@ class Hub:
         elif agent.get("blocked_reason"):
             status, label, tone, action, attention = "needs_input", "需人工处理", "warning", "open_terminal", True
         elif state == "shell":
-            status, label, tone, action, attention = "shell", "终端就绪 · 未启动 agent", "neutral", "open_terminal", bool(agent.get("active"))
+            status, label, tone, action, attention = "shell", "终端就绪 · 未启动 agent", "neutral", "open_terminal", True
         elif agent.get("agent_ready"):
-            status, label, tone, action, attention = ("ready", "Agent 可交互", "positive", "open_terminal", False) if agent.get("active") else ("inactive", "未激活", "neutral", "open_terminal", False)
+            status, label, tone, action, attention = "ready", "Agent 可交互", "positive", "open_terminal", False
         else:
             status, label, tone, action, attention = "checking", "已连接 · 待核验", "neutral", "open_terminal", False
         return {"status": status, "label": label, "tone": tone, "primary_action": action, "needs_attention": attention}
@@ -563,7 +590,9 @@ class Hub:
 
     def attached_agents(self, active_only=False):
         sessions = self.terminals.sessions()
-        return [self.get_agent(a["host"], a["thread_id"], sessions=sessions) for a in self.store.agents() if not active_only or a["active"]]
+        return [self.get_agent(a["host"], a["thread_id"], sessions=sessions) for a in self.store.agents()
+                if not self.controllers.is_controller_reference(a["host"], a["thread_id"], cwd=a.get("cwd"))
+                and (not active_only or self.is_managed_worker(a))]
 
     def connected_hosts(self, agents=None):
         agents = self.attached_agents() if agents is None else agents
@@ -635,7 +664,7 @@ class Hub:
             thread_id = thread_id or terminal_id
             # Register first, so an interrupted create remains visible and can
             # reconnect the same owned terminal rather than silently duplicating.
-            self.store.remember(host, thread_id, title or thread_id, active=active if previous is None else None,
+            self.store.remember(host, thread_id, title or thread_id, active=True if previous is None else None,
                                 mode="terminal", terminal_id=terminal_id, cwd=cwd)
             try:
                 if controller_id is not None:
@@ -670,15 +699,14 @@ class Hub:
         return self.connect_terminal(host, thread_id, title=alias)
 
     def activate_agent(self, host, thread_id, active):
+        """Compatibility no-op: enrolled open terminals are always managed."""
+        if type(active) is not bool:
+            raise ValueError("兼容 active 参数必须为布尔值。")
         with self.registry_lock:
             row = self.get_agent(host, thread_id)
-            if active:
-                self._require_open(row)
-            self.store.set_active(host, thread_id, active)
-            if not active:
-                self.store.revoke_pending(host, thread_id, RETRYABLE)
-        self.record_event("agent_activated" if active else "agent_deactivated", host=host, thread_id=thread_id)
-        return self.get_agent(host, thread_id)
+            self._require_open(row)
+        return {**row, "activation_compatibility": {"ignored": True, "requested_active": active,
+            "policy": "connected_workers", "message": "已连接的工作终端自动纳入管理；此兼容调用不改变连接、管理范围或待发送输入。"}}
 
     @staticmethod
     def _output_key(host, terminal_id):
@@ -1070,7 +1098,7 @@ class Hub:
 
     def _require_controller_scope(self, controller_id, host, thread_id):
         row = self.store.agent(host, thread_id)
-        if not row or not row["active"] or not self.controllers.authorize(controller_id, host, thread_id):
+        if not self.is_managed_worker(row) or not self.controllers.authorize(controller_id, host, thread_id):
             raise PermissionError("此工作终端不在该管理会话的当前授权范围内。")
         if self.controllers.is_controller_reference(host, thread_id, cwd=row.get("cwd")):
             raise PermissionError("管理会话不能管理自身或其他管理会话。")
@@ -1110,7 +1138,7 @@ class Hub:
                 cursor = event["id"]
                 data = event["data"]
                 agent = self.store.agent(data.get("host"), data.get("thread_id"))
-                if agent and agent["active"] and (controller_id is None or self.controllers.authorize(controller_id, agent["host"], agent["thread_id"])):
+                if self.is_managed_worker(agent) and (controller_id is None or self.controllers.authorize(controller_id, agent["host"], agent["thread_id"])):
                     selected.append(event)
             if selected or time.monotonic() >= deadline:
                 return {"events": selected, "cursor": cursor}
@@ -1132,12 +1160,14 @@ class Hub:
         if tool == "get_controller_context":
             if controller_id is None:
                 return {"mode": "legacy", "controller_id": None, "legacy_scope_shared": True,
-                        "scope_note": "旧插件使用全局 UI 激活范围，不是独立管理会话身份。"}
+                        "management_policy": "connected_workers", "worker_access": "automatic",
+                        "effective_worker_count": len(self.managed_worker_rows()),
+                        "scope_note": "旧插件管理全部已登记的共享工作终端，不是独立管理会话身份。"}
             self.controllers.mark_tool_seen(controller_id)
             return self.controllers.view_context(controller_id)
         if tool == "list_active_agents":
             if controller_id is None:
-                agents = self.attached_agents()
+                agents = self.attached_agents(active_only=True)
             else:
                 with self.registry_lock:
                     sessions = self.terminals.sessions()
@@ -1145,14 +1175,15 @@ class Hub:
                     for agent_id in self.controllers.allowed_agents(controller_id):
                         host, thread_id = self.split_agent_id(agent_id)
                         row = self.store.agent(host, thread_id)
-                        if row and row["active"] and self.controllers.authorize(controller_id, host, thread_id):
+                        if self.is_managed_worker(row) and self.controllers.authorize(controller_id, host, thread_id):
                             agents.append(self.get_agent(host, thread_id, plugin=True, sessions=sessions))
             connected = self.connected_hosts(agents)
             if controller_id is not None:
                 connected &= set(self.controllers.allowed_hosts(controller_id)) | {a["host"] for a in agents}
-            return {"agents": [a for a in agents if a["active"]], "controller": "current_codex_conversation",
+            return {"agents": agents, "controller": "current_codex_conversation", "management_policy": "connected_workers",
+                    "worker_access": "automatic", "effective_worker_count": len(agents),
                     "connected_hosts": sorted(connected), "legacy_scope_shared": controller_id is None,
-                    "scope_note": "只列本管理会话已获授权且 UI 激活的终端。" if controller_id is not None else "只列 UI 已激活共享终端，无全盘扫描或独立 CEO 模型。"}
+                    "scope_note": "已连接登记的工作终端自动纳入管理；包含暂时断线的原终端，不扫描机器或全部历史。"}
         if tool == "poll_events":
             return self.plugin_events(arguments.get("after", 0), arguments.get("timeout_seconds", 0), controller_id=controller_id)
         if tool == "create_agent":
@@ -1231,7 +1262,10 @@ class Hub:
         agents = self.attached_agents()
         connected = self.connected_hosts(agents)
         events = self.store.recent_events(kinds=MANAGEMENT_EVENTS) if int(after) == 0 else self.store.events(after, kinds=MANAGEMENT_EVENTS)
-        return {"version": VERSION, "controller": "codex-plugin", "legacy_scope_shared": True, "hosts": [{"id": h, **c, **self.connections.get(h, {}), "connected": h in connected} for h, c in self.hosts.items()],
+        return {"version": VERSION, "controller": "codex-plugin", "legacy_scope_shared": True,
+                "management_policy": "connected_workers", "worker_access": "automatic",
+                "effective_worker_count": sum(bool(agent.get("active")) for agent in agents),
+                "hosts": [{"id": h, **c, **self.connections.get(h, {}), "connected": h in connected} for h, c in self.hosts.items()],
                 "agents": agents, "events": events, "cursor": self.store.event_cursor() if int(after) == 0 else (events[-1]["id"] if events else int(after)),
                 "outbox": self.store.outbox(), "approvals": []}
 

@@ -1,4 +1,4 @@
-"""Actual output reads preserve terminal input and exact activation boundaries."""
+"""Actual output reads preserve input and enrolled-terminal identity boundaries."""
 import sys
 import tempfile
 import unittest
@@ -71,20 +71,27 @@ class ConversationHubTests(unittest.TestCase):
         self.assertEqual(result["after_cursor"], "next-new")
         self.assertEqual(self.terminals.writes, [])
 
-    def test_inactive_scope_performs_no_probe_or_read(self):
+    def test_legacy_inactive_enrolled_worker_can_read_exact_output(self):
         self.hub.store.set_active("local", OTHER, False)
+        result = self.read()
+        self.assertEqual(result["source"], "codex_rollout")
+        self.assertTrue(result["messages"][0]["text"].endswith("END"))
+        self.assertEqual(self.terminals.writes, [])
+
+    def test_history_only_record_performs_no_probe_or_read(self):
+        self.hub.store.remember("local", OTHER, "Work", mode="observed")
         with self.assertRaises(PermissionError):
             self.read()
         self.assertEqual(self.calls, [])
 
-    def test_deactivation_during_read_withholds_output(self):
+    def test_closed_during_read_withholds_output(self):
         original = self.hub.history.side_effect
-        def deactivate(host, request):
+        def close_worker(host, request):
             result = original(host, request)
             if request["op"] == "read_output":
-                self.hub.store.set_active("local", OTHER, False)
+                self.hub.store.remember("local", OTHER, "Work", mode="closed")
             return result
-        self.hub.history.side_effect = deactivate
+        self.hub.history.side_effect = close_worker
         with self.assertRaises(PermissionError):
             self.read()
 

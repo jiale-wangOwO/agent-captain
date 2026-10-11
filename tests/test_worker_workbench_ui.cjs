@@ -49,12 +49,12 @@ test('default workbench is cross-machine and closed records are hidden with hone
   assert.match(h.get('#agent-count-caption').textContent, /2 \/ 3.*1.*已关闭.*不是任务完成/); assert.equal(h.calls.filter(c => c.options.method === 'POST').length, 0);
 });
 
-test('fresh default working includes connected, pinned or management-enabled objects without old inactive noise', async () => {
+test('default working includes every real open terminal even if old activation is false or display disconnected', async () => {
   const h = await harness({agents: [worker('local', 'one', 'Alpha', {active: false}), worker('remote', 'two', 'Beta'), worker('remote', 'old', 'Old offline', {active: false, connected: false}), {host: 'local', thread_id: 'history', alias: 'Old history', mode: 'observe', active: false}]});
-  assert.equal(h.get('#agent-status-filter').value, 'working'); assert.deepEqual(cardTitles(h.get), ['Alpha', 'Beta']);
+  assert.equal(h.get('#agent-status-filter').value, 'working'); assert.deepEqual(cardTitles(h.get), ['Alpha', 'Beta', 'Old offline']);
   setFilter(h, 'status', 'all'); assert.deepEqual(cardTitles(h.get), ['Alpha', 'Beta', 'Old history', 'Old offline']);
   h.agents[2].pinned = true; h.context.clearAgentFilters(); assert.deepEqual(cardTitles(h.get), ['Old offline', 'Alpha', 'Beta']);
-  h.agents[1].connected = false; await h.context.refresh(true); assert.ok(cardTitles(h.get).includes('Beta'), 'Management-enabled disconnected worker remains visible');
+  h.agents[1].connected = false; await h.context.refresh(true); assert.ok(cardTitles(h.get).includes('Beta'), 'Every registered disconnected worker remains visible');
 });
 
 test('previous explicit all preference stays all, rather than silently changing existing user choice', async () => {
@@ -143,12 +143,84 @@ test('known blocked reconnect keeps useful classification but never creates shel
   assert.equal(h.calls.some(c => /\/create|\/connect|\/input|resume/.test(c.url)), false); assert.equal(vm.runInContext('terminalSession.displayConnected', h.context), false);
 });
 
-test('global activation and current manager grant are distinct; range quick action only opens settings', async () => {
+test('registered workers expose naming directly with no activation or per-worker management grants', async () => {
   let opened = 0;
   const h = await harness({controller: {model: {controller: {scope: ['local::one']}}, openSettings(scopeOnly) { assert.equal(scopeOnly, true); opened++; }}});
-  const cards = h.get('#agents').children; assert.equal(h.context.agentManagerGrant(h.agents[0]), true); assert.equal(h.context.agentManagerGrant(h.agents[1]), false);
-  assert.ok(descendants(cards[0]).some(item => item.textContent === '当前主控已授权')); assert.ok(descendants(cards[1]).some(item => item.textContent === '当前主控未授权'));
-  await cardButton(cards[1], '管理范围').onclick(); assert.equal(opened, 1); assert.equal(h.calls.some(c => /activate|scope/.test(c.url)), false);
+  const cards = h.get('#agents').children;
+  assert.ok(cards.every(card => cardButton(card, '重命名')));
+  assert.equal(cards.some(card => descendants(card).some(item => /当前主控|管理范围|未加入管理名单/.test(item.textContent))), false);
+  assert.equal(cards.some(card => descendants(card).some(item => item.type === 'checkbox')), false);
+  assert.equal(opened, 0); assert.equal(h.calls.some(c => /activate|scope/.test(c.url)), false);
+});
+
+test('old active-only preference is normalized away without hiding false-active registered workers', async () => {
+  const storage = new Map([['pron-hub.worker-workbench.v1', JSON.stringify({active: true, status: 'working'})]]);
+  const h = await harness({storage, agents: [worker('remote', 'one', 'Old inactive', {active: false, connected: false})]});
+  assert.deepEqual(cardTitles(h.get), ['Old inactive']); assert.equal(vm.runInContext('agentFilters.active', h.context), false);
+  assert.equal(JSON.parse(storage.get('pron-hub.worker-workbench.v1')).active, false);
+});
+
+test('unnamed duplicate projects retain visible machine directory and stable ID context', async () => {
+  const h = await harness({agents: [worker('remote', 'one', '', {title: ''}), worker('local', 'two', '', {title: ''})]});
+  assert.deepEqual(cardTitles(h.get), ['My computer · project', 'Remote machine · project']);
+  for (const card of h.get('#agents').children) {
+    assert.ok(cardButton(card, '命名'));
+    assert.ok(descendants(card).some(item => /agent-directory/.test(item.className || '') && item.textContent));
+    assert.ok(descendants(card).some(item => /agent-id/.test(item.className || '') && item.textContent));
+  }
+});
+
+test('detail rename edits the exact disconnected worker and naming drafts survive target switches', async () => {
+  const h = await harness({agents: [worker('local', 'one', 'Alpha'), worker('remote', 'two', 'Beta', {connected: false})]});
+  await h.context.selectAgent(h.agents[1]); h.get('#detail-rename').onclick();
+  assert.equal(vm.runInContext('renameTarget.key', h.context), 'remote:two');
+  vm.runInContext('renameTarget.value = "Beta draft"', h.context);
+  await h.context.selectAgent(h.agents[0]); h.context.openAgentRename(h.agents[0]);
+  vm.runInContext('renameTarget.value = "Alpha draft"', h.context); h.context.openAgentRename(h.agents[1]);
+  assert.equal(vm.runInContext('renameTarget.value', h.context), 'Beta draft');
+  const current = vm.runInContext('renameTarget', h.context); await h.context.refresh(true); assert.equal(vm.runInContext('renameTarget', h.context), current);
+  await h.context.saveAgentRename(h.agents[1]);
+  assert.deepEqual(h.calls.find(c => c.url === '/api/agents/update').body, {host: 'remote', thread_id: 'two', alias: 'Beta draft'});
+  assert.equal(h.calls.some(c => /\/input|\/create|\/reconnect|\/connect|activate/.test(c.url)), false);
+});
+
+test('detail naming stays visible for a worker filtered out of cards and submits captured target only', async () => {
+  const h = await harness(); await h.context.selectAgent(h.agents[0]); h.context.selectHost('remote'); h.get('#detail-rename').onclick();
+  assert.equal(h.get('#rename-dialog').open, true); assert.equal(h.get('#rename-name').value, 'Alpha');
+  h.get('#rename-name').value = 'Selected but filtered'; h.get('#rename-name').oninput();
+  await h.context.selectAgent(h.agents[1]); await h.context.refresh(true);
+  assert.equal(h.get('#rename-name').value, 'Selected but filtered'); assert.equal(vm.runInContext('renameTarget.key', h.context), 'local:one');
+  h.get('#rename-form').onsubmit({preventDefault() {}}); await settle();
+  assert.deepEqual(h.calls.find(c => c.url === '/api/agents/update').body, {host: 'local', thread_id: 'one', alias: 'Selected but filtered'});
+  assert.equal(h.agents[1].alias, 'Beta'); assert.equal(h.calls.some(c => /\/input|\/create|\/connect|activate/.test(c.url)), false);
+});
+
+test('manual naming cancel discards only that rename draft and leaves terminal input untouched', async () => {
+  const h = await harness(); await h.context.selectAgent(h.agents[0]); const session = vm.runInContext('terminalSession', h.context); session.input = 'Terminal human draft';
+  h.get('#detail-rename').onclick(); h.get('#rename-name').value = 'Cancelled draft'; h.get('#rename-name').oninput();
+  h.get('#rename-dialog').listeners.close(); h.get('#detail-rename').onclick();
+  assert.equal(h.get('#rename-name').value, 'Alpha'); assert.equal(session.input, 'Terminal human draft');
+  assert.equal(h.calls.some(c => /\/input|\/update|\/create|\/connect/.test(c.url)), false);
+});
+
+test('manager records never become worker cards even when an old registry contains their terminal ID', async () => {
+  const h = await harness({agents: [worker('local', 'one', 'Alpha'), worker('local', 'manager', 'Manager', {mode: 'controller', kind: 'controller'})]});
+  setFilter(h, 'status', 'all'); assert.deepEqual(cardTitles(h.get), ['Alpha']);
+});
+
+test('create name is optional with machine and selected project default, not an activation control', async () => {
+  const h = await harness({handle: async (call, backend) => call.url === '/api/terminals/create' ? backend.reply({thread_id: 'created'}) : null});
+  h.context.openCreate(null, 'remote'); assert.equal(h.get('#create-title').value, ''); h.get('#create-cwd').value = '/workspace/sample';
+  h.get('#create-form').onsubmit({preventDefault() {}}); await settle();
+  const body = h.calls.find(c => c.url === '/api/terminals/create').body;
+  assert.equal(body.title, 'Remote machine · sample'); assert.equal(Object.hasOwn(body, 'active'), false);
+});
+
+test('shipped markup has naming in detail and no separate worker activation or grant UI', () => {
+  const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
+  assert.match(html, /id="detail-rename"/); assert.match(html, /id="rename-dialog"/); assert.match(html, /id="create-title" maxlength="200"/);
+  assert.doesNotMatch(html, /id="(?:active-only|create-active|controller-workers|controller-legacy-warning)"/);
+  assert.doesNotMatch(html, /当前主控(?:未|已)授权|只看允许管理|加入 CEO 的激活范围/);
 });
 
 test('empty registry and empty search have different helpful, non-scanning states', async () => {

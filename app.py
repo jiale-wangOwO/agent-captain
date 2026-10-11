@@ -222,7 +222,7 @@ def create_server(hub, port=8766, token=None):
                     self.respond(200, method(body["id"], body.get("request_key")))
                 elif self.path == "/api/controllers/scope":
                     self.respond(200, hub.controllers.set_scope(body["id"], body.get("agent_ids", []),
-                        allowed_hosts=body.get("allowed_hosts", []), host_roots=body.get("host_roots")))
+                        allowed_hosts=body.get("allowed_hosts"), host_roots=body.get("host_roots")))
                 elif self.path == "/api/controllers/input":
                     self.respond(200, hub.controllers.input(body["id"], body["data"]))
                 elif self.path == "/api/controllers/resize":

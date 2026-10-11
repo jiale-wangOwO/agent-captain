@@ -1,7 +1,7 @@
 {
   "name": "pron-hub",
-  "version": "0.6.1",
-  "description": "让当前 Codex 对话成为 CEO，与用户共用已激活的本机和 SSH 工作终端。",
+  "version": "0.7.0",
+  "description": "让当前 Codex 对话成为主控，按用户意图管理 Hub 已接入的本机和 SSH 工作终端，无需额外激活。",
   "author": {"name": "PRON Hub contributors"},
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",

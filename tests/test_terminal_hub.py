@@ -151,16 +151,18 @@ class TerminalHubTests(unittest.TestCase):
                 self.hub.plugin_call(tool, arguments)
                 self.assertEqual(len(self.terminals.writes), writes_before + 1)
 
-    def test_deactivation_revokes_geometry_blocked_input_before_it_can_retry(self):
+    def test_legacy_activation_noop_preserves_geometry_fence_and_same_key_retry(self):
         self.register()
         with patch.object(self.terminals, "write", side_effect=BrokerError("Display needs resize", "geometry_unknown", 409)):
             delivery = self.send(key="geometry-revoked")
         self.assertEqual(delivery["state"], "blocked")
-        self.hub.activate_agent("local", "work-1", False)
-        self.assertEqual(self.hub.store.delivery(delivery["id"])["state"], "scope_revoked")
+        compatibility = self.hub.activate_agent("local", "work-1", False)
+        self.assertTrue(compatibility["active"])
+        self.assertTrue(compatibility["activation_compatibility"]["ignored"])
+        self.assertEqual(self.hub.store.delivery(delivery["id"])["state"], "blocked")
         self.hub.activate_agent("local", "work-1", True)
-        self.assertEqual(self.send(key="geometry-revoked")["state"], "scope_revoked")
-        self.assertEqual(self.terminals.writes, [])
+        self.assertEqual(self.send(key="geometry-revoked")["state"], "submitted")
+        self.assertEqual(len(self.terminals.writes), 1)
 
     def test_startup_and_registry_never_launch_or_scan_agents(self):
         self.hub.close()
@@ -208,17 +210,15 @@ class TerminalHubTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.hub.create_agent(**{**args, "command": "codex"})
 
-    def test_inactive_plugin_gate_does_not_block_direct_ui_input(self):
+    def test_stored_inactive_worker_is_managed_and_direct_ui_input_stays_unpersisted(self):
         agent = self.register(active=False)
-        self.assertEqual(self.hub.plugin_call("list_active_agents", {})["agents"], [])
-        for tool in ("get_agent", "read_agent"):
-            with self.subTest(tool=tool), self.assertRaises(PermissionError):
-                self.hub.plugin_call(tool, {"agent_id": agent})
-        with self.assertRaises(PermissionError):
-            self.send(agent=agent)
+        self.assertEqual([row["agent_id"] for row in self.hub.plugin_call("list_active_agents", {})["agents"]], [agent])
+        self.assertTrue(self.hub.plugin_call("get_agent", {"agent_id": agent})["active"])
+        self.assertEqual(self.send(agent=agent)["state"], "submitted")
+        deliveries = self.hub.store.outbox()
         self.hub.terminal_input("local", "work-1", "hello\r")
         self.assertEqual(self.terminals.writes[-1][2]["data"], "hello\r")
-        self.assertEqual(self.hub.store.outbox(), [], "human raw input must not persist credentials")
+        self.assertEqual(self.hub.store.outbox(), deliveries, "human raw input must not persist credentials")
 
     def test_ordinary_task_is_sent_to_same_terminal_without_ceo_injection(self):
         self.register()
@@ -331,7 +331,7 @@ class TerminalHubTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.hub.plugin_call("send_terminal_input", {"agent_id": "local::work-1", "data": "\r"})
 
-    def test_revoke_all_pending_plugin_rows_even_beyond_ui_outbox_limit(self):
+    def test_legacy_activation_noop_does_not_revoke_pending_rows_even_beyond_ui_limit(self):
         self.register()
         ids = []
         for index in range(140):
@@ -342,7 +342,7 @@ class TerminalHubTests(unittest.TestCase):
         submitted = self.hub.store.enqueue("local", "work-1", "already sent", origin="plugin", request_key="already-sent")
         self.hub.store.update_outbox(submitted, "submitted")
         self.hub.activate_agent("local", "work-1", False)
-        self.assertTrue(all(self.hub.store.delivery(request_id)["state"] == "scope_revoked" for request_id in ids))
+        self.assertTrue(all(self.hub.store.delivery(request_id)["state"] in ("waiting_for_agent", "queued") for request_id in ids))
         self.assertEqual(self.hub.store.delivery(human)["state"], "queued")
         self.assertEqual(self.hub.store.delivery(submitted)["state"], "submitted")
 

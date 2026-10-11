@@ -12,8 +12,12 @@ const rendered = {hosts: '', agents: '', outbox: '', detail: ''};
 const workbenchStorageKey = 'pron-hub.worker-workbench.v1';
 let workbenchSaved = {};
 try { workbenchSaved = JSON.parse(window.localStorage?.getItem(workbenchStorageKey) || '{}') || {}; } catch (_) {}
-const agentFilters = {host: typeof workbenchSaved.host === 'string' ? workbenchSaved.host : '', query: typeof workbenchSaved.query === 'string' ? workbenchSaved.query : '', status: ['working', 'all', 'connected', 'attention', 'closed'].includes(workbenchSaved.status) ? workbenchSaved.status : 'working', active: !!workbenchSaved.active};
+// Old active-only preferences must not hide connected work after the automatic
+// worker-access migration. Registration and lifecycle are the single model.
+const agentFilters = {host: typeof workbenchSaved.host === 'string' ? workbenchSaved.host : '', query: typeof workbenchSaved.query === 'string' ? workbenchSaved.query : '', status: ['working', 'all', 'connected', 'attention', 'closed'].includes(workbenchSaved.status) ? workbenchSaved.status : 'working', active: false};
+if (workbenchSaved.active) { workbenchSaved.active = false; try { window.localStorage?.setItem(workbenchStorageKey, JSON.stringify(workbenchSaved)); } catch (_) {} }
 let restoreAgentKey = agentKeyFromHash() || (typeof workbenchSaved.agent === 'string' ? workbenchSaved.agent : null), renameTarget = null;
+const renameDrafts = new Map();
 const reconnectOperations = new Map(Array.isArray(workbenchSaved.reconnect) ? workbenchSaved.reconnect.filter(entry => Array.isArray(entry) && typeof entry[0] === 'string' && typeof entry[1]?.requestKey === 'string') : []);
 const agentRecoveryNotices = new Map();
 let displayServiceStatus = null, displayServiceCheck = null, displayServiceCheckedAt = 0, displayServiceApiMissing = false, displayRecoveryTarget = null;
@@ -22,13 +26,14 @@ const displayServiceHelp = '本机显示服务离线不等于远端任务退出�
 function needsDisplayServiceRecovery(recovery) { return recovery?.code === 'local_display_unavailable' || recovery?.next_action === 'recover_display_service'; }
 function needsReconnectReconciliation(recovery) { return ['reconcile', 'reconcile_reconnect'].includes(recovery?.next_action); }
 function displayServiceUnavailable() { return displayServiceStatus?.running === false || displayServiceStatus?.available === false || displayServiceStatus?.online === false || displayServiceStatus?.healthy === false || ['offline', 'unavailable', 'stopped'].includes(displayServiceStatus?.state || displayServiceStatus?.status) || displayServiceStatus?.running !== true && needsDisplayServiceRecovery(currentAgent()?.recovery); }
-const deliveryLabels = {queued: '已排队', waiting_for_agent: '等待在终端中启动工作 agent', human_busy: '等待你完成当前终端输入', blocked: '等待处理终端中的登录或审批', not_sent: '未发送', submitting: '输入提交中', submitted: '已写入终端', delivered: '已写入终端', completed: '该轮已结束', failed: '送达失败', interrupted: '已中断', scope_revoked: '已取消 · CEO 激活已撤销', unknown: '送达结果不确定 · 请核对终端', awaiting_connection: '等待终端连接'};
+const deliveryLabels = {queued: '已排队', waiting_for_agent: '等待在终端中启动工作 agent', human_busy: '等待你完成当前终端输入', blocked: '等待处理终端中的登录或审批', not_sent: '未发送', submitting: '输入提交中', submitted: '已写入终端', delivered: '已写入终端', completed: '该轮已结束', failed: '送达失败', interrupted: '已中断', scope_revoked: '已取消 · 原工作会话不再可用', unknown: '送达结果不确定 · 请核对终端', awaiting_connection: '等待终端连接'};
 const statusLabels = {shell: 'Shell 已就绪', running: '终端运行中', connected: '终端已连接', disconnected: '显示连接已断开', not_connected: '尚未连接终端', exited: '显示连接已结束', closed: '终端已关闭', closing: '正在关闭终端', close_unknown: '关闭结果未确认', error: '连接错误', unknown: '终端状态未知'};
 const disconnectedLabel = '显示连接已断开 · 工作进程未确认';
 const agentKey = agent => `${agent.host}:${agent.thread_id}`;
 const currentAgent = () => state.agents.find(agent => agentKey(agent) === selectedAgent);
 const currentHost = () => state.hosts.find(host => host.id === selectedHost);
 const isTerminal = agent => agent?.mode === 'terminal' || !!agent?.terminal_id;
+const isWorkerRecord = agent => agent?.mode !== 'controller' && agent?.kind !== 'controller';
 const isClosedAgent = agent => !!agent && (agent.closed || agent.lifecycle === 'closed' || agent.status === 'closed' || agent.state === 'closed');
 const isClosingAgent = agent => !!agent && (['closing', 'unknown'].includes(agent.close_state) || ['closing', 'close_unknown'].includes(agent.status) || ['closing', 'close_unknown'].includes(agent.state));
 const sessionConnected = session => typeof session?.displayConnected === 'boolean' ? session.displayConnected : session?.agent?.connected !== false;
@@ -43,6 +48,9 @@ function hostDisplayStatus(host) {
   return {connected: count > 0, label: workers.length ? `显示连接 ${count} / ${workers.length}` : host.connected ? '上次 SSH 检查成功' : 'SSH 尚未验证'};
 }
 const shortId = id => id ? String(id).slice(0, 8) + '…' + String(id).slice(-6) : '';
+const workerMachineName = agent => agent.host_label || state.hosts.find(host => host.id === agent.host)?.label || agent.host;
+function defaultWorkerName(host, cwd) { const machine = state.hosts.find(item => item.id === host)?.label || host; const leaf = String(cwd || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop(); return `${machine} · ${leaf || '工作终端'}`; }
+const workerDisplayName = agent => agent.alias || agent.title || defaultWorkerName(agent.host, agent.cwd);
 const resumeCommand = id => `codex resume ${id}`;
 function agentKeyFromHash() { try { return new URLSearchParams(String(window.location?.hash || '').replace(/^#/, '')).get('agent'); } catch (_) { return null; } }
 function persistWorkbench() {
@@ -56,24 +64,22 @@ function updateAgentLocation() {
 }
 function registeredAgent(key) { return state.agents.find(agent => agentKey(agent) === key || agent.agent_id === key || `${agent.host}::${agent.thread_id}` === key); }
 function agentNeedsAttention(agent) { return !isClosedAgent(agent) && (!!agent.management?.needs_attention || isClosingAgent(agent) || displayDisconnected(agent) || !!agent.blocked_reason || !!agent.error || ['setup_menu', 'approval', 'login', 'error', 'unknown'].includes(agent.state || agent.status) || !isTerminal(agent)); }
-function agentManagerGrant(agent) { const manager = window.PronController?.model?.controller; if (!manager) return null; const scope = manager.scope || manager.agent_ids || []; return scope.includes(agent.agent_id || `${agent.host}::${agent.thread_id}`); }
 function filteredAgents() {
   const query = agentFilters.query.trim().toLocaleLowerCase();
-  return state.agents.filter(agent => (!agentFilters.host || agent.host === agentFilters.host)
+  return state.agents.filter(agent => isWorkerRecord(agent) && (!agentFilters.host || agent.host === agentFilters.host)
     && (!query || [agent.alias, agent.title, agent.cwd, agent.host_label, state.hosts.find(host => host.id === agent.host)?.label, agent.host].some(value => String(value || '').toLocaleLowerCase().includes(query)))
-    && (!agentFilters.active || agent.active)
     && (agentFilters.status === 'closed' ? isClosedAgent(agent) : !isClosedAgent(agent))
-    && (agentFilters.status !== 'working' || agent.active || agent.pinned || isTerminal(agent) && !isClosingAgent(agent) && !displayDisconnected(agent))
+    && (agentFilters.status !== 'working' || isTerminal(agent))
     && (agentFilters.status !== 'connected' || isTerminal(agent) && !isClosingAgent(agent) && !displayDisconnected(agent))
     && (agentFilters.status !== 'attention' || agentNeedsAttention(agent)))
-    .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || String(a.alias || a.title || a.thread_id).localeCompare(String(b.alias || b.title || b.thread_id), 'zh-CN') || agentKey(a).localeCompare(agentKey(b)));
+    .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || workerDisplayName(a).localeCompare(workerDisplayName(b), 'zh-CN') || agentKey(a).localeCompare(agentKey(b)));
 }
 function renderWorkbenchFilters() {
   const select = $('#agent-host-filter'); select.replaceChildren();
   const all = node('option', '全部机器'); all.value = ''; select.append(all);
   for (const host of state.hosts) { const option = node('option', host.label || host.id); option.value = host.id; select.append(option); }
   select.value = agentFilters.host; $('#agent-status-filter').value = agentFilters.status;
-  $('#agent-search').value = agentFilters.query; $('#active-only').checked = agentFilters.active;
+  $('#agent-search').value = agentFilters.query;
   $('#all-machines').classList.toggle('selected', !agentFilters.host);
 }
 function dateText(value) { if (!value) return ''; const date = new Date(typeof value === 'number' ? value * (value < 1e12 ? 1000 : 1) : value); return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN'); }
@@ -118,9 +124,10 @@ async function selectAgent(agent, options = {}) {
 function renderAgents(force = false) {
   // A live registry update should not destroy a name being edited or steal its
   // focus. Explicit filter/selection actions may redraw from the retained draft.
-  if (renameTarget?.rendered && !force) return;
+  if (renameTarget?.rendered && renameTarget.mode !== 'dialog' && !force) return;
   const list = $('#agents'); list.replaceChildren(); const matches = filteredAgents();
-  $('#registry-count').textContent = String(matches.length); $('#active-count').textContent = String(state.agents.filter(agent => agent.active).length);
+  if (renameTarget) renameTarget.rendered = false;
+  $('#registry-count').textContent = String(matches.length);
   const closedCount = state.agents.filter(isClosedAgent).length;
   $('#agent-count-caption').textContent = `显示 ${matches.length} / ${state.agents.length} 个登记${agentFilters.status !== 'closed' && closedCount ? ` · ${closedCount} 个已关闭记录默认收起` : ''} · 连接状态不是任务完成状态`;
   if (!matches.length) {
@@ -130,51 +137,54 @@ function renderAgents(force = false) {
   }
   for (const agent of matches) {
     const terminal = isTerminal(agent), card = node('div', null, 'agent-card workbench-agent-card' + (agentKey(agent) === selectedAgent ? ' selected' : '') + (agent.pinned ? ' pinned' : ''));
-    const heading = node('div', null, 'agent-card-topline'); heading.append(node('span', agent.host_label || state.hosts.find(host => host.id === agent.host)?.label || agent.host, 'agent-host-label'));
-    const pin = button(agent.pinned ? '★' : '☆', 'agent-pin-button' + (agent.pinned ? ' pinned' : ''), async () => updateAgent(agent, {pinned: !agent.pinned})); pin.setAttribute('aria-label', `${agent.pinned ? '取消置顶' : '置顶'} ${agent.alias || agent.title || shortId(agent.thread_id)}`); pin.setAttribute('aria-pressed', String(!!agent.pinned)); heading.append(pin); card.append(heading);
+    const heading = node('div', null, 'agent-card-topline'); heading.append(node('span', workerMachineName(agent), 'agent-host-label'));
+    const pin = button(agent.pinned ? '★' : '☆', 'agent-pin-button' + (agent.pinned ? ' pinned' : ''), async () => updateAgent(agent, {pinned: !agent.pinned})); pin.setAttribute('aria-label', `${agent.pinned ? '取消置顶' : '置顶'} ${workerDisplayName(agent)}`); pin.setAttribute('aria-pressed', String(!!agent.pinned)); heading.append(pin); card.append(heading);
     const open = button('', 'agent-select', async () => selectAgent(agent));
     const status = terminal ? isClosedAgent(agent) || isClosingAgent(agent) ? statusLabels[agent.status || agent.state] || '终端已暂停' : displayDisconnected(agent) ? disconnectedLabel : agent.command ? `显示连接已连接 · ${agent.command}` : '显示连接已连接' : '尚未连接终端';
-    open.append(node('strong', agent.alias || agent.title || shortId(agent.thread_id)), node('span', status, 'agent-meta'), node('span', agent.cwd || shortId(agent.thread_id), 'agent-id')); card.append(open);
+    open.append(node('strong', workerDisplayName(agent)), node('span', status, 'agent-meta'), node('span', agent.cwd || '目录未记录', 'agent-directory'), node('span', shortId(agent.thread_id), 'agent-id')); card.append(open);
     if (agent.management?.label) card.append(node('span', agent.management.label, 'agent-management-label' + (agentNeedsAttention(agent) ? ' attention' : '')));
-    const grant = agentManagerGrant(agent), grantRow = node('div', null, 'agent-scope-row');
-    grantRow.append(node('span', grant === true ? '当前主控已授权' : grant === false ? '当前主控未授权' : '管理会话范围尚未设置', 'badge' + (grant ? ' active-badge' : '')));
-    if (grant !== null && window.PronController?.openSettings) grantRow.append(button('管理范围', 'text-button', async () => window.PronController.openSettings(true))); card.append(grantRow);
     const quick = node('div', null, 'agent-quick-actions');
     quick.append(button(terminal ? '打开终端' : '查看记录', 'subtle', async () => selectAgent(agent)));
+    const rename = button(agent.alias ? '重命名' : '命名', 'subtle agent-rename-button', async () => openAgentRename(agent)); rename.setAttribute('aria-label', `${agent.alias ? '重命名' : '命名'} ${workerDisplayName(agent)}`); quick.append(rename);
     if (terminal) quick.append(button('会话输出', 'subtle', async () => { await selectAgent(agent); if (selectedAgent === agentKey(agent)) await readConversationOutput(); }));
     if (terminal && !isClosedAgent(agent) && !isClosingAgent(agent) && displayDisconnected(agent) && agent.management?.primary_action !== 'none') quick.append(button('重连原终端', 'agent-reconnect-button', async () => { await selectAgent(agent); if (selectedAgent === agentKey(agent)) await reconnectTerminal(); }));
     card.append(quick);
     const more = node('details', null, 'agent-more'), summary = node('summary', '更多'); more.append(summary);
-    const moreActions = node('div', null, 'agent-more-actions'); moreActions.append(button('重命名', 'text-button', async () => openAgentRename(agent)), button('复制直达链接', 'text-button', async () => copyAgentLink(agent)));
+    const moreActions = node('div', null, 'agent-more-actions'); moreActions.append(button('复制直达链接', 'text-button', async () => copyAgentLink(agent)));
     if (terminal && !isClosedAgent(agent) && !isClosingAgent(agent)) moreActions.append(button('关闭终端…', 'text-button agent-close-link', async () => { await selectAgent(agent); if (selectedAgent === agentKey(agent)) openCloseTerminal(); })); more.append(moreActions); card.append(more);
-    if (renameTarget?.key === agentKey(agent)) {
+    if (renameTarget?.key === agentKey(agent) && renameTarget.mode !== 'dialog') {
       const form = node('form', null, 'agent-inline-rename'), input = node('input'); input.value = renameTarget.value; input.maxLength = 200; input.required = true; input.setAttribute('aria-label', '工作会话新名称'); input.disabled = renameTarget.saving;
       input.oninput = () => { renameTarget.value = input.value; };
       const save = node('button', '保存'); save.type = 'submit'; save.disabled = renameTarget.saving;
       form.onsubmit = event => { event.preventDefault(); void action(save, () => saveAgentRename(agent)); };
-      form.append(input, save, button('取消', 'text-button', async () => { renameTarget = null; renderAgents(true); })); card.append(form); renameTarget.rendered = true;
+      form.append(input, save, button('取消', 'text-button', async () => { renameDrafts.delete(agentKey(agent)); renameTarget = null; renderAgents(true); })); card.append(form); renameTarget.rendered = true;
       if (renameTarget.focus) { renameTarget.focus = false; requestAnimationFrame(() => input.focus()); }
     }
-    if (terminal) {
-      const label = node('label', null, 'activation'), checkbox = node('input'); checkbox.type = 'checkbox'; checkbox.checked = !!agent.active;
-      checkbox.disabled = isClosedAgent(agent) || isClosingAgent(agent);
-      checkbox.setAttribute('aria-label', `允许 ${agent.alias || agent.thread_id} 进入管理授权名单`);
-      checkbox.onchange = async () => { checkbox.disabled = true; try { await request('/api/agents/activate', {host: agent.host, thread_id: agent.thread_id, active: checkbox.checked}); await refresh(true); } catch (error) { checkbox.checked = !!agent.active; toast(error.message); } finally { checkbox.disabled = false; } };
-      const activationLabel = isClosedAgent(agent) ? '已关闭 · 保留记录' : isClosingAgent(agent) ? '已暂停 · 待核对关闭结果' : agent.active ? '可供 CEO 管理 · 旧插件仍全局' : '仅直接使用 · 未加入管理名单';
-      label.append(checkbox, node('span', activationLabel)); card.append(label);
-    } else card.append(button('在终端中继续', 'text-button history-open', async () => openCreate(agent, agent.host)));
+    if (!terminal) card.append(button('在终端中继续', 'text-button history-open', async () => openCreate(agent, agent.host)));
     list.append(card);
   }
 }
 function clearAgentFilters() { agentFilters.host = ''; agentFilters.query = ''; agentFilters.status = 'working'; agentFilters.active = false; persistWorkbench(); renderHosts(); renderAgents(true); }
 async function updateAgent(agent, fields) { const result = await request('/api/agents/update', {host: agent.host, thread_id: agent.thread_id, ...fields}); const updated = result.agent || result; if (updated.host === agent.host && updated.thread_id === agent.thread_id) Object.assign(agent, updated); await refresh(true); renderAgents(true); renderDetail(); }
-function openAgentRename(agent) { renameTarget = {key: agentKey(agent), value: agent.alias || agent.title || '', focus: true, saving: false, rendered: false}; renderAgents(true); }
+function openAgentRename(agent, options = {}) {
+  if (renameTarget?.saving) return;
+  if (renameTarget) renameDrafts.set(renameTarget.key, renameTarget.value);
+  const key = agentKey(agent);
+  renameTarget = {key, value: renameDrafts.has(key) ? renameDrafts.get(key) : workerDisplayName(agent), mode: options.dialog ? 'dialog' : 'inline', focus: !options.dialog, saving: false, rendered: false};
+  if (options.dialog) {
+    $('#rename-target').textContent = `${workerDisplayName(agent)} · ${workerMachineName(agent)} · ${agent.cwd || '目录未记录'}`;
+    $('#rename-name').value = renameTarget.value; $('#rename-name').disabled = false; $('#rename-save').disabled = false;
+    $('#rename-dialog').showModal();
+  }
+  renderAgents(true);
+}
 async function saveAgentRename(agent) {
   const target = renameTarget; if (!target || target.key !== agentKey(agent) || target.saving) return;
   const alias = target.value.trim(); if (!alias || alias.length > 200) throw new Error('名称不能为空，最多 200 个字符。');
   target.saving = true;
-  try { await updateAgent(agent, {alias}); if (renameTarget === target) { renameTarget = null; renderAgents(true); } }
-  finally { target.saving = false; }
+  if (target.mode === 'dialog') $('#rename-name').disabled = true; else renderAgents(true);
+  try { await updateAgent(agent, {alias}); renameDrafts.delete(target.key); if (renameTarget === target) { renameTarget = null; if (target.mode === 'dialog') $('#rename-dialog').close(); renderAgents(true); } }
+  finally { target.saving = false; if (renameTarget === target) { if (target.mode === 'dialog') $('#rename-name').disabled = false; else renderAgents(true); } }
 }
 async function copyAgentLink(agent) {
   if (!window.location?.origin) throw new Error('当前浏览器地址不可用。');
@@ -196,9 +206,10 @@ function renderDetail() {
   const agent = currentAgent(); renderAgentRecoveryNotice(agent); $('#detail-empty').hidden = !!agent; $('#agent-detail').hidden = !agent; if (!agent) return;
   if (outputView?.key === selectedAgent && outputView.terminalId !== agent.terminal_id) resetConversationOutput();
   const terminal = isTerminal(agent), host = state.hosts.find(item => item.id === agent.host);
-  $('#detail-host').textContent = host?.label || agent.host; $('#detail-name').textContent = agent.alias || agent.title || shortId(agent.thread_id);
+  $('#detail-host').textContent = host?.label || agent.host; $('#detail-name').textContent = workerDisplayName(agent);
+  $('#detail-rename').textContent = agent.alias ? '重命名' : '命名';
   const meta = $('#detail-meta'); meta.replaceChildren();
-  meta.append(node('span', terminal ? '共享终端' : '对话历史', 'badge'), node('span', agent.active && terminal ? 'CEO 已激活' : 'CEO 未激活', 'badge' + (agent.active && terminal ? ' active-badge' : '')));
+  meta.append(node('span', terminal ? '共享终端' : '对话历史', 'badge'));
   if (agent.cwd) meta.append(node('span', agent.cwd, 'muted')); meta.append(node('code', shortId(agent.terminal_id || agent.thread_id), 'thread-id'));
   $('#terminal-panel').hidden = !terminal; $('#legacy-panel').hidden = terminal; $('#refresh-history').hidden = terminal; $('#terminal-focus').hidden = !terminal; $('#terminal-connect').hidden = !terminal;
   const closed = isClosedAgent(agent), closing = isClosingAgent(agent) || !!(terminalSession?.key === selectedAgent && terminalSession.closing), disconnected = terminal && displayDisconnected(agent);
@@ -994,9 +1005,10 @@ function updateMachineTransport() { const local = $('#machine-transport').value 
 function openCreate(thread = null, hostId = selectedHost) {
   createTarget = {host: hostId, thread_id: thread?.thread_id || thread?.id || null, requestKey: crypto.randomUUID(), fingerprint: null}; const host = state.hosts.find(item => item.id === hostId);
   $('#create-form').reset(); $('#create-heading').textContent = thread ? '在终端中继续对话' : '打开工作终端'; $('#create-host').textContent = `运行位置：${host?.label || hostId}`;
-  $('#create-title').value = thread?.alias || thread?.title || thread?.name || `${host?.label || hostId} 工作终端`; $('#create-cwd').value = thread?.cwd || '';
+  $('#create-title').value = thread?.alias || thread?.title || thread?.name || ''; $('#create-cwd').value = thread?.cwd || '';
+  $('#create-title').placeholder = `留空使用：${defaultWorkerName(hostId, thread?.cwd)}`;
   $('#create-resume-guide').hidden = !thread; if (thread) $('#create-resume-command').textContent = resumeCommand(createTarget.thread_id);
-  $('#create-active').checked = !!thread?.active; $('#create-dialog').showModal();
+  $('#create-dialog').showModal();
 }
 function openDirectories() {
   if (!createTarget || !$('#create-dialog').open) return;
@@ -1034,7 +1046,7 @@ async function loadDirectory(path = '') {
 function selectDirectory(path) {
   const target = directoryTarget;
   if (!target || createTarget !== target.create || !$('#create-dialog').open) { $('#directory-dialog').close(); return; }
-  $('#create-cwd').value = path; $('#directory-dialog').close(); $('#create-cwd').focus();
+  $('#create-cwd').value = path; $('#create-title').placeholder = `留空使用：${defaultWorkerName(createTarget.host, path)}`; $('#directory-dialog').close(); $('#create-cwd').focus();
 }
 function openCloseTerminal() {
   const agent = currentAgent(); if (!isTerminal(agent) || isClosedAgent(agent) || isClosingAgent(agent)) return;
@@ -1090,7 +1102,10 @@ $('#discover-form').onsubmit = event => { event.preventDefault(); action($('#dis
   if (selectedHost !== host) return; discoveryHost = host; candidates = result.threads || []; $('#candidate-note').textContent = '这里只查找历史记录；连接会打开 shell，由你选择模型和运行 resume。'; renderCandidates();
 }); };
 $('#clear-candidates').onclick = () => { $('#candidates-section').hidden = true; candidates = []; };
-$('#active-only').onchange = () => { agentFilters.active = $('#active-only').checked; persistWorkbench(); renderAgents(true); };
+$('#detail-rename').onclick = () => { const agent = currentAgent(); if (agent) openAgentRename(agent, {dialog: true}); };
+$('#rename-name').oninput = () => { if (renameTarget?.mode === 'dialog') renameTarget.value = $('#rename-name').value; };
+$('#rename-form').onsubmit = event => { event.preventDefault(); const target = renameTarget, agent = target && registeredAgent(target.key); if (target?.mode === 'dialog' && agent) void action($('#rename-save'), () => saveAgentRename(agent)); };
+$('#rename-dialog').addEventListener('close', () => { if (renameTarget?.mode === 'dialog' && !renameTarget.saving) { renameDrafts.delete(renameTarget.key); renameTarget = null; renderAgents(true); } });
 $('#agent-search').oninput = () => { agentFilters.query = $('#agent-search').value; persistWorkbench(); renderAgents(true); };
 $('#agent-host-filter').onchange = () => { agentFilters.host = $('#agent-host-filter').value; if (agentFilters.host) selectedHost = agentFilters.host; persistWorkbench(); renderHosts(); renderAgents(true); };
 $('#agent-status-filter').onchange = () => { agentFilters.status = $('#agent-status-filter').value; persistWorkbench(); renderAgents(true); };
@@ -1098,6 +1113,7 @@ $('#all-machines').onclick = () => { agentFilters.host = ''; persistWorkbench();
 $('#new-agent').onclick = () => { if (currentHost()) openCreate(null, agentFilters.host || selectedHost); };
 $('#continue-terminal').onclick = () => { const agent = currentAgent(); if (agent) openCreate(agent, agent.host); };
 $('#browse-directory').onclick = openDirectories;
+$('#create-cwd').oninput = () => { if (createTarget) $('#create-title').placeholder = `留空使用：${defaultWorkerName(createTarget.host, $('#create-cwd').value.trim())}`; };
 $('#directory-path-form').onsubmit = event => { event.preventDefault(); void loadDirectory($('#directory-path').value.trim()); };
 $('#directory-home').onclick = () => void loadDirectory('');
 $('#directory-parent').onclick = () => { if (directoryTarget?.view?.parent) void loadDirectory(directoryTarget.view.parent); };
@@ -1106,7 +1122,7 @@ $('#directory-use-home').onclick = () => selectDirectory('');
 $('#directory-dialog').addEventListener('close', () => { directoryTarget = null; directoryGeneration++; });
 $('#create-dialog').addEventListener('close', () => { createTarget = null; if ($('#directory-dialog').open) $('#directory-dialog').close(); });
 $('#create-form').onsubmit = event => { event.preventDefault(); action($('#create-save'), async () => {
-  if (!createTarget) return; const target = createTarget, body = {host: target.host, cwd: $('#create-cwd').value.trim(), title: $('#create-title').value.trim(), active: $('#create-active').checked, cols: 120, rows: 32, request_key: target.requestKey};
+  if (!createTarget) return; const target = createTarget, cwd = $('#create-cwd').value.trim(), body = {host: target.host, cwd, title: $('#create-title').value.trim() || defaultWorkerName(target.host, cwd), cols: 120, rows: 32, request_key: target.requestKey};
   if (target.thread_id) body.thread_id = target.thread_id;
   const fingerprint = JSON.stringify(body);
   if (target.fingerprint && target.fingerprint !== fingerprint) throw new Error('这个打开请求已经提交过。请先取消并重新打开对话框，再提交修改后的配置；不会用同一个请求重复创建不同终端。');
