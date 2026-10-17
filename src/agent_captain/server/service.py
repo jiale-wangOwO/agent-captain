@@ -4,10 +4,10 @@ import json
 import sys
 import time
 import urllib.request
-from pathlib import Path
 
+from agent_captain import __version__ as VERSION
 from agent_captain.server.app import connection_file
-from agent_captain.core.hub import ROOT, VERSION
+from agent_captain.paths import ROOT
 from agent_captain.infrastructure.background_process import launch_background
 
 

@@ -633,13 +633,6 @@ def main(request):
     raise ValueError("Unknown binding operation")
 
 
-def remote_script(request):
-    """Create one portable script; transport may run python3 - with SSH stdin."""
-    source = Path(__file__).read_text(encoding="utf-8")
-    source = source.split('\nif __name__ == "__main__":', 1)[0]
-    return source + "\nprint(json.dumps({'ok':True,'result':main(" + repr(request) + ")},ensure_ascii=False))\n"
-
-
 if __name__ == "__main__":
     try:
         request = json.loads(base64.urlsafe_b64decode(sys.argv[1]))

@@ -6,22 +6,15 @@ import atexit
 import json
 import os
 import secrets
-import signal
 import sys
-import threading
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from agent_captain.core.hub import Hub, ROOT, VERSION
-
-
-def legacy_connection_file():
-    """Old per-user location, retained for explicit compatibility/migration."""
-    if os.name == "nt":
-        return Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "CEOHub/service.json"
-    return Path.home() / ".local/state/ceo-hub/service.json"
+from agent_captain import __version__ as VERSION
+from agent_captain.core.terminal_hub import Hub
+from agent_captain.paths import ROOT
 
 
 def connection_file():
@@ -102,10 +95,6 @@ def create_server(hub, port=8766, token=None):
                 return bool(value and secrets.compare_digest(value.value, session_token))
             except Exception:
                 return False
-
-        def plugin_authenticated(self):
-            value = self.headers.get("Authorization", "")
-            return not self.headers.get("Origin") and value.startswith("Bearer ") and secrets.compare_digest(value[7:], session_token)
 
         def plugin_identity(self):
             # The request body never establishes a controller's identity. Only

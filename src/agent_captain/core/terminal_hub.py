@@ -12,6 +12,7 @@ import time
 import uuid
 from pathlib import Path
 
+from agent_captain import __version__ as VERSION
 from agent_captain.sessions import catalog
 from agent_captain.transport.directory_browser import DirectoryBrowser
 from agent_captain.infrastructure.store import Store
@@ -20,7 +21,6 @@ from agent_captain.core.controllers import ControllerService, default_workspace_
 from agent_captain.core.management_policy import public_management_policy
 from agent_captain.transport import remote_terminal_history
 from agent_captain.paths import ROOT, source_path
-VERSION = "0.7.0"
 RETRYABLE = ("queued", "waiting_for_agent", "human_busy", "awaiting_connection", "blocked")
 MANAGEMENT_EVENTS = ("host_configured", "host_connected", "host_unavailable", "agent_attached",
                      "agent_created", "agent_activated", "agent_deactivated", "message_submitted",

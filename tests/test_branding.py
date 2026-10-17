@@ -18,7 +18,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agent_captain.server import app
-from agent_captain.core import hub
+from agent_captain import __version__
 from agent_captain.integrations import mcp_bridge
 from agent_captain.core import terminal_hub
 from agent_captain.infrastructure.store import Store
@@ -46,7 +46,7 @@ class BrandingTests(unittest.TestCase):
         self.assertEqual(package["name"], "agent-captain-terminal")
         self.assertIn("AgentCaptain", package["description"])
         self.assertIn("One captain for agents across your machines.", package["description"])
-        self.assertEqual({hub.VERSION, terminal_hub.VERSION, mcp_bridge.VERSION,
+        self.assertEqual({__version__, app.VERSION, terminal_hub.VERSION, mcp_bridge.VERSION,
                           package["version"], lock["version"], lock["packages"][""]["version"]}, {"0.7.0"})
         self.assertEqual(lock["name"], package["name"])
         self.assertEqual(lock["packages"][""]["name"], package["name"])
@@ -154,8 +154,9 @@ class BrandingTests(unittest.TestCase):
         for module in (app, mcp_bridge):
             source = Path(module.__file__).read_text(encoding="utf-8")
             self.assertIn("CEO_HUB_CONNECTION_FILE", source)
-            self.assertIn("CEOHub", source)
             self.assertIn("ceo-hub", source)
+        source = Path(mcp_bridge.__file__).read_text(encoding="utf-8")
+        self.assertIn("CEOHub", source)
         source = Path(terminal_hub.__file__).read_text(encoding="utf-8")
         self.assertIn('"ceohub-" +', source)
         self.assertIn('"ceo-hub:" + request_key', source)

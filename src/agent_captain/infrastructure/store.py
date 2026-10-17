@@ -22,7 +22,6 @@ class Store:
                 primary key(host,thread_id));
             create table if not exists outbox (id text primary key, host text, thread_id text, text text,
                 state text, turn_id text, error text, time real);
-            create table if not exists tool_results (call_id text primary key, data text);
             """)
             columns = {r[1] for r in self.db.execute("pragma table_info(agents)")}
             for name, declaration in (("active", "integer default 0"), ("access", "text default 'observe'"),
@@ -154,11 +153,6 @@ class Store:
         with self.lock, self.db:
             self.db.execute("update outbox set state=?,turn_id=coalesce(?,turn_id),error=? where id=?", (state, turn_id, error, request_id))
 
-    def complete_turn(self, host, thread_id, turn_id, state, error=None):
-        with self.lock, self.db:
-            self.db.execute("update outbox set state=?,error=? where host=? and thread_id=? and turn_id=?",
-                            (state, error, host, thread_id, turn_id))
-
     def revoke_pending(self, host, thread_id, states):
         with self.lock, self.db:
             placeholders = ",".join("?" for _ in states)
@@ -196,13 +190,6 @@ class Store:
             else:
                 rows = self.db.execute("select * from outbox order by time desc limit 100").fetchall()
             return [dict(r) for r in rows]
-
-    def cached_tool(self, call_id, result=None):
-        with self.lock, self.db:
-            if result is not None:
-                self.db.execute("insert or replace into tool_results values(?,?)", (call_id, json.dumps(result, ensure_ascii=False)))
-            row = self.db.execute("select data from tool_results where call_id=?", (call_id,)).fetchone()
-            return json.loads(row[0]) if row else None
 
     def close(self):
         with self.lock:

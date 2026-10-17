@@ -156,4 +156,4 @@ UI 管理 API 通过已有本机 cookie/Host/Origin 保护，不暴露给 scoped
 
 后续优先完成已验证桌面交接；再考虑桌面直接创建、多个管理入口的并发协调、更多任务看板和用户明确授权的自动跟进。不要先重造聊天模型后端，也不默认增加后台推理或定时调度。
 
-可编辑关系图见 [management-session-flow.drawio](management-session-flow.drawio)。该图保留的是 **0.5 历史设计**，其中逐 worker 范围或所有权关系不是 0.7 当前产品行为；当前自动管理策略以本文 0.7 文字为准。历史图也不能当作桌面交接或所有路线已实测的证明。使用流程见 [中文 README](../README.zh-CN.md)，权限细节见 [SECURITY.md](../SECURITY.md)。
+使用流程见 [中文 README](../README.zh-CN.md)，权限细节见 [SECURITY.md](../SECURITY.md)。

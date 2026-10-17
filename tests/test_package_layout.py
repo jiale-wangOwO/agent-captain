@@ -26,9 +26,9 @@ COMPATIBILITY_FILES = {
     "terminal_broker.cjs",
 }
 MODULES = (
-    "core.controllers", "core.hub", "core.management_policy", "core.terminal_hub",
+    "core.controllers", "core.management_policy", "core.terminal_hub",
     "infrastructure.background_process", "infrastructure.process_identity", "infrastructure.store",
-    "integrations.mcp_bridge", "legacy.legacy_appserver_hub", "legacy.rpc",
+    "integrations.mcp_bridge",
     "server.app", "server.service", "sessions.catalog", "sessions.conversation_output",
     "sessions.session_binding", "transport.directory_browser", "transport.remote_foreground_probe",
     "transport.remote_terminal_history", "transport.terminal_client", "transport.terminal_service",
@@ -55,7 +55,7 @@ class PackageLayoutTests(unittest.TestCase):
         )
 
     def test_business_modules_are_grouped_not_flattened(self):
-        for group in ("core", "server", "sessions", "transport", "infrastructure", "integrations", "legacy"):
+        for group in ("core", "server", "sessions", "transport", "infrastructure", "integrations"):
             with self.subTest(group=group):
                 self.assertTrue((PACKAGE / group / "__init__.py").is_file())
         self.assertLessEqual(

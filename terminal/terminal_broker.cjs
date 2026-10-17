@@ -64,13 +64,6 @@ function sshExecutable() {
   return process.env.CEO_HUB_SSH || (process.platform === 'win32' ? path.join(process.env.WINDIR || 'C:\\Windows', 'System32', 'OpenSSH', 'ssh.exe') : 'ssh');
 }
 
-function screenText(session, lines = 14) {
-  const buffer = session.terminal.buffer.active;
-  const text = [];
-  for (let i = Math.max(0, buffer.length - lines); i < buffer.length; i++) text.push(buffer.getLine(i)?.translateToString(true) || '');
-  return text.join('\n').trimEnd();
-}
-
 function blockedScreen(session) {
   const buffer = session.terminal.buffer.active;
   const bottom = Array.from({ length: session.rows }, (_, i) => buffer.getLine(buffer.baseY + i)?.translateToString(true) || '').join('\n');

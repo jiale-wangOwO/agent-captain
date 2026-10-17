@@ -13,8 +13,7 @@ agent-captain/
 │   ├── sessions/           Native-session binding, catalog and saved output
 │   ├── transport/          Terminal client, SSH probes and remote helpers
 │   ├── infrastructure/     Persistence, background launch and process identity
-│   ├── integrations/       Stdio MCP bridge
-│   └── legacy/             Older app-server/RPC compatibility implementation
+│   └── integrations/       Stdio MCP bridge
 ├── terminal/               Node PTY broker and input-activity tracking
 ├── web/                    Browser workbench and shared-terminal interface
 ├── plugins/agent-captain/   Unconfigured existing-chat plugin template
@@ -43,7 +42,6 @@ and dependency directories are not part of this source tree.
 | `integrations/` | MCP schemas, authentication and tool dispatch | The bridge uses the same management contract; it does not host a second model. |
 | `terminal/` | Node PTY ownership, rendering state, geometry and safe input | Preserve delivery IDs and human drafts across uncertain connections. |
 | `web/` | Workbench presentation and direct terminal interaction | UI changes should be testable without real SSH or model access. |
-| `legacy/` | Previous app-server/RPC implementation retained for compatibility | Not a second recommended application entry point. |
 
 Use the source-checkout command from the repository root:
 

@@ -12,7 +12,8 @@ from pathlib import Path
 from urllib.request import Request, ProxyHandler, build_opener
 
 from agent_captain.server.app import create_server
-from agent_captain.core.hub import Hub, ROOT
+from agent_captain.core.terminal_hub import Hub
+from agent_captain.paths import ROOT
 
 
 @unittest.skipUnless(os.environ.get("CEO_HUB_LIVE_TESTS") == "1", "opt-in real local PTY; no model inference")

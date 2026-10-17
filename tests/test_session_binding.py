@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import copy
-import io
 import json
 import os
 import sqlite3
 import sys
 import tempfile
 import unittest
-from contextlib import closing, redirect_stdout
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -292,15 +291,6 @@ class BindingTests(unittest.TestCase):
         with patch.object(binding.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout=good)) as run:
             self.assertEqual(binding._pane_metadata(SESSION)["pid"], 100)
         self.assertIn("=" + SESSION, run.call_args.args[0])
-
-    def test_portable_source_runs_without_importing_workspace_modules(self):
-        code = binding.remote_script({"op": "resolve_session", "session_id": "bad", "codex_home": str(self.home)})
-        output = io.StringIO()
-        with redirect_stdout(output):
-            exec(compile(code, "<stdin>", "exec"), {"__name__": "portable_binding"})
-        result = json.loads(output.getvalue())
-        self.assertEqual(result["result"]["reason"], "invalid_session_id")
-        self.assertNotIn("remote_foreground_probe", code)
 
     def test_windows_native_helpers_inspect_our_test_process_only(self):
         if os.name != "nt":
