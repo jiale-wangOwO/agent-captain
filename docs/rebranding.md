@@ -28,7 +28,7 @@ Earlier releases used the product names **PRON Hub** and **CEO Hub**. Those name
 | `CEO_HUB_*` environment variables; `ceo_hub` / `ceo-hub` service or protocol identifiers | Existing overrides and clients remain valid. These are compatibility identifiers, not the new product name. |
 | Terminal IDs starting with `ceohub-`, native Session IDs, request keys and delivery records | Preserved exactly. No replacement shell, model resume, task replay or uncertain-operation reset is part of this rename. |
 | Saved management workspaces under `PRONHub`, `pron-hub`, `CEOHub` or `ceo-hub` | Existing records keep their exact saved workspace paths. Only newly prepared production workspaces use the new default; no automatic move, deletion, re-trust or session recreation. |
-| `run_pron.cmd` / `run_ceo.cmd` | Retained as compatibility launchers. Prefer the new launcher for new shortcuts. |
+| `run_agentcaptain.cmd` | The only supported Windows launcher. Older `run_pron.cmd` and `run_ceo.cmd` aliases have been removed. |
 | Installed `pron-hub` / `ceo-hub` plugins and machine-local marketplace caches | Do not delete a working cache or rewrite it in place. Generate a new output directory using `scripts/configure_plugin.py`, follow the printed install commands, and verify the new tool connection before retiring an old entry. Avoid enabling duplicate management entries. |
 | `.runtime/` state, descriptor references and saved host aliases | Remain private and are not renamed blindly. Worker and Captain identities, tokens and request namespaces are not copied into source, prompts or public migration notes. |
 
