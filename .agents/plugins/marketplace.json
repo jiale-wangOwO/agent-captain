@@ -1,9 +1,9 @@
 {
-  "name": "pron-hub-source",
-  "interface": {"displayName": "PRON Hub unconfigured source template"},
+  "name": "agent-captain-source",
+  "interface": {"displayName": "AgentCaptain unconfigured source template"},
   "plugins": [{
-    "name": "pron-hub",
-    "source": {"source": "local", "path": "./plugins/pron-hub"},
+    "name": "agent-captain",
+    "source": {"source": "local", "path": "./plugins/agent-captain"},
     "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
     "category": "Developer Tools"
   }]

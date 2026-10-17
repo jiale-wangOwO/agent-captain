@@ -1,4 +1,4 @@
-"""Terminal-first management service; the CEO model lives in the user's frontend."""
+"""Terminal-first management service; the Captain lives in the user's frontend."""
 from __future__ import annotations
 
 import base64
@@ -17,6 +17,7 @@ from directory_browser import DirectoryBrowser
 from store import Store
 from terminal_client import BrokerError, TerminalClient
 from controllers import ControllerService, default_workspace_root
+from management_policy import public_management_policy
 import remote_terminal_history
 
 ROOT = Path(__file__).resolve().parent
@@ -25,6 +26,58 @@ RETRYABLE = ("queued", "waiting_for_agent", "human_busy", "awaiting_connection",
 MANAGEMENT_EVENTS = ("host_configured", "host_connected", "host_unavailable", "agent_attached",
                      "agent_created", "agent_activated", "agent_deactivated", "message_submitted",
                      "terminal_input_submitted", "terminal_state", "terminal_output", "terminal_closed", "agent_updated", "agent_reconnected")
+
+
+HISTORY_ERROR_MESSAGES = {
+    "ssh_handshake_failed": "独立 SSH 读取通道握手失败；已有显示连接可能仍在线，请检查 SSH 转发路由。",
+    "ssh_authentication_failed": "独立 SSH 读取通道认证失败；请检查该机器的 SSH 身份配置。",
+    "ssh_host_key_failed": "独立 SSH 读取通道的主机密钥核验失败；请人工核对主机身份，不要跳过核验。",
+    "ssh_timeout": "独立 SSH 读取请求超时；请检查 SSH 路由后重试。",
+    "ssh_transport_unavailable": "独立 SSH 读取通道当前不可用；已有显示连接的状态不因此改变。",
+    "remote_read_failed": "远端只读会话查询失败；请检查所选会话记录和远端 python3。",
+    "protocol_invalid": "远端未返回有效的只读会话查询结果；请检查 SSH 启动环境和远端 python3。",
+    "output_read_failed": "真实会话输出读取或身份核验失败；请核对所选 Session 后重试。",
+}
+
+
+class HistoryReadError(RuntimeError):
+    """Only a fixed public classification crosses the SSH error boundary."""
+
+    def __init__(self, reason_code):
+        self.reason_code = reason_code if reason_code in HISTORY_ERROR_MESSAGES else "remote_read_failed"
+        super().__init__(HISTORY_ERROR_MESSAGES[self.reason_code])
+
+
+def _ssh_history_failure(stderr, returncode):
+    # SSH/provider diagnostics can contain tokens, startup text or arbitrary
+    # remote output. Inspect fixed signatures only; never return that text.
+    diagnostic = stderr.lower() if isinstance(stderr, str) else ""
+    if any(token in diagnostic for token in ("host key verification failed", "remote host identification has changed", "offending ", "no matching host key type found")):
+        return "ssh_host_key_failed"
+    if any(token in diagnostic for token in ("permission denied (", "authentication failed", "too many authentication failures", "no supported authentication methods available")):
+        return "ssh_authentication_failed"
+    if any(token in diagnostic for token in ("banner exchange", "kex_exchange_identification", "ssh_exchange_identification")):
+        return "ssh_handshake_failed"
+    if any(token in diagnostic for token in ("connection timed out", "operation timed out", "connect timeout")):
+        return "ssh_timeout"
+    return "ssh_transport_unavailable" if returncode == 255 else "remote_read_failed"
+
+
+def _safe_output_failure(error):
+    if isinstance(error, HistoryReadError):
+        return error.reason_code, str(error)
+    # Keep the existing, fixed fail-closed identity messages, not arbitrary
+    # exceptions raised by a provider, file system, or transport library.
+    known = {
+        "读取期间 Codex 进程已变化，未返回旧会话输出；请重新读取。": "session_identity_changed",
+        "读取期间 Codex 会话已切换，未返回旧会话输出；请重新读取。": "session_identity_changed",
+        "读取期间会话关联证据冲突或失效，未返回记录；请重新核验。": "output_binding_invalid",
+        "管理会话输出不能作为工作 agent 读取。": "scope_denied",
+    }
+    message = str(error)
+    if message in known:
+        return known[message], message
+    return "output_read_failed", HISTORY_ERROR_MESSAGES["output_read_failed"]
 
 
 class Hub:
@@ -108,14 +161,27 @@ class Hub:
             code = (ROOT / (name + ".py")).read_text(encoding="utf-8")
             source += f"_module=types.ModuleType({name!r});sys.modules[{name!r}]=_module;exec(compile({code!r},{name!r},'exec'),_module.__dict__)\n"
         source += (ROOT / "catalog.py").read_text(encoding="utf-8").replace("from __future__ import annotations\n", "", 1)
-        reply = subprocess.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", target, "python3 - " + payload],
-            input=source, text=True, encoding="utf-8", errors="replace",
-            capture_output=True, timeout=30, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        try:
+            reply = subprocess.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPersist=no",
+                "-o", "ConnectTimeout=30", target, "python3 - " + payload],
+                input=source, text=True, encoding="utf-8", errors="replace",
+                capture_output=True, timeout=45, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except subprocess.TimeoutExpired:
+            raise HistoryReadError("ssh_timeout") from None
+        except (OSError, UnicodeError):
+            raise HistoryReadError("ssh_transport_unavailable") from None
         if reply.returncode:
-            raise RuntimeError(f"{host} SSH 失败：" + reply.stderr[-1500:])
-        result = json.loads(reply.stdout)
+            raise HistoryReadError(_ssh_history_failure(reply.stderr, reply.returncode)) from None
+        try:
+            result = json.loads(reply.stdout)
+        except (ValueError, TypeError, UnicodeError):
+            raise HistoryReadError("protocol_invalid") from None
+        if not isinstance(result, dict) or type(result.get("ok")) is not bool:
+            raise HistoryReadError("protocol_invalid")
         if not result["ok"]:
-            raise RuntimeError(result["error"])
+            raise HistoryReadError("remote_read_failed")
+        if not isinstance(result.get("result"), dict):
+            raise HistoryReadError("protocol_invalid")
         return result["result"]
 
     def connect_host(self, host):
@@ -197,6 +263,7 @@ class Hub:
                 "connected": bool(runtime.get("connected")), "status": runtime.get("state", "not_connected"),
                 "state": runtime.get("state", "not_connected"), "command": runtime.get("command", ""),
                 "agent_ready": bool(runtime.get("agent_ready")), "human_busy": bool(runtime.get("human_busy")), "blocked_reason": runtime.get("blocked_reason"),
+                "human_input": runtime.get("human_input"),
                 **self._closed_status(row, runtime)}
         recovery = self.store.setting(self._recovery_key(host, thread_id))
         if recovery:
@@ -208,6 +275,23 @@ class Hub:
                         if key.startswith("agent-reconnect:") and value == fingerprint]
                 if keys:
                     recovery.update(reconcile_available=True, next_action="reconcile_reconnect", reconcile_request_keys=keys)
+                elif (recovery.get("request_origin") == "ui" and isinstance(recovery.get("request_key"), str)
+                      and runtime.get("id") == row.get("terminal_id") and runtime.get("host") == host
+                      and runtime.get("transport") == "ssh" and runtime.get("target") == self.host(host).get("target")
+                      and runtime.get("connected") is False and runtime.get("state") == "exited"
+                      and runtime.get("human_busy") is False and type(runtime.get("exit_code")) is int):
+                    # A cached candidate only offers the explicit check button.
+                    # No PID, SSH, owner lifecycle or operation write happens on
+                    # a passive metadata read; the confirmed action does all
+                    # authenticated/live checks before changing an unknown.
+                    try:
+                        self._existing_display_identity(runtime, row.get("terminal_id"))
+                        self._request_key(recovery["request_key"])
+                    except (ValueError, TypeError):
+                        pass
+                    else:
+                        recovery.update(reconcile_available=True, next_action="reconcile_reconnect",
+                                        reconcile_request_keys=[recovery["request_key"]])
             result["recovery"] = recovery
         result["management"] = self._management(result)
         return result
@@ -234,7 +318,9 @@ class Hub:
             missing = recovery.get("code") in ("original_session_missing", "original_session_changed")
             status, label, tone, action, attention = ("missing" if missing else "disconnected"), ("原终端待核对" if missing else "连接已断开"), "warning", ("inspect_connection" if missing else "reconnect"), True
         elif agent.get("human_busy"):
-            status, label, tone, action, attention = "human_busy", "你正在输入", "neutral", "open_terminal", False
+            activity = agent.get("human_input") or {}
+            label = ("输入状态待确认" if activity.get("reason") == "uncertain_input" else "有未提交输入") if activity.get("state") == "draft" else "你正在输入"
+            status, tone, action, attention = "human_busy", "neutral", "open_terminal", False
         elif agent.get("blocked_reason"):
             status, label, tone, action, attention = "needs_input", "需人工处理", "warning", "open_terminal", True
         elif state == "shell":
@@ -348,10 +434,11 @@ class Hub:
     def reconcile_reconnect(self, host, thread_id, request_key, confirm=False):
         """Recheck a legacy unknown result without attaching or sending input.
 
-        An empty broker listing alone is not proof: the failed operation must
-        predate our confirmed recovery of its dead owner, with the same target
-        fingerprint and the same currently authenticated replacement owner.
-        Started operations, different targets and fresh unknowns stay fenced.
+        An empty registry alone is never proof. Either a confirmed dead-owner
+        recovery receipt proves absence, or the authenticated original display
+        record proves that an attachment may have run but has now ended. The
+        latter additionally requires the original immutable remote identity.
+        Started operations and different targets stay fenced in both cases.
         """
         if confirm is not True:
             raise ValueError("请明确确认核对原重连结果；此操作不会附着终端或发送任务。")
@@ -378,11 +465,12 @@ class Hub:
                 return result
             proof = self.store.setting("terminal-owner-recovery-proof") or {}
             owner = self.terminal_service_status()
-            if (previous.get("state") != "unknown" or previous.get("recovery", {}).get("code") != "reconnect_unknown"
-                    or proof.get("operations", {}).get(operation) != fingerprint
+            if previous.get("state") != "unknown" or previous.get("recovery", {}).get("code") != "reconnect_unknown":
+                raise ValueError("原重连不是可核对的未知结果；不解锁或重放。")
+            if (proof.get("operations", {}).get(operation) != fingerprint
                     or not owner["running"] or owner.get("pid") != proof.get("pid")
                     or not proof.get("recovery_id") or owner.get("recovery_id") != proof.get("recovery_id")):
-                raise ValueError("还没有足够证据确认原附着未执行；保留未知结果，不重放连接或任务。")
+                return self._reconcile_ended_display(agent, request_key, operation, fingerprint, row, previous)
             # Unlike sessions(), an unavailable broker must not masquerade as an
             # authoritative empty registry. Verify the exact owner again after.
             try:
@@ -407,6 +495,295 @@ class Hub:
                 raise ValueError("原重连记录已改变；请重新核对，不重放。")
             self.store.setting(self._recovery_key(host, thread_id), recovery)
             result = agent | {"operation": "reconcile_reconnect", "operation_id": request_key, "operation_state": "blocked", "recovery": recovery}
+            result["management"] = self._management(result)
+            return result
+
+    @staticmethod
+    def _valid_existing_display_identity(identity, terminal_id):
+        return (isinstance(identity, dict)
+                and set(identity) == {"name", "session", "created", "pane", "pane_pid", "pane_start_ticks"}
+                and identity["name"] == terminal_id
+                and isinstance(identity["session"], str) and re.fullmatch(r"\$[0-9]+", identity["session"]) is not None
+                and isinstance(identity["pane"], str) and re.fullmatch(r"%[0-9]+", identity["pane"]) is not None
+                and all(type(identity[key]) is int and identity[key] > 0 for key in ("created", "pane_pid", "pane_start_ticks")))
+
+    @staticmethod
+    def _existing_display_identity(record, terminal_id):
+        """Strictly decode only our canonical existing-attachment marker."""
+        marker = record.get("cwd")
+        prefix = "/.__pronhub_existing__/" + terminal_id + "/"
+        if not isinstance(marker, str) or len(marker) > 4096 or not marker.startswith(prefix):
+            raise ValueError("原显示缺少既存终端身份凭据；保留未知结果。")
+        encoded = marker[len(prefix):]
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,2048}", encoded):
+            raise ValueError("原显示身份凭据无效；保留未知结果。")
+        try:
+            identity = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+            canonical = base64.urlsafe_b64encode(json.dumps(identity, sort_keys=True).encode()).decode().rstrip("=")
+            if canonical != encoded or not Hub._valid_existing_display_identity(identity, terminal_id):
+                raise ValueError()
+            return identity
+        except (ValueError, TypeError, UnicodeError, KeyError):
+            raise ValueError("原显示身份凭据无效；保留未知结果。") from None
+
+    def _reconcile_ended_display(self, agent, request_key, operation, fingerprint, row, previous):
+        """Explicit UI reconciliation, not a claim that the old request never ran.
+
+        Keep the old unknown result in a durable private audit, then permit only
+        a retry of that same request key. Neither this check nor the audit sends
+        input, creates a shell, or replays a business task.
+        """
+        host, thread_id, terminal_id = agent["host"], agent["thread_id"], agent.get("terminal_id")
+        recovery_key = self._recovery_key(host, thread_id)
+        with self.store.lock:
+            saved = self.store.db.execute("select value from settings where key=?", (recovery_key,)).fetchone()
+        selected = json.loads(saved["value"]) if saved else None
+        if (not isinstance(selected, dict) or selected.get("code") != "reconnect_unknown"
+                or selected.get("request_key") != request_key or selected.get("request_origin") != "ui"
+                or previous.get("recovery", {}).get("request_key") != request_key
+                or previous.get("recovery", {}).get("request_origin") != "ui"
+                or self.host(host)["transport"] != "ssh"):
+            raise ValueError("仅能核对该终端当前的原 UI 请求；不解锁其他请求。")
+        try:
+            before = self.terminals.ended_display_snapshot(terminal_id)
+        except Exception:
+            raise ValueError("原显示结束证据尚不能确认；保留未知结果，不重复附着。") from None
+        record = before.get("session") if isinstance(before, dict) else None
+        owner = before.get("owner") if isinstance(before, dict) else None
+        if (not isinstance(record, dict) or not isinstance(owner, dict)
+                or type(owner.get("pid")) is not int or owner["pid"] <= 0 or owner.get("version") != "0.3.0"
+                or any(not isinstance(before.get(key), str) or not re.fullmatch(r"[a-f0-9]{64}", before[key]) for key in ("reference_sha256", "descriptor_sha256"))
+                or any(not isinstance(before.get(key), (list, tuple)) or len(before[key]) != 5
+                       or any(type(item) is not int for item in before[key]) for key in ("reference_identity", "descriptor_identity"))
+                or before.get("owner_pid_state") != "alive"
+                or record.get("id") != terminal_id or record.get("host") != host or record.get("transport") != "ssh"
+                or record.get("target") != self.host(host).get("target")
+                or record.get("connected") is not False or record.get("state") != "exited"
+                or record.get("human_busy") is not False
+                or type(record.get("pid")) is not int or record["pid"] <= 0
+                or type(record.get("exit_code")) is not int or not 0 <= record["exit_code"] <= 4294967295
+                or before.get("display_pid_state") != "dead"):
+            raise ValueError("原 SSH 显示尚未明确结束，或输入/身份不能确认；保留未知结果。")
+        stamp = previous.get("owner_stamp")
+        if stamp is not None and stamp != {"pid": owner["pid"], "recovery_id": owner.get("recovery_id")}:
+            raise ValueError("原请求的显示服务身份已变化；保留未知结果。")
+        identity = self._existing_display_identity(record, terminal_id)
+        remote = self._probe_remote_terminal(host, terminal_id)
+        if remote.get("ok") is not True or remote.get("exists") is not True or remote.get("identity") != identity:
+            raise ValueError("远端原 tmux/pane 身份尚不能确认一致；保留未知结果，不新建终端。")
+        try:
+            after = self.terminals.ended_display_snapshot(terminal_id)
+        except Exception:
+            raise ValueError("复核期间显示服务状态不能确认；保留未知结果。") from None
+        if before != after:
+            raise ValueError("复核期间 owner、原显示或进程状态已变化；不解锁原请求。")
+        recovery = {"code": "local_display_unavailable",
+                    "message": "原重连可能已执行，但已核验该 SSH 显示现在结束、远端原 tmux/pane 未变；可用原请求键接回显示，不重启模型或重发任务。",
+                    "next_action": "reconnect", "retryable": True, "reconciled": True,
+                    "reconciliation_kind": "ended_display", "request_key": request_key, "request_origin": "ui"}
+        audit_key = "agent-reconnect-reconciliation:" + hashlib.sha256(operation.encode()).hexdigest()
+        with self.store.lock, self.store.db:
+            changed = self.store.db.execute("update operations set result=? where request_key=? and fingerprint=? and state='done' and result=?",
+                (json.dumps({"state": "blocked", "recovery": recovery, "reconciliation_identity": identity}, ensure_ascii=False), operation, fingerprint, row["result"])).rowcount
+            selected_changed = self.store.db.execute("update settings set value=? where key=? and value=?",
+                (json.dumps(recovery), recovery_key, saved["value"])).rowcount
+            if changed != 1 or selected_changed != 1:
+                raise ValueError("原重连或当前请求记录已改变；不解锁或重放。")
+            old_audit = self.store.db.execute("select value from settings where key=?", (audit_key,)).fetchone()
+            audits = json.loads(old_audit["value"]) if old_audit else []
+            if not isinstance(audits, list):
+                raise ValueError("原核对审计不能确认；保留未知结果。")
+            audits.append({"kind": "ended_display", "at": time.time(), "request_key": request_key,
+                           "fingerprint": fingerprint, "previous_result": previous,
+                           "owner_pid": owner["pid"], "display_pid": record["pid"],
+                           "descriptor_sha256": before["descriptor_sha256"],
+                           "remote_identity": identity,
+                           "remote_identity_sha256": hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()})
+            self.store.db.execute("insert or replace into settings values(?,?)", (audit_key, json.dumps(audits)))
+        result = agent | {"operation": "reconcile_reconnect", "operation_id": request_key,
+                          "operation_state": "blocked", "recovery": recovery}
+        result["management"] = self._management(result)
+        return result
+
+    @staticmethod
+    def _valid_original_worker_binding(binding, terminal_id):
+        """Validate a recorded original Linux worker, never guess by cwd/date."""
+        if (not isinstance(binding, dict) or binding.get("state") != "bound"
+                or binding.get("binding_evidence") != "held_rollout" or binding.get("live_session_verified") is not True
+                or binding.get("historical", False) is not False or binding.get("terminal_id") != terminal_id
+                or binding.get("source") != "cli" or not isinstance(binding.get("session_id"), str)
+                or not re.fullmatch(r"[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}", binding["session_id"])):
+            return False
+        identity = binding.get("process_identity")
+        expected = {"platform", "terminal_id", "pane_id", "pane_pid", "pane_start_ticks", "pid", "start_ticks", "pgid", "tty_nr", "tty", "uid"}
+        if (not isinstance(identity, dict) or set(identity) != expected or identity.get("platform") != "linux"
+                or identity.get("terminal_id") != terminal_id
+                or not isinstance(identity.get("pane_id"), str) or not re.fullmatch(r"%[0-9]+", identity["pane_id"])
+                or not isinstance(identity.get("tty"), str) or not re.fullmatch(r"/dev/(?:pts/[0-9]+|tty[A-Za-z0-9]*)", identity["tty"])
+                or any(type(identity.get(key)) is not int or identity[key] <= 0 for key in ("pane_pid", "pane_start_ticks", "pid", "start_ticks", "pgid", "tty_nr"))
+                or type(identity.get("uid")) is not int or identity["uid"] < 0):
+            return False
+        rollout = binding.get("rollout_identity")
+        if (not isinstance(rollout, dict) or set(rollout) != {"device", "inode"}
+                or type(rollout["device"]) is not int or rollout["device"] < 0
+                or type(rollout["inode"]) is not int or rollout["inode"] <= 0):
+            return False
+        for key in ("codex_home", "rollout_path", "cwd", "process_cwd"):
+            value = binding.get(key)
+            if (not isinstance(value, str) or not value.startswith("/") or len(value) > 4096
+                    or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in value)):
+                return False
+        return True
+
+    @staticmethod
+    def _matches_original_worker_binding(value, binding, terminal_id):
+        if not isinstance(value, dict) or not Hub._valid_original_worker_binding(
+                value | {"terminal_id": terminal_id, "live_session_verified": True}, terminal_id):
+            return False
+        if value.get("terminal_id", terminal_id) != terminal_id or value.get("live_session_verified", True) is not True:
+            return False
+        keys = ("session_id", "process_identity", "rollout_identity", "rollout_path", "codex_home", "cwd", "process_cwd", "source")
+        return all(value.get(key) == binding.get(key) for key in keys)
+
+    def reconcile_original_worker(self, host, thread_id, request_key, confirm=False):
+        """Human UI maintenance for an exact legacy plugin reconnect result.
+
+        Match the current native worker and exact Session to the complete
+        binding saved at maintenance, then pin the CURRENT tmux identity for
+        same-key reattachment. A legacy binding was not frozen when the old
+        request started; this check alone cannot establish its provenance at
+        that earlier time or invent the old tmux object's creation identity.
+        No input, attachment or model startup occurs here.
+        """
+        if confirm is not True:
+            raise ValueError("请明确确认核对原工作进程；此操作不附着终端或发送输入。")
+        self._request_key(request_key)
+        if not request_key:
+            raise ValueError("请提供当前原重连请求键；不能新建或替换请求键。")
+        with self.registry_lock:
+            agent = self.get_agent(host, thread_id)
+            self._require_open(agent)
+            terminal_id = agent.get("terminal_id")
+            config = dict(self.host(host))
+            if (agent.get("mode") != "terminal" or not isinstance(terminal_id, str)
+                    or not re.fullmatch(r"ceohub-[a-f0-9]{16,48}", terminal_id) or config.get("transport") != "ssh"):
+                raise ValueError("仅能核对已登记且未关闭的原 SSH 工作终端。")
+            operation = "agent-reconnect:" + request_key
+            # The UI is an explicit maintenance actor, NOT the original plugin
+            # or a controller. Only a legacy controller=None fingerprint fits.
+            fingerprint = self._reconnect_fingerprint(host, thread_id, terminal_id, "plugin", None)
+            recovery_key = self._recovery_key(host, thread_id)
+            binding_key = self._output_key(host, terminal_id)
+            with self.store.lock:
+                row = self.store.db.execute("select * from operations where request_key=?", (operation,)).fetchone()
+                selected_row = self.store.db.execute("select value from settings where key=?", (recovery_key,)).fetchone()
+                binding_row = self.store.db.execute("select value from settings where key=?", (binding_key,)).fetchone()
+            if not row or row["fingerprint"] != fingerprint or row["state"] != "done":
+                raise ValueError("原请求不是该终端已结束的 legacy plugin 请求；不能核对其他主控或进行中请求。")
+            previous = json.loads(row["result"])
+            selected = json.loads(selected_row["value"]) if selected_row else None
+            if (not isinstance(selected, dict) or selected.get("request_key") != request_key
+                    or selected.get("request_origin") != "plugin"
+                    or previous.get("recovery", {}).get("request_key") != request_key
+                    or previous.get("recovery", {}).get("request_origin") != "plugin"):
+                raise ValueError("只能核对当前精确的原 plugin 请求；来源和请求键不会被改写。")
+            if (previous.get("state") == "blocked" and selected == previous.get("recovery")
+                    and selected.get("reconciliation_kind") == "worker_continuity" and selected.get("reconciled") is True
+                    and selected.get("maintenance_actor") == "ui" and selected.get("original_origin") == "plugin"
+                    and self._valid_existing_display_identity(previous.get("reconciliation_identity"), terminal_id)
+                    and self._valid_original_worker_binding(previous.get("reconciliation_worker_binding"), terminal_id)):
+                result = agent | {"operation": "reconcile_original_worker", "operation_id": request_key,
+                                  "operation_state": "blocked", "recovery": selected}
+                result["management"] = self._management(result)
+                return result
+            if (previous.get("state") != "unknown" or previous.get("recovery", {}).get("code") != "reconnect_unknown"
+                    or selected.get("code") != "reconnect_unknown"):
+                raise ValueError("原请求不是待核对的未知结果；不解锁或重放。")
+            binding = json.loads(binding_row["value"]) if binding_row else None
+            if not self._valid_original_worker_binding(binding, terminal_id):
+                raise ValueError("缺少原工作进程的完整已核验会话绑定；保留未知结果，不猜测其他会话。")
+
+            def ended_snapshot():
+                try:
+                    value = self.terminals.ended_display_snapshot(terminal_id)
+                except Exception:
+                    raise ValueError("原显示结束证据尚不能确认；保留未知结果。") from None
+                record = value.get("session") if isinstance(value, dict) else None
+                owner = value.get("owner") if isinstance(value, dict) else None
+                if (not isinstance(record, dict) or not isinstance(owner, dict)
+                        or type(owner.get("pid")) is not int or owner["pid"] <= 0 or owner.get("version") != "0.3.0"
+                        or any(not isinstance(value.get(key), str) or not re.fullmatch(r"[a-f0-9]{64}", value[key]) for key in ("reference_sha256", "descriptor_sha256"))
+                        or any(not isinstance(value.get(key), (list, tuple)) or len(value[key]) != 5
+                               or any(type(item) is not int for item in value[key]) for key in ("reference_identity", "descriptor_identity"))
+                        or value.get("owner_pid_state") != "alive" or value.get("display_pid_state") != "dead"
+                        or record.get("id") != terminal_id or record.get("host") != host or record.get("transport") != "ssh"
+                        or record.get("target") != config.get("target") or record.get("connected") is not False
+                        or record.get("state") != "exited" or record.get("human_busy") is not False
+                        or type(record.get("pid")) is not int or record["pid"] <= 0
+                        or type(record.get("exit_code")) is not int or not 0 <= record["exit_code"] <= 4294967295):
+                    raise ValueError("原显示尚未明确退出，或服务/输入身份无法核验；保留未知结果。")
+                return value
+
+            def fresh_binding():
+                try:
+                    value = self.history(host, {"op": "bind_output", "terminal_id": terminal_id})
+                except Exception:
+                    raise ValueError("原工作进程的只读会话核验暂不可用；保留未知结果。") from None
+                if not self._matches_original_worker_binding(value, binding, terminal_id):
+                    raise ValueError("当前前台进程或真实会话与原完整绑定不一致；不附着替代工作进程。")
+                return value
+
+            before = ended_snapshot()
+            stamp = previous.get("owner_stamp")
+            if stamp is not None and stamp != {"pid": before["owner"]["pid"], "recovery_id": before["owner"].get("recovery_id")}:
+                raise ValueError("原请求所属的显示 owner 已变化；保留未知结果。")
+            fresh_binding()
+            remote = self._probe_remote_terminal(host, terminal_id)
+            identity = remote.get("identity") if isinstance(remote, dict) else None
+            process = binding["process_identity"]
+            if (not isinstance(remote, dict) or remote.get("ok") is not True or remote.get("exists") is not True
+                    or not self._valid_existing_display_identity(identity, terminal_id)
+                    or identity["pane"] != process["pane_id"] or identity["pane_pid"] != process["pane_pid"]
+                    or identity["pane_start_ticks"] != process["pane_start_ticks"]):
+                raise ValueError("当前 tmux/pane 不能锚定到原工作进程；保留未知结果。")
+            fresh_binding()
+            after = ended_snapshot()
+            if before != after or dict(self.host(host)) != config:
+                raise ValueError("核对期间 owner、显示行或机器配置已变化；不解锁原请求。")
+            recovery = {"code": "local_display_unavailable", "next_action": "reconnect", "retryable": True,
+                        "reconciled": True, "reconciliation_kind": "worker_continuity",
+                        "binding_basis": "saved_binding_at_maintenance",
+                        "maintenance_actor": "ui", "original_origin": "plugin",
+                        "request_key": request_key, "request_origin": "plugin",
+                        "message": "原重连可能已执行，但显示已结束；当前 native 工作进程及精确会话与已保存完整绑定一致，已锚定当前 tmux 身份。该绑定并非原请求时冻结的证据；仅允许原请求键接回显示，不启动模型或重发任务。"}
+            audit_key = "agent-reconnect-reconciliation:" + hashlib.sha256(operation.encode()).hexdigest()
+            with self.store.lock, self.store.db:
+                unchanged_binding = self.store.db.execute("select value from settings where key=?", (binding_key,)).fetchone()
+                if not unchanged_binding or unchanged_binding["value"] != binding_row["value"]:
+                    raise ValueError("原会话绑定在核对期间已变化；不解锁原请求。")
+                changed = self.store.db.execute("update operations set result=? where request_key=? and fingerprint=? and state='done' and result=? "
+                    "and exists(select 1 from settings where key=? and value=?) "
+                    "and exists(select 1 from agents where host=? and thread_id=? and terminal_id=? and mode='terminal')",
+                    (json.dumps({"state": "blocked", "recovery": recovery, "reconciliation_identity": identity,
+                                 "reconciliation_worker_binding": binding}, ensure_ascii=False),
+                     operation, fingerprint, row["result"], binding_key, binding_row["value"], host, thread_id, terminal_id)).rowcount
+                selected_changed = self.store.db.execute("update settings set value=? where key=? and value=?",
+                    (json.dumps(recovery), recovery_key, selected_row["value"])).rowcount
+                if changed != 1 or selected_changed != 1:
+                    raise ValueError("原请求或当前核对记录已变化；不解锁或重放。")
+                old_audit = self.store.db.execute("select value from settings where key=?", (audit_key,)).fetchone()
+                audits = json.loads(old_audit["value"]) if old_audit else []
+                if not isinstance(audits, list):
+                    raise ValueError("原核对审计不能确认；保留未知结果。")
+                audits.append({"kind": "worker_continuity", "at": time.time(), "request_key": request_key,
+                               "binding_basis": "saved_binding_at_maintenance", "original_request_binding_frozen": False,
+                               "maintenance_actor": "ui", "original_origin": "plugin", "fingerprint": fingerprint,
+                               "previous_result": previous, "original_binding": binding, "anchored_current_identity": identity,
+                               "owner_pid": before["owner"]["pid"], "display_pid": before["session"]["pid"],
+                               "descriptor_sha256": before["descriptor_sha256"]})
+                self.store.db.execute("insert or replace into settings values(?,?)", (audit_key, json.dumps(audits)))
+            result = agent | {"operation": "reconcile_original_worker", "operation_id": request_key,
+                              "operation_state": "blocked", "recovery": recovery}
             result["management"] = self._management(result)
             return result
 
@@ -452,9 +829,9 @@ class Hub:
         # only reads the chosen tmux/pane identity, never input or model config.
         source = (ROOT / "remote_pty_bridge.py").read_text(encoding="utf-8")
         try:
-            reply = subprocess.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ConnectTimeout=10",
+            reply = subprocess.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPersist=no", "-o", "ConnectTimeout=30",
                 target, "python3 - probe --session " + shlex.quote(terminal_id)], input=source,
-                text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=25,
+                text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=45,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if reply.returncode or len(reply.stdout) > 65536:
                 detail = (reply.stderr or "")[:4096].casefold()
@@ -483,6 +860,9 @@ class Hub:
             if controller_id is not None:
                 self._require_controller_scope(controller_id, host, thread_id)
             owner_stamp = None
+            reconciled_identity = None
+            reconciled_worker_binding = None
+            attachment_requested = False
             def finish(code, message, next_action, state="blocked", view=None, retryable=False, persist=True):
                 recovery = {"code": code, "message": message, "next_action": next_action,
                             "request_key": request_key, "request_origin": origin}
@@ -494,6 +874,13 @@ class Hub:
                 result["management"] = self._management(result)
                 if operation and persist:
                     saved = {"state": state, "recovery": recovery}
+                    # A known pre-attachment failure must not discard the
+                    # immutable identity needed by the same-key retry. Once an
+                    # attachment was requested, a fresh unknown cannot reuse it.
+                    if state == "blocked" and retryable and not attachment_requested and reconciled_identity is not None:
+                        saved["reconciliation_identity"] = reconciled_identity
+                        if reconciled_worker_binding is not None:
+                            saved["reconciliation_worker_binding"] = reconciled_worker_binding
                     if state == "unknown" and owner_stamp is not None:
                         saved["owner_stamp"] = owner_stamp
                     self.store.finish_operation(operation, saved)
@@ -501,6 +888,7 @@ class Hub:
             request_key = request_key or "ui-reconnect-" + str(uuid.uuid4())
             operation = "agent-reconnect:" + request_key
             fingerprint = self._reconnect_fingerprint(host, thread_id, agent.get("terminal_id"), origin, controller_id)
+            pre_attach_route_message = "SSH 路由暂不可达；请检查机器或恢复 SSH 上游/隧道路由，再由用户重试。不会自动重启服务。"
             try:
                 previous = self.store.begin_operation(operation, fingerprint)
             except RuntimeError:
@@ -508,8 +896,26 @@ class Hub:
                 # another request with its key arrived while it was uncertain.
                 return finish("reconnect_unknown", "原重连结果尚未核验；请先检查连接，不使用新请求键强制重试。", "inspect_connection", "unknown", persist=False)
             if previous is not None:
-                retryable = previous.get("state") == "blocked" and previous.get("recovery", {}).get("code") == "local_display_unavailable" and previous["recovery"].get("retryable") is True
-                if retryable and self.terminal_service_status()["running"]:
+                recovery = previous.get("recovery", {})
+                local_retryable = previous.get("state") == "blocked" and recovery.get("code") == "local_display_unavailable" and recovery.get("retryable") is True
+                # A user retry with the same key may repeat only the read-only
+                # pre-attachment route check. Match the earlier fixed receipt
+                # too, so known old failures can recover without a new key.
+                # Post-attachment route failures, auth/key prompts and unknown
+                # outcomes remain fenced; a code alone is not launch evidence.
+                route_retryable = (previous.get("state") == "blocked" and recovery.get("code") == "route_unavailable"
+                    and recovery.get("message") == pre_attach_route_message and recovery.get("next_action") == "check_connection"
+                    and recovery.get("request_key") == request_key and recovery.get("request_origin") == origin
+                    and (recovery.get("retryable") is None or recovery.get("retryable") is True) and "owner_stamp" not in previous)
+                if route_retryable or (local_retryable and self.terminal_service_status()["running"]):
+                    if recovery.get("reconciliation_kind") in ("ended_display", "worker_continuity") or "reconciliation_identity" in previous:
+                        reconciled_identity = previous.get("reconciliation_identity")
+                        if not self._valid_existing_display_identity(reconciled_identity, agent.get("terminal_id")):
+                            return finish("reconnect_unknown", "原核对身份凭据不能确认；不重复附着。", "inspect_connection", "unknown", persist=False)
+                    if recovery.get("reconciliation_kind") == "worker_continuity" or "reconciliation_worker_binding" in previous:
+                        reconciled_worker_binding = previous.get("reconciliation_worker_binding")
+                        if not self._valid_original_worker_binding(reconciled_worker_binding, agent.get("terminal_id")):
+                            return finish("reconnect_unknown", "原工作进程核对凭据不能确认；不重复附着。", "inspect_connection", "unknown", persist=False)
                     with self.store.lock, self.store.db:
                         row = self.store.db.execute("select result from operations where request_key=? and fingerprint=? and state='done'", (operation, fingerprint)).fetchone()
                         changed = bool(row and json.loads(row["result"]) == previous and self.store.db.execute("update operations set state='started',result=null where request_key=? and fingerprint=? and state='done' and result=?",
@@ -531,6 +937,8 @@ class Hub:
             if agent.get("mode") in ("closed", "closing", "close_unknown"):
                 return finish("closed", "此终端已结束或关闭结果待核对；不会重新启动。", "none")
             if agent.get("connected"):
+                if reconciled_identity is not None:
+                    return finish("reconnect_unknown", "核对后显示已被其他操作连接；请检查原显示身份，不重复附着。", "inspect_connection", "unknown")
                 return finish("already_connected", "当前显示连接仍在；未重复附着，也未发送任何输入。", "open_terminal", "done", agent)
             if not agent.get("terminal_id"):
                 return finish("missing_terminal", "没有可恢复的原终端；请由用户选择或新建终端。", "inspect_connection")
@@ -542,9 +950,18 @@ class Hub:
                     return finish("ssh_auth_required", "SSH 认证需要由用户处理；不会读取或改写凭据，也不会自动尝试登录。", "check_connection")
                 if before.get("reason") == "ssh_host_key_required":
                     return finish("ssh_host_key_required", "SSH 主机密钥需要由用户核验；不会跳过验证或改写 known_hosts。", "check_connection")
-                return finish("route_unavailable", "SSH 路由暂不可达；请检查机器或恢复 SSH 上游/隧道路由，再由用户重试。不会自动重启服务。", "check_connection")
+                return finish("route_unavailable", pre_attach_route_message, "check_connection", retryable=True)
             if not before.get("exists"):
                 return finish("original_session_missing", "原 tmux 会话不存在；未创建替代 shell、未启动或恢复 Codex。", "inspect_connection")
+            if reconciled_identity is not None and before.get("identity") != reconciled_identity:
+                return finish("original_session_changed", "核对后的远端原 tmux/pane 身份已改变；未附着替代终端或启动模型。", "inspect_connection")
+            if reconciled_worker_binding is not None:
+                try:
+                    worker_before = self.history(host, {"op": "bind_output", "terminal_id": agent["terminal_id"]})
+                except Exception:
+                    return finish("route_unavailable", pre_attach_route_message, "check_connection", retryable=True)
+                if not self._matches_original_worker_binding(worker_before, reconciled_worker_binding, agent["terminal_id"]):
+                    return finish("original_session_changed", "接回显示前原 native 工作进程或精确 Session 已变化；未附着替代 agent。", "inspect_connection")
             if controller_id is not None:
                 self._require_controller_scope(controller_id, host, thread_id)
             proof = before["identity"]
@@ -555,6 +972,7 @@ class Hub:
                 owner = self.terminal_service_status()
                 if owner["running"] and owner.get("pid") and owner.get("recovery_id"):
                     owner_stamp = {"pid": owner["pid"], "recovery_id": owner["recovery_id"]}
+                attachment_requested = True
                 runtime = self.terminals.create({"session_id": agent["terminal_id"], "host": host, "transport": "ssh", "target": self.host(host)["target"],
                     "cwd": marker, "title": agent["alias"], "cols": 100, "rows": 30})
                 attachment_returned = True
@@ -563,6 +981,13 @@ class Hub:
                     return finish("reconnect_unknown", "已请求原显示附着，但后续身份核验暂不可用；不重复重连或发送任务。", "inspect_connection", "unknown")
                 if not after.get("exists") or after.get("identity") != proof:
                     return finish("original_session_changed", "原 tmux/pane 身份已经改变；未确认恢复，不发送输入，也不关闭其他工作进程。", "inspect_connection", "blocked")
+                if reconciled_worker_binding is not None:
+                    try:
+                        worker_after = self.history(host, {"op": "bind_output", "terminal_id": agent["terminal_id"]})
+                    except Exception:
+                        return finish("reconnect_unknown", "显示已请求附着，但原 native 工作进程的后置核验暂不可用；不重复附着或发送任务。", "inspect_connection", "unknown")
+                    if not self._matches_original_worker_binding(worker_after, reconciled_worker_binding, agent["terminal_id"]):
+                        return finish("original_session_changed", "显示附着后原 native 工作进程或精确 Session 已变化；未确认恢复，不重启或发送输入。", "inspect_connection")
                 current = self.terminals.snapshot(agent["terminal_id"], 60)
                 view = self.get_agent(host, thread_id, sessions=[current])
                 if not view["connected"]:
@@ -573,6 +998,7 @@ class Hub:
                 return finish(code, message, "open_terminal", "done", view)
             except BrokerError as error:
                 if error.code == "bound_transport_unavailable" and not attachment_returned:
+                    attachment_requested = False
                     return finish("local_display_unavailable", "本机原工作终端显示服务离线；附着请求尚未发送。请先恢复绑定的显示服务，再用原请求键重连此终端。不会重启远端 agent 或重发任务。",
                                   "recover_display_service", "blocked", retryable=True)
                 return finish("reconnect_unknown", "原显示连接结果未知；请核对原终端和路由，不重放任务或自动重启。", "inspect_connection", "unknown")
@@ -809,9 +1235,10 @@ class Hub:
                     "method": binding.get("method", "process_evidence" if binding.get("live_session_verified") else "last_verified_session"),
                     "historical": bool(binding.get("historical")), "live_session_verified": bool(binding.get("live_session_verified"))}}
         except Exception as error:
+            reason_code, reason = _safe_output_failure(error)
             if cursor or after_cursor:
-                raise ValueError("会话输出分页无法继续，请重新读取最新记录：" + str(error)) from None
-            return {"output_binding": {"state": "unavailable", "reason": str(error)}, "messages": [],
+                raise ValueError("会话输出分页无法继续，请重新读取最新记录：" + reason + " [" + reason_code + "]") from None
+            return {"output_binding": {"state": "unavailable", "reason": reason, "reason_code": reason_code}, "messages": [],
                     "content_complete": False, "note": "真实会话输出当前不可用；以下屏幕仅作状态参考，不是完整回复。"}
 
     def read_agent(self, host, thread_id, limit=18, plugin=False, cursor=None, after_cursor=None, include_tools=False):
@@ -906,7 +1333,7 @@ class Hub:
         if self.agent_id(host, thread_id) in self._reconnecting:
             raise ValueError("此终端正在核验原显示附着，请稍后输入；没有发送这些按键。")
         # No registry lock or slow process probe here: user keystrokes must reach
-        # the broker during a CEO readiness probe and acquire its typing lease.
+        # the broker during a Captain readiness probe and acquire its typing lease.
         agent = self.store.agent(host, thread_id)
         if not agent or not agent.get("terminal_id"):
             raise ValueError("请先连接共享终端。")
@@ -948,10 +1375,10 @@ class Hub:
                 raise ValueError("SSH 目标无效，未读取终端历史。")
         source = (ROOT / "remote_terminal_history.py").read_text(encoding="utf-8")
         try:
-            reply = subprocess.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ConnectTimeout=10",
+            reply = subprocess.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPersist=no", "-o", "ConnectTimeout=30",
                 target, "python3 - --session " + shlex.quote(terminal_id) + " --lines " + str(lines)],
                 input=source, text=True, encoding="utf-8", errors="replace", capture_output=True,
-                timeout=25, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                timeout=45, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if not isinstance(reply.stdout, str) or len(reply.stdout.encode("utf-8")) > remote_terminal_history.MAX_RESPONSE_BYTES:
                 raise ValueError()
             payloads = [line[len(remote_terminal_history.RESULT_MARKER):] for line in reply.stdout.splitlines()
@@ -1181,6 +1608,7 @@ class Hub:
             if controller_id is not None:
                 connected &= set(self.controllers.allowed_hosts(controller_id)) | {a["host"] for a in agents}
             return {"agents": agents, "controller": "current_codex_conversation", "management_policy": "connected_workers",
+                    "manager_role_policy": public_management_policy(include_instructions=False),
                     "worker_access": "automatic", "effective_worker_count": len(agents),
                     "connected_hosts": sorted(connected), "legacy_scope_shared": controller_id is None,
                     "scope_note": "已连接登记的工作终端自动纳入管理；包含暂时断线的原终端，不扫描机器或全部历史。"}

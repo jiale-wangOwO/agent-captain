@@ -64,6 +64,19 @@ test('startup checks list only; no implicit prepare, history scan, tools or work
   assert.equal(calls.some(c => /discover|history|input|\/start|\/resume|\/close/.test(c.url)), false);
 });
 
+test('Captain wording preserves existing manager identity, title, and saved operation namespace', async () => {
+  const {get, ui} = await harness({manager: ready});
+  assert.equal(get('#controller-owner').textContent, '当前入口：AgentCaptain');
+  assert.equal(get('#controller-title').textContent, ready.title);
+  assert.equal(ui.model.controller.session_id, ready.session_id);
+  assert.match(get('#controller-description').textContent, /Captain.*派发任务.*跟进进度.*审查交付/);
+  assert.match(get('#controller-description').textContent, /最终决策权/);
+  const source = fs.readFileSync(path.join(__dirname, '../web/controller.js'), 'utf8');
+  assert.match(source, /const storageKey = 'pron-hub\.management-operation\.v1'/);
+  assert.match(source, /window\.PronController =/);
+  assert.doesNotMatch(source, /PRON Hub|CEO/);
+});
+
 test('first settings automatically includes registered workers with no checklist or new-worker roots by default', async () => {
   const {ui, get, calls} = await harness(); ui.openSettings();
   assert.equal(get('#controller-name').value, '我的管理会话'); assert.match(get('#controller-worker-summary').textContent, /2.*自动.*以后连接/);
@@ -138,6 +151,75 @@ test('unsupported old service is truthful and never starts another server or dis
   const {ui, get, calls} = await harness({handle: async call => call.url === '/api/controllers' ? failedResponse(404, 'Unknown API') : null});
   assert.equal(ui.model.unsupported, true); assert.equal(get('#controller-primary').disabled, true); assert.match(get('#controller-state').textContent, /尚未加载/);
   await ui.primary(); assert.equal(calls.filter(c => c.options.method === 'POST').length, 0);
+});
+
+test('controller list exact unauthorized 404 asks to refresh authentication without claiming unsupported API or discarding operation', async () => {
+  const operation = {kind: 'resume', id: ready.id, requestKey: 'saved-original-controller-key', acknowledged: false};
+  const serialized = JSON.stringify(operation), stored = new Map([['pron-hub.management-operation.v1', serialized]]);
+  const {ui, get, calls} = await harness({stored, manager: ready, handle: async call => call.url === '/api/controllers' ? failedResponse(404, 'Not found or unauthorized') : null});
+  assert.equal(ui.model.unsupported, false);
+  assert.match(ui.model.error, /认证.*失效|失效.*认证/); assert.match(ui.model.error, /刷新/);
+  assert.doesNotMatch(ui.model.error, /未提供管理会话 API/);
+  assert.doesNotMatch(get('#controller-state').textContent, /尚未加载管理会话/);
+  assert.equal(ui.model.controller, null);
+  assert.deepEqual(JSON.parse(JSON.stringify(ui.model.operation)), operation);
+  assert.equal(stored.get('pron-hub.management-operation.v1'), serialized);
+  await ui.refresh();
+  assert.equal(ui.model.unsupported, false);
+  assert.equal(stored.get('pron-hub.management-operation.v1'), serialized);
+  assert.equal(calls.filter(call => call.options.method === 'POST').length, 0);
+  assert.equal(calls.some(call => /\/prepare|\/start|\/resume|\/input|\/close/.test(call.url)), false);
+});
+
+test('controller get exact unauthorized 404 preserves original mounted manager Session, draft, and operation while asking for refresh', async () => {
+  let authExpired = false;
+  const operation = {kind: 'resume', id: ready.id, requestKey: 'saved-original-get-key', acknowledged: true};
+  const serialized = JSON.stringify(operation), stored = new Map([['pron-hub.management-operation.v1', serialized]]);
+  const h = await harness({manager: ready, stored, handle: async call => authExpired && call.url.startsWith('/api/controllers/get?') ? failedResponse(404, 'Not found or unauthorized') : null});
+  await h.ui.showTerminal();
+  const originalController = h.ui.model.controller, originalTerminal = h.ui.model.terminal, originalOperation = h.ui.model.operation;
+  originalTerminal.input = 'retained unsent manager draft';
+  const originalFocus = originalTerminal.term.focusCount, originalCalls = h.calls.length;
+  authExpired = true;
+  await h.ui.refresh();
+  assert.equal(h.ui.model.unsupported, false);
+  assert.match(h.ui.model.error, /认证.*失效|失效.*认证/); assert.match(h.ui.model.error, /刷新/);
+  assert.doesNotMatch(h.ui.model.error, /未提供管理会话 API/);
+  assert.equal(h.ui.model.controller, originalController); assert.equal(h.ui.model.controller.session_id, ready.session_id);
+  assert.equal(h.ui.model.terminal, originalTerminal); assert.equal(originalTerminal.input, 'retained unsent manager draft');
+  assert.equal(originalTerminal.disposed, false); assert.equal(originalTerminal.term.focusCount, originalFocus);
+  assert.equal(h.ui.model.operation, originalOperation); assert.equal(stored.get('pron-hub.management-operation.v1'), serialized);
+  const reads = h.calls.slice(originalCalls);
+  assert.equal(reads.length, 1); assert.equal(reads[0].url, '/api/controllers/get?id=' + ready.id);
+  assert.equal(h.calls.filter(call => call.options.method === 'POST').length, 0);
+});
+
+for (const pathKind of ['list', 'get']) test(`actual missing manager ${pathKind} 404 remains unsupported, rather than claiming expired authentication`, async () => {
+  let missing = pathKind === 'list';
+  const matches = call => pathKind === 'list' ? call.url === '/api/controllers' : call.url.startsWith('/api/controllers/get?');
+  const h = await harness({manager: ready, handle: async call => missing && matches(call) ? failedResponse(404, 'manager not found') : null});
+  const original = h.ui.model.controller;
+  if (pathKind === 'get') { missing = true; await h.ui.refresh(); }
+  assert.equal(h.ui.model.unsupported, true);
+  assert.match(h.ui.model.error, /未提供管理会话 API/); assert.doesNotMatch(h.ui.model.error, /认证.*失效|失效.*认证/);
+  assert.equal(h.ui.model.controller, original);
+  assert.equal(h.get('#controller-primary').disabled, true);
+  assert.equal(h.calls.filter(call => call.options.method === 'POST').length, 0);
+});
+
+for (const pathKind of ['list', 'get']) test(`controller ${pathKind} domain 403 preserves owner permission message instead of authentication or unsupported claims`, async () => {
+  let denied = pathKind === 'list';
+  const operation = {kind: 'resume', id: ready.id, requestKey: 'saved-domain-permission-key', acknowledged: true};
+  const serialized = JSON.stringify(operation), stored = new Map([['pron-hub.management-operation.v1', serialized]]);
+  const matches = call => pathKind === 'list' ? call.url === '/api/controllers' : call.url.startsWith('/api/controllers/get?');
+  const h = await harness({manager: ready, stored, handle: async call => denied && matches(call) ? failedResponse(403, 'owner permission denied') : null});
+  const originalController = h.ui.model.controller, originalOperation = h.ui.model.operation;
+  if (pathKind === 'get') { denied = true; await h.ui.refresh(); }
+  assert.equal(h.ui.model.unsupported, false); assert.match(h.ui.model.error, /owner permission denied/);
+  assert.doesNotMatch(h.ui.model.error, /认证.*失效|失效.*认证|未提供管理会话 API/);
+  assert.equal(h.ui.model.controller, originalController); assert.equal(h.ui.model.operation, originalOperation);
+  assert.equal(stored.get('pron-hub.management-operation.v1'), serialized);
+  assert.equal(h.calls.filter(call => call.options.method === 'POST').length, 0);
 });
 
 test('management settings only changes create-project roots, not ordinary existing-worker access', async () => {

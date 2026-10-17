@@ -1,7 +1,30 @@
-# PRON Hub Codex plugin
+# AgentCaptain Codex plugin
 
-This package provides the `pron-hub` skill for acting as the user's CEO in the
-current Codex chat. It does not start another model or select a model provider.
+**One captain for agents across your machines.**
+
+This package provides the `agent-captain` skill for acting as the user's Captain
+in the current Codex chat. It connects management to the same local and remote
+workers as the AgentCaptain workbench; it does not start another model or select
+a model provider.
+
+The controller is a domain-expert manager, not the default hands-on engineer for
+every connected project. A user objective authorizes relevant worker questions,
+delegation, clarifications, follow-up, corrections and acceptance review within
+that scope, without asking again for every ordinary message. Read-only limits
+still apply; expanded goals, secrets, approvals and unrelated destructive or
+external actions do not become authorized merely because a worker is connected.
+When context is missing, ask the responsible worker. Let that worker investigate,
+implement, test and check authoritative revisions or PR history; review its
+evidence and request rework instead of bypassing it with direct SSH edits.
+
+Read the selected worker's latest real output and reconcile prior delivery before
+sending follow-ups, so an existing task is not accidentally dispatched again.
+Send normal user-style questions and tasks, not hidden Captain protocols or worker
+role changes. Reports distinguish submitted input, actual work, results awaiting
+acceptance, verified outcomes and blockers. Neither submitted input nor a worker
+claim proves completion; specification/revision and test/artifact evidence matter.
+The human retains final decisions, and the plugin does not automatically wake an
+idle management chat. See [the management contract](https://github.com/jiale-wangOwO/agent-captain/blob/main/docs/management-session-product.md).
 
 The management tools provide an enrolled-worker cached overview, display aliases /
 pins (`update_agent`), and user-requested display reattachment to an existing
@@ -20,8 +43,8 @@ its own MCP connection and does not require installing this package.
 
 The source package deliberately contains no machine-specific MCP command. Its
 empty `.mcp.json` makes a direct source install **skill-only**, not a connected Hub.
-The repository catalog is named `pron-hub-source` so it cannot accidentally
-shadow the configured `pron-hub-local` marketplace. **Do not install the source
+The repository catalog is named `agent-captain-source` so it cannot accidentally
+shadow the configured `agent-captain-local` marketplace. **Do not install the source
 catalog for Hub control.** Prepare the local MCP bridge before installing the
 full plugin:
 
@@ -50,15 +73,19 @@ To upgrade an existing `ceo-hub@ceo-hub-local` installation without introducing
 a second plugin identity, explicitly generate a compatibility package instead:
 
 ```sh
-python scripts/configure_plugin.py --legacy-ceo-identity --output .runtime/plugin-marketplace-ceo-v0.7.0
+python scripts/configure_plugin.py --legacy-ceo-identity --output .runtime/plugin-marketplace-compat-v0.7.0
 ```
 
 This keeps the plugin name `ceo-hub`, skill name `ceo-hub`, marketplace name
 `ceo-hub-local`, and MCP server key `ceo_hub`, while the displayed product name
-is PRON Hub. It only creates a new retained directory: it does not inspect or
+is AgentCaptain. It only creates a new retained directory: it does not inspect or
 edit installed caches, `config.toml`, authentication, or running services. The
-normal command still generates `pron-hub@pron-hub-local`. Install only the
-identity you intend to use, not both, to avoid duplicate tools.
+normal command generates `agent-captain@agent-captain-local`. For an existing
+`pron-hub@pron-hub-local` installation, use `--legacy-pron-identity` instead;
+this retains that plugin/skill/marketplace identity and the `pron_hub` server key
+while presenting AgentCaptain. These old identifiers are compatibility options,
+not alternate product names. The flags are mutually exclusive. Install only the
+identity you intend to use, not several, to avoid duplicate tools.
 
 Review the generated commands before registration. A running MCP process and
 its discovered tool list do not hot-reload after source changes: reload that
@@ -70,5 +97,5 @@ broker or a worker to refresh plugin tools.
 
 This is a local desktop/CLI integration. It is not a hosted plugin listing and
 does not make a local terminal service available to cloud clients. The existing
-`ceo-hub` plugin identity and installed caches are not modified merely by
+plugin identities and installed caches are not modified merely by
 generating this package; any explicit installation is a separate user action.

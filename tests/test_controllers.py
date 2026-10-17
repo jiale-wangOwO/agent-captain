@@ -16,7 +16,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from controllers import ControllerService, INITIALIZATION, resolve_codex_command, default_workspace_root, manager_launch_environment, ROOT
+from controllers import ControllerService, INITIALIZATION, LEGACY_ROLE, ROLE, resolve_codex_command, default_workspace_root, legacy_workspace_root, manager_launch_environment, ROOT
+from management_policy import MANAGEMENT_POLICY, MANAGER_ROLE, POLICY_VERSION
 from terminal_client import BrokerError
 from store import Store
 
@@ -239,7 +240,12 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.hub.store.agents(), [])
         workspace = Path(c["workspace"])
         self.assertIn("human", (workspace / "AGENTS.md").read_text())
-        self.assertIn("PRON_HUB_CONNECTION_FILE", (workspace / ".codex/config.toml").read_text())
+        settings = (workspace / ".codex/config.toml").read_text()
+        self.assertIn("[mcp_servers.agent_captain]", settings)
+        self.assertIn("AGENTCAPTAIN_CONNECTION_FILE", settings)
+        self.assertIn("AGENTCAPTAIN_CONTROLLER_ID", settings)
+        self.assertNotIn("[mcp_servers.pron_hub]", settings)
+        self.assertNotIn("PRON_HUB_CONNECTION_FILE", settings)
         if os.name != "nt":
             self.assertEqual(Path(row["descriptor_file"]).stat().st_mode & 0o777, 0o600)
 
@@ -307,11 +313,13 @@ class ControllerTests(unittest.TestCase):
         if os.name == "nt":
             with patch.dict(os.environ, {"LOCALAPPDATA": str(explicit)}):
                 selected = default_workspace_root()
-                self.assertEqual(selected, explicit / "PRONHub" / "management-workspaces")
+                self.assertEqual(selected, explicit / "AgentCaptain" / "management-workspaces")
+                self.assertEqual(legacy_workspace_root(), explicit / "PRONHub" / "management-workspaces")
         else:
             with patch.dict(os.environ, {"XDG_STATE_HOME": str(explicit)}):
                 selected = default_workspace_root()
-                self.assertEqual(selected, explicit / "pron-hub" / "management-workspaces")
+                self.assertEqual(selected, explicit / "agent-captain" / "management-workspaces")
+                self.assertEqual(legacy_workspace_root(), explicit / "pron-hub" / "management-workspaces")
         self.assertFalse(explicit.exists())
 
     def test_prepare_request_key_conflict_and_replay(self):
@@ -319,6 +327,79 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(c["id"], self.prepare(title="One", request_key="prepare-1")["id"])
         with self.assertRaises(ValueError):
             self.prepare(title="Two", request_key="prepare-1")
+
+    def test_manager_mcp_overrides_reuse_only_one_existing_server_namespace(self):
+        c = self.prepare()
+        row = self.service._row(c["id"])
+        configuration = Path(c["workspace"]) / ".codex" / "config.toml"
+        for sections, expected in (("[mcp_servers.agent_captain]\n", "agent_captain"),
+                                   ("[mcp_servers.pron_hub]\n", "pron_hub"),
+                                   ("[mcp_servers.pron_hub]\n[mcp_servers.agent_captain]\n", "agent_captain")):
+            with self.subTest(sections=sections):
+                configuration.write_text(sections, encoding="utf-8")
+                before = configuration.read_bytes()
+                arguments = self.service._overrides(row)
+                values = dict(part.split("=", 1) for part in arguments[1::2])
+                prefix = "mcp_servers." + expected
+                self.assertEqual(arguments[::2], ["-c"] * 5)
+                self.assertEqual(set(values), {prefix + suffix for suffix in (
+                    ".command", ".args", ".required", ".env.AGENTCAPTAIN_CONNECTION_FILE",
+                    ".env.AGENTCAPTAIN_CONTROLLER_ID")})
+                self.assertEqual(json.loads(values[prefix + ".env.AGENTCAPTAIN_CONTROLLER_ID"]), c["id"])
+                self.assertEqual(json.loads(values[prefix + ".env.AGENTCAPTAIN_CONNECTION_FILE"]), row["descriptor_file"])
+                self.assertEqual(configuration.read_bytes(), before)
+        self.assertEqual(self.launches, [])
+        self.assertEqual(self.terminals.creates, [])
+        self.assertEqual(self.terminals.writes, [])
+
+    def test_new_default_accepts_exact_owned_legacy_workspace_without_moving_it(self):
+        c = self.prepare()
+        old_workspace = Path(c["workspace"])
+        canonical = Path(self.temp.name) / "AgentCaptain" / "management-workspaces"
+        legacy = Path(self.temp.name) / "PRONHub" / "management-workspaces"
+        legacy.mkdir(parents=True)
+        workspace = legacy / c["id"]
+        old_workspace.rename(workspace)
+        (workspace / "AGENTS.md").write_text(LEGACY_ROLE, encoding="utf-8")
+        with self.hub.store.lock, self.hub.store.db:
+            self.hub.store.db.execute("update controllers set workspace=? where id=?", (str(workspace), c["id"]))
+        with patch("controllers.default_workspace_root", return_value=canonical), \
+             patch("controllers.legacy_workspace_root", return_value=legacy):
+            service = ControllerService(self.hub, terminals=self.terminals, launcher=self.launch, workspace_root=canonical)
+            result = service.prepare({})
+        self.assertEqual(result["id"], c["id"])
+        self.assertEqual(result["workspace"], str(workspace))
+        self.assertEqual(result["policy_sync"]["status"], "current")
+        self.assertEqual((workspace / "AGENTS.md").read_text(encoding="utf-8"), ROLE)
+        self.assertFalse((canonical / c["id"]).exists())
+        self.assertEqual(self.launches, [])
+        self.assertEqual(self.terminals.creates, [])
+        self.assertEqual(self.terminals.writes, [])
+
+    def test_explicit_custom_workspace_root_cannot_gain_legacy_default_filesystem_authority(self):
+        c = self.prepare()
+        canonical = Path(self.temp.name) / "AgentCaptain" / "management-workspaces"
+        legacy = Path(self.temp.name) / "PRONHub" / "management-workspaces"
+        legacy.mkdir(parents=True)
+        workspace = legacy / c["id"]
+        Path(c["workspace"]).rename(workspace)
+        path = workspace / "AGENTS.md"
+        path.write_text(LEGACY_ROLE, encoding="utf-8")
+        before = path.read_bytes()
+        self.hub.store.setting("controller-policy-file:" + c["id"], {
+            "version": "owned-old-policy", "sha256": hashlib.sha256(before).hexdigest()})
+        with self.hub.store.lock, self.hub.store.db:
+            self.hub.store.db.execute("update controllers set workspace=? where id=?", (str(workspace), c["id"]))
+        with patch("controllers.default_workspace_root", return_value=canonical), \
+             patch("controllers.legacy_workspace_root", return_value=legacy):
+            custom = Path(self.temp.name) / "explicit-custom-manager-base"
+            service = ControllerService(self.hub, terminals=self.terminals, launcher=self.launch, workspace_root=custom)
+            result = service.prepare({})
+        self.assertEqual(result["policy_sync"]["status"], "unsafe_path")
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(self.launches, [])
+        self.assertEqual(self.terminals.creates, [])
+        self.assertEqual(self.terminals.writes, [])
 
     def test_automatic_access_ignores_old_narrow_grants_and_legacy_activation(self):
         aid = self.worker()
@@ -652,6 +733,225 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("Initialization only calls get_controller_context", role)
         self.assertIn("All registered open shared worker terminals", INITIALIZATION)
         self.assertIn("Call only", INITIALIZATION)
+
+    def legacy_policy(self, controller):
+        path = Path(controller["workspace"]) / "AGENTS.md"
+        path.write_text(LEGACY_ROLE, encoding="utf-8")
+        with self.hub.store.lock, self.hub.store.db:
+            self.hub.store.db.execute("delete from settings where key=?",
+                ("controller-policy-file:" + controller["id"],))
+        return path
+
+    def test_new_manager_policy_is_expert_delegate_first_without_broader_capability(self):
+        c = self.prepare()
+        path = Path(c["workspace"]) / "AGENTS.md"
+        self.assertEqual(path.read_text(encoding="utf-8"), MANAGER_ROLE)
+        self.assertEqual(ROLE, MANAGER_ROLE)
+        self.assertIn("rather than investigating its project through direct SSH", ROLE)
+        self.assertIn("Initialization only calls get_controller_context", ROLE)
+        record = self.hub.store.setting("controller-policy-file:" + c["id"])
+        self.assertEqual(record, {"version": POLICY_VERSION,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+        context = self.service.view_context(c["id"])
+        self.assertEqual(context["management_policy"]["execution_policy"], "delegate_first")
+        self.assertEqual(context["management_policy"]["decision_owner"], "human_user")
+        self.assertEqual(context["management_instructions"], MANAGER_ROLE)
+        self.assertEqual(context["policy_sync"]["status"], "current")
+        self.assertFalse(context["policy_sync"]["reload_required"])
+        self.assertFalse(self.service.authorize_creation(c["id"], "remote", "/arbitrary"))
+        self.assertEqual(self.launches, [])
+        self.assertEqual(self.terminals.creates, [])
+        self.assertEqual(self.terminals.writes, [])
+
+    def test_current_context_policy_is_independent_and_does_not_mutate_shared_contract(self):
+        c = self.prepare()
+        policy = self.service.view_context(c["id"])["management_policy"]
+        policy["direct_execution_exceptions"].append("unsafe_test_override")
+        self.assertNotIn("unsafe_test_override", MANAGEMENT_POLICY["direct_execution_exceptions"])
+        self.assertNotIn("unsafe_test_override",
+            self.service.view_context(c["id"])["management_policy"]["direct_execution_exceptions"])
+
+    def test_read_only_context_detects_legacy_and_supplies_current_policy_without_rewriting(self):
+        c = self.prepare()
+        path = self.legacy_policy(c)
+        before, metadata = path.read_bytes(), path.stat()
+        context = self.service.view_context(c["id"])
+        self.service.get(c["id"])
+        self.service.list()
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(path.stat().st_mtime_ns, metadata.st_mtime_ns)
+        self.assertIsNone(self.hub.store.setting("controller-policy-file:" + c["id"]))
+        self.assertEqual(context["policy_sync"]["status"], "outdated")
+        self.assertFalse(context["policy_sync"]["workspace_updated"])
+        self.assertEqual(context["management_policy"]["version"], POLICY_VERSION)
+        self.assertEqual(context["management_instructions"], MANAGER_ROLE)
+        self.assertEqual(self.terminals.writes, [])
+        self.assertEqual(self.terminals.creates, [])
+        self.assertEqual(self.launches, [])
+
+    def test_explicit_prepare_reuse_migrates_exact_legacy_role_without_new_session(self):
+        worker = self.worker()
+        c = self.prepare(agent_ids=[worker])
+        path = self.legacy_policy(c)
+        refreshed = self.prepare()
+        self.assertEqual(refreshed["id"], c["id"])
+        self.assertEqual(refreshed["workspace"], c["workspace"])
+        self.assertEqual(path.read_text(encoding="utf-8"), ROLE)
+        self.assertEqual(refreshed["policy_sync"]["status"], "current")
+        self.assertTrue(refreshed["policy_sync"]["workspace_updated"])
+        self.assertEqual(refreshed["scope"], [worker])
+        self.assertEqual(refreshed["allowed_hosts"], {})
+        self.assertEqual(self.terminals.writes, [])
+        self.assertEqual(self.terminals.creates, [])
+        self.assertEqual(self.launches, [])
+
+    def test_prepare_request_replay_can_sync_policy_without_replaying_initialization(self):
+        c = self.prepare(request_key="prepare-policy")
+        path = self.legacy_policy(c)
+        self.assertEqual(self.prepare(request_key="prepare-policy")["id"], c["id"])
+        self.assertEqual(path.read_text(encoding="utf-8"), ROLE)
+        self.assertEqual(self.launches, [])
+        self.assertEqual(self.terminals.creates, [])
+        self.assertEqual(self.terminals.writes, [])
+
+    def test_start_and_connected_resume_sync_only_owned_role_and_keep_native_identity(self):
+        c = self.prepare()
+        path = self.legacy_policy(c)
+        self.service.start(c["id"], "start-policy")
+        self.settled(c["id"])
+        current = self.service.get(c["id"], refresh=True)
+        self.assertEqual(path.read_text(encoding="utf-8"), ROLE)
+        self.assertEqual(current["session_id"], SID)
+        self.assertEqual(self.launches[0][0][-1], INITIALIZATION)
+        tid, launches, creates = current["terminal_id"], len(self.launches), len(self.terminals.creates)
+        self.legacy_policy(current)
+        result = self.service.resume(c["id"], "resume-policy")
+        self.assertEqual(path.read_text(encoding="utf-8"), ROLE)
+        self.assertEqual(result["session_id"], SID)
+        self.assertEqual(result["terminal_id"], tid)
+        self.assertEqual(len(self.launches), launches)
+        self.assertEqual(len(self.terminals.creates), creates)
+        self.assertEqual(self.terminals.writes, [])
+
+    def test_generated_hash_can_migrate_a_previously_owned_role(self):
+        c = self.prepare()
+        path = Path(c["workspace"]) / "AGENTS.md"
+        prior = "# Test-only prior Hub generated instructions\nKeep the human in charge.\n"
+        path.write_text(prior, encoding="utf-8")
+        self.hub.store.setting("controller-policy-file:" + c["id"], {
+            "version": "prior-owned-policy", "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+        self.assertEqual(self.service.view_context(c["id"])["policy_sync"]["status"], "outdated")
+        self.prepare()
+        self.assertEqual(path.read_text(encoding="utf-8"), ROLE)
+
+    def test_custom_policy_edits_preserved_and_never_exposed_in_context(self):
+        c = self.prepare()
+        path = Path(c["workspace"]) / "AGENTS.md"
+        for custom in (ROLE + "\nUser custom rule: private test marker.\n",
+                       LEGACY_ROLE + "\nUser custom rule: private test marker.\n"):
+            path.write_text(custom, encoding="utf-8")
+            before, metadata = path.read_bytes(), path.stat()
+            result = self.prepare()
+            context = self.service.view_context(c["id"])
+            self.assertEqual(result["policy_sync"]["status"], "custom_preserved")
+            self.assertEqual(context["policy_sync"]["status"], "custom_preserved")
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(path.stat().st_mtime_ns, metadata.st_mtime_ns)
+            self.assertNotIn("private test marker", json.dumps(context))
+            self.assertEqual(context["management_instructions"], ROLE)
+        self.assertEqual(self.terminals.writes, [])
+        self.assertEqual(self.terminals.creates, [])
+        self.assertEqual(self.launches, [])
+
+    def test_missing_or_invalid_encoding_policy_is_not_recreated_or_replaced(self):
+        c = self.prepare()
+        path = Path(c["workspace"]) / "AGENTS.md"
+        path.unlink()
+        self.assertEqual(self.prepare()["policy_sync"]["status"], "missing")
+        self.assertFalse(path.exists())
+        path.write_bytes(b"\xff\xfe\x00\x00")
+        before = path.read_bytes()
+        self.assertEqual(self.prepare()["policy_sync"]["status"], "custom_preserved")
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_recorded_hash_does_not_allow_sync_outside_exact_owned_workspace(self):
+        c = self.prepare()
+        outside = Path(self.temp.name) / "user-business"
+        outside.mkdir()
+        path = outside / "AGENTS.md"
+        path.write_text(LEGACY_ROLE, encoding="utf-8")
+        self.hub.store.setting("controller-policy-file:" + c["id"], {
+            "version": "prior-owned-policy", "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+        with self.hub.store.lock, self.hub.store.db:
+            self.hub.store.db.execute("update controllers set workspace=? where id=?", (str(outside), c["id"]))
+        before = path.read_bytes()
+        self.assertEqual(self.prepare()["policy_sync"]["status"], "unsafe_path")
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_linked_workspace_guard_refuses_matching_policy_without_touching_file(self):
+        c = self.prepare()
+        path = self.legacy_policy(c)
+        workspace = path.parent
+        original_is_symlink = Path.is_symlink
+        def linked_owned_directory(candidate):
+            return candidate == workspace or original_is_symlink(candidate)
+        before = path.read_bytes()
+        with patch("controllers.Path.is_symlink", linked_owned_directory):
+            self.assertEqual(self.prepare()["policy_sync"]["status"], "unsafe_path")
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(self.launches, [])
+        self.assertEqual(self.terminals.creates, [])
+        self.assertEqual(self.terminals.writes, [])
+
+    def test_invalid_start_or_resume_request_cannot_trigger_policy_write(self):
+        c = self.prepare()
+        path = self.legacy_policy(c)
+        before = path.read_bytes()
+        for action in (self.service.start, self.service.resume):
+            with self.assertRaises(ValueError):
+                action(c["id"], "bad key with spaces")
+            self.assertEqual(path.read_bytes(), before)
+        self.assertIsNone(self.hub.store.setting("controller-policy-file:" + c["id"]))
+
+    def test_owned_historical_runtime_workspace_remains_migratable(self):
+        c = self.prepare()
+        path = self.legacy_policy(c)
+        service = ControllerService(self.hub, terminals=self.terminals, launcher=self.launch,
+                                    workspace_root=Path(self.temp.name) / "new-manager-base")
+        self.assertEqual(service.prepare({})["id"], c["id"])
+        self.assertEqual(path.read_text(encoding="utf-8"), ROLE)
+        self.assertEqual(self.launches, [])
+        self.assertEqual(self.terminals.creates, [])
+
+    def test_linked_policy_file_is_never_replaced_even_with_matching_hash(self):
+        c = self.prepare()
+        path = self.legacy_policy(c)
+        alias = Path(self.temp.name) / "human-linked-policy.md"
+        try:
+            os.link(path, alias)
+        except OSError:
+            self.skipTest("This filesystem does not permit hard links")
+        before = alias.read_bytes()
+        self.hub.store.setting("controller-policy-file:" + c["id"], {
+            "version": "prior-owned-policy", "sha256": hashlib.sha256(before).hexdigest()})
+        self.assertEqual(self.prepare()["policy_sync"]["status"], "unsafe_path")
+        self.assertEqual(alias.read_bytes(), before)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_policy_sync_rechecks_human_edits_before_atomic_replace(self):
+        c = self.prepare()
+        path = self.legacy_policy(c)
+        from controllers import _private_write
+        custom = LEGACY_ROLE + "\nHuman edited during policy sync.\n"
+        def changed_while_writing(temporary, text):
+            _private_write(temporary, text)
+            path.write_text(custom, encoding="utf-8")
+        with patch("controllers._private_write", side_effect=changed_while_writing):
+            result = self.prepare()
+        self.assertEqual(result["policy_sync"]["status"], "custom_preserved")
+        self.assertEqual(result["policy_sync"]["reason"], "changed_during_sync")
+        self.assertEqual(path.read_text(encoding="utf-8"), custom)
+        self.assertEqual(list(path.parent.glob(".pron-policy-*.tmp")), [])
 
     def test_authentication_initialization_and_identity_fences_survive_automatic_access(self):
         self.worker(active=False)

@@ -1,8 +1,6 @@
 """Per-user background launcher. Never starts models or connects machines."""
 import argparse
 import json
-import os
-import subprocess
 import sys
 import time
 import urllib.request
@@ -10,6 +8,7 @@ from pathlib import Path
 
 from app import connection_file
 from hub import ROOT, VERSION
+from background_process import launch_background
 
 
 def status():
@@ -37,16 +36,14 @@ def start(port=8766):
         return current
     runtime = ROOT / ".runtime"
     runtime.mkdir(exist_ok=True)
-    with (runtime / "server.out.log").open("ab") as output, (runtime / "server.err.log").open("ab") as error:
-        process = subprocess.Popen([sys.executable, "-u", str(ROOT / "app.py"), "serve", "--port", str(port)],
-                                   cwd=ROOT, stdin=subprocess.DEVNULL, stdout=output, stderr=error,
-                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), start_new_session=os.name != "nt")
+    process = launch_background([sys.executable, "-u", str(ROOT / "app.py"), "serve", "--port", str(port)],
+                                cwd=ROOT, stdout_path=runtime / "server.out.log", stderr_path=runtime / "server.err.log")
     deadline = time.monotonic() + 8
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError("服务启动失败，请查看 .runtime/server.err.log。")
         current = status()
-        if current["running"] and current["version"] == VERSION:
+        if current["running"] and current["version"] == VERSION and current["pid"] == process.pid:
             return current
         time.sleep(.2)
     raise RuntimeError("服务未在限时内就绪，请查看 .runtime/server.err.log。")

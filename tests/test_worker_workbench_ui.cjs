@@ -131,7 +131,7 @@ test('reconnect is shown only for disconnected open terminals and calls only saf
 test('uncertain reconnect retains same request key, never silently retries or creates a terminal', async () => {
   let lost = true;
   const h = await harness({agents: [worker('remote', 'two', 'Offline', {connected: false})], handle: async call => { if (call.url === '/api/agents/reconnect' && lost) { lost = false; throw new Error('lost connection'); } }});
-  await h.context.selectAgent(h.agents[0]); await assert.rejects(h.context.reconnectTerminal(), /lost connection/);
+  await h.context.selectAgent(h.agents[0]); await assert.rejects(h.context.reconnectTerminal(), error => error.code === 'hub_unreachable');
   const first = h.calls.find(c => c.url === '/api/agents/reconnect').body.request_key; await h.context.refresh(true); assert.equal(h.calls.filter(c => c.url === '/api/agents/reconnect').length, 1);
   await h.context.reconnectTerminal(); assert.equal(h.calls.filter(c => c.url === '/api/agents/reconnect')[1].body.request_key, first);
   assert.equal(h.calls.some(c => /\/create|\/connect|\/input|resume/.test(c.url)), false);
@@ -209,7 +209,7 @@ test('manager records never become worker cards even when an old registry contai
 });
 
 test('create name is optional with machine and selected project default, not an activation control', async () => {
-  const h = await harness({handle: async (call, backend) => call.url === '/api/terminals/create' ? backend.reply({thread_id: 'created'}) : null});
+  const h = await harness({handle: async (call, backend) => call.url === '/api/terminals/create' ? backend.reply({created: true, host: 'remote', thread_id: 'created'}) : null});
   h.context.openCreate(null, 'remote'); assert.equal(h.get('#create-title').value, ''); h.get('#create-cwd').value = '/workspace/sample';
   h.get('#create-form').onsubmit({preventDefault() {}}); await settle();
   const body = h.calls.find(c => c.url === '/api/terminals/create').body;
@@ -220,7 +220,34 @@ test('shipped markup has naming in detail and no separate worker activation or g
   const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
   assert.match(html, /id="detail-rename"/); assert.match(html, /id="rename-dialog"/); assert.match(html, /id="create-title" maxlength="200"/);
   assert.doesNotMatch(html, /id="(?:active-only|create-active|controller-workers|controller-legacy-warning)"/);
-  assert.doesNotMatch(html, /当前主控(?:未|已)授权|只看允许管理|加入 CEO 的激活范围/);
+  assert.doesNotMatch(html, /当前主控(?:未|已)授权|只看允许管理|加入 (?:CEO|Captain) 的激活范围/);
+});
+
+test('AgentCaptain branding explains one lead across machines without the previous joke identity', () => {
+  const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, '../web/style.css'), 'utf8');
+  assert.match(html, /<title>AgentCaptain · 队长<\/title>/);
+  assert.match(html, /One captain for agents across your machines\./);
+  assert.match(html, /一个主控，统筹本机与远程 Agent。/);
+  assert.match(html, /派发、跟进、协调和交付审查/);
+  assert.match(html, /多机器统一管理.*集中汇总.*真实终端直接对话/);
+  assert.match(html, /你与 Captain 共用这个终端/);
+  assert.doesNotMatch(html, /PRON|Personal Remote Ops|CEO|run_pron|pron-hub-logo/i);
+  assert.doesNotMatch(css, /#f59b23|\.wordmark span\{[^}]*background:/i);
+  assert.match(css, /@media\(max-width:700px\)\{\.topbar\{[^}]*flex-wrap:wrap/);
+  assert.match(css, /@media\(max-width:420px\)/);
+});
+
+test('new brand mark and favicon use a local self-contained compass asset', () => {
+  const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
+  const mark = fs.readFileSync(path.join(__dirname, '../web/agent-captain-mark.svg'), 'utf8');
+  const logo = fs.readFileSync(path.join(__dirname, '../assets/agent-captain-logo.svg'), 'utf8');
+  assert.match(html, /rel="icon" href="\/agent-captain-mark\.svg"/);
+  assert.match(html, /class="brand-mark" src="\/agent-captain-mark\.svg"/);
+  assert.match(mark, /<svg[^>]*viewBox="0 0 64 64"/);
+  assert.match(logo, /AgentCaptain/);
+  assert.match(logo, /One captain for agents across your machines\./);
+  assert.doesNotMatch(mark + logo, /<script|<image|<foreignObject|href=|PRON|porn/i);
 });
 
 test('empty registry and empty search have different helpful, non-scanning states', async () => {
@@ -255,7 +282,7 @@ test('canonical connected output reconciles lost successful reconnect before a l
   const h = await harness({agents: [worker('remote', 'two', 'Offline', {connected: false})], handle: async (call, backend) => {
     if (call.url === '/api/agents/reconnect' && lost) { lost = false; backend.agents[0].connected = true; throw new Error('response lost after attach'); }
   }});
-  await h.context.selectAgent(h.agents[0]); await assert.rejects(h.context.reconnectTerminal(), /response lost/); const first = h.calls.find(call => call.url === '/api/agents/reconnect').body.request_key;
+  await h.context.selectAgent(h.agents[0]); await assert.rejects(h.context.reconnectTerminal(), error => error.code === 'hub_unreachable'); const first = h.calls.find(call => call.url === '/api/agents/reconnect').body.request_key;
   const session = vm.runInContext('terminalSession', h.context); await h.context.pollTerminal(session);
   h.agents[0].connected = false; h.context.updateDisplayConnection(session, false); await h.context.reconnectTerminal();
   assert.notEqual(h.calls.filter(call => call.url === '/api/agents/reconnect')[1].body.request_key, first);
@@ -271,7 +298,7 @@ for (const outcome of ['classified', 'lost']) test(`late ${outcome} recovery for
   else reject(new Error('A transport outcome unknown'));
   await recovering;
   assert.equal(vm.runInContext('selectedAgent', h.context), 'local:b'); assert.equal(h.get('#agent-recovery-notice').hidden, true); assert.equal(h.get('#agent-recovery-notice').textContent, '');
-  await h.context.selectAgent(h.agents[0]); assert.equal(h.get('#agent-recovery-notice').hidden, false); assert.match(h.get('#agent-recovery-notice').textContent, outcome === 'classified' ? /A original tmux/ : /A transport outcome unknown/);
+  await h.context.selectAgent(h.agents[0]); assert.equal(h.get('#agent-recovery-notice').hidden, false); assert.match(h.get('#agent-recovery-notice').textContent, outcome === 'classified' ? /A original tmux/ : /无法连接本机 AgentCaptain 后台/);
 });
 
 test('inline rename uses backend-compatible 200-character limit without accepting oversized names', async () => {

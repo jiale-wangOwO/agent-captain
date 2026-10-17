@@ -2,7 +2,7 @@
 
 The CLI installation and the separately managed `app-server daemon` package can have different versions and defaults. Updating one does not prove the other was updated. A startup compatibility menu is not an SSH transport failure.
 
-PRON Hub includes the optional, standard-library-only `scripts/codex_sync_daemon.py` helper for **Linux, the current user, and an existing trusted CLI installation**. It is not a general process manager and is not run automatically by the Hub.
+AgentCaptain includes the optional, standard-library-only `scripts/codex_sync_daemon.py` helper for **Linux, the current user, and an existing trusted CLI installation**. It is not a general process manager and is not run automatically by the Hub.
 
 ## Run on the worker machine
 

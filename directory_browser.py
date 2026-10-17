@@ -78,45 +78,91 @@ def _bounded_ssh(target, request):
     if not isinstance(target, str) or not target or target.startswith("-") or any(c.isspace() or ord(c) < 32 for c in target):
         raise ValueError("无效的 SSH 机器地址。")
     payload = base64.urlsafe_b64encode(json.dumps(request, ensure_ascii=False).encode("utf-8")).decode("ascii")
-    process = subprocess.Popen(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", target, "python3 - " + payload],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    unavailable = "无法通过 SSH 读取远端目录；请检查机器连接及远端 python3 后重试。"
+    try:
+        process = subprocess.Popen(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", target, "python3 - " + payload],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except OSError:
+        raise RuntimeError(unavailable) from None
     buffers = {"stdout": bytearray(), "stderr": bytearray()}
     exceeded = threading.Event()
+    read_failed = threading.Event()
+
+    def kill_child():
+        # Only this request's disposable SSH process is stopped. The remote
+        # work terminal/model and the transport service are never restarted.
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+    def close_stream(stream):
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
 
     def collect(name, stream, limit):
-        while True:
-            chunk = stream.read(8192)
-            if not chunk:
-                return
-            if len(buffers[name]) + len(chunk) > limit:
-                exceeded.set()
-                process.kill()
-                return
-            buffers[name].extend(chunk)
+        try:
+            while True:
+                chunk = stream.read(8192)
+                if not chunk:
+                    return
+                if len(buffers[name]) + len(chunk) > limit:
+                    exceeded.set()
+                    kill_child()
+                    return
+                buffers[name].extend(chunk)
+        except (OSError, ValueError):
+            read_failed.set()
+            kill_child()
+        finally:
+            # A BufferedReader's close takes the same lock as a blocked read.
+            # Keep ownership here: the request thread must never synchronously
+            # close a pipe still held by a reader if child cleanup has failed.
+            close_stream(stream)
 
     threads = [threading.Thread(target=collect, args=(name, stream, limit), daemon=True)
                for name, stream, limit in (("stdout", process.stdout, MAX_OUTPUT), ("stderr", process.stderr, 8192))]
     for thread in threads:
         thread.start()
+    failure = None
     try:
         process.stdin.write(Path(__file__).read_bytes())
         process.stdin.close()
         process.wait(timeout=20)
     except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
-        raise RuntimeError("远端目录读取超时；请检查 SSH 连接后重试。") from None
+        failure = "timeout"
+    except OSError:
+        # SSH can exit before either write or close/flush completes (including
+        # Windows ERROR_BROKEN_PIPE/ERROR_NO_DATA). Do not expose raw startup
+        # errors or mistake this pre-terminal directory lookup for a create.
+        failure = "unavailable"
     finally:
+        if failure:
+            kill_child()
+            try:
+                process.wait(timeout=5)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        if failure:
+            # A failed BufferedWriter write/close can retain bytes. Closing it
+            # a second time would retry a blocking flush if SSH cannot be
+            # killed. Close the raw pipe first, without flushing those bytes.
+            raw_input = getattr(process.stdin, "raw", None)
+            if raw_input is not None:
+                close_stream(raw_input)
+        close_stream(process.stdin)
         for thread in threads:
             thread.join(timeout=1)
-        for stream in (process.stdout, process.stderr):
-            stream.close()
     if exceeded.is_set():
         raise RuntimeError("远端目录输出超过限制；请选择范围更小的目录。")
-    if process.returncode:
+    if failure == "timeout":
+        raise RuntimeError("远端目录读取超时；请检查 SSH 连接后重试。") from None
+    if failure or read_failed.is_set() or process.returncode:
         # Startup stderr can include provider/login output; never expose it.
-        raise RuntimeError("无法通过 SSH 读取目录；请确认机器已连接且远端可运行 python3。")
+        raise RuntimeError(unavailable) from None
     marker = b"CEO_HUB_DIRECTORY_RESULT="
     line = next((line[len(marker):] for line in reversed(bytes(buffers["stdout"]).splitlines()) if line.startswith(marker)), None)
     if line is None:

@@ -9,11 +9,12 @@ const os = require('node:os');
 const crypto = require('node:crypto');
 const net = require('node:net');
 const zlib = require('node:zlib');
-const { execFile, spawn: spawnChild } = require('node:child_process');
+const { execFile, execFileSync, spawn: spawnChild } = require('node:child_process');
 const { promisify } = require('node:util');
 const pty = require('node-pty');
 const { Terminal } = require('@xterm/headless');
 const { SerializeAddon } = require('@xterm/addon-serialize');
+const { updateHumanInput, reserveHumanInput, humanInputState } = require(path.join(__dirname, 'input_activity.cjs'));
 const execFileAsync = promisify(execFile);
 
 const VERSION = '0.3.0';
@@ -51,27 +52,6 @@ function descriptorPath() {
 
 function sshExecutable() {
   return process.env.CEO_HUB_SSH || (process.platform === 'win32' ? path.join(process.env.WINDIR || 'C:\\Windows', 'System32', 'OpenSSH', 'ssh.exe') : 'ssh');
-}
-
-function updateHumanInput(session, data) {
-  session.humanLeaseUntil = Date.now() + 1500;
-  // Draft state is intentionally sticky. Cursor navigation means Backspace or
-  // Ctrl+U cannot prove that a line is empty. Only a real submit or cancel clears
-  // it; newlines inside bracketed paste are part of a draft, never a submit.
-  for (const char of data) {
-    if (session.inputEscape) {
-      session.inputEscape += char;
-      if (/^\x1b\[[0-?]*[ -/]*[@-~]$/.test(session.inputEscape)) {
-        if (session.inputEscape === '\x1b[200~') { session.humanPaste = true; session.humanLineLength = 1; }
-        else if (session.inputEscape === '\x1b[201~') session.humanPaste = false;
-        session.inputEscape = '';
-      } else if (session.inputEscape.length > 32 || /^\x1b[^\[O]/.test(session.inputEscape) || /^\x1bO./.test(session.inputEscape)) session.inputEscape = '';
-      continue;
-    }
-    if (char === '\x1b') { session.inputEscape = char; continue; }
-    if (!session.humanPaste && (char === '\r' || char === '\n' || char === '\x03')) session.humanLineLength = 0;
-    else if (session.humanPaste || char >= ' ' || char === '\t') session.humanLineLength = 1;
-  }
 }
 
 function screenText(session, lines = 14) {
@@ -259,6 +239,7 @@ class TerminalBroker {
       agent_ready: session.connected && session.state === 'agent' && !blocked,
       blocked_reason: blocked,
       human_busy: !!session.humanLineLength || Date.now() < session.humanLeaseUntil,
+      human_input: humanInputState(session),
       geometry_unknown: !!session.geometryUnknown,
       ...(session.exitCode == null ? {} : { exit_code: session.exitCode }),
     };
@@ -403,7 +384,7 @@ class TerminalBroker {
       return {
         connected: view.connected, state: view.state, status: view.state,
         command: view.command, agent_ready: view.agent_ready,
-        blocked_reason: view.blocked_reason, human_busy: view.human_busy, geometry_unknown: view.geometry_unknown, cols: view.cols, rows: view.rows,
+        blocked_reason: view.blocked_reason, human_busy: view.human_busy, human_input: view.human_input, geometry_unknown: view.geometry_unknown, cols: view.cols, rows: view.rows,
         ...(view.exit_code == null ? {} : { exit_code: view.exit_code }),
       };
     };
@@ -429,29 +410,53 @@ class TerminalBroker {
     if (origin === 'plugin' && (typeof body.request_key !== 'string' || !body.request_key || body.request_key.length > 200)) {
       throw new ApiError(400, 'missing_request_key', 'Plugin input requires a request_key for safe delivery');
     }
-    if (origin === 'ui') updateHumanInput(session, body.data);
-    return this.serializeWrite(session, () => {
-      const digest = crypto.createHash('sha256').update(`input:${body.data}`).digest('hex');
+    const digest = crypto.createHash('sha256').update(`input:${body.data}`).digest('hex');
+    const existing = body.request_key && (session.requests.get(body.request_key) || session.pendingHumanInputs?.get(body.request_key));
+    if (existing) {
+      if (existing.digest !== digest) throw new ApiError(409, 'request_conflict', 'request_key was already used with different input');
+      return existing.promise ? { ...await existing.promise, deduplicated: true } : { ...existing.result, deduplicated: true };
+    }
+    if (!session.connected) throw new ApiError(409, 'terminal_exited', 'Terminal is disconnected');
+    if (session.geometryUnknown) throw new ApiError(409, 'geometry_unknown', 'Display geometry is not synchronized; retry resizing before entering input');
+    const settleHuman = origin === 'ui' ? reserveHumanInput(session, body.data) : null;
+    const result = this.serializeWrite(session, () => {
+      let attemptedWrite = false;
+      try {
       if (body.request_key) {
         const prior = session.requests.get(body.request_key);
         if (prior) {
           if (prior.digest !== digest) throw new ApiError(409, 'request_conflict', 'request_key was already used with different input');
+          if (settleHuman) settleHuman(false);
           return { ...prior.result, deduplicated: true };
         }
       }
       if (!session.connected) throw new ApiError(409, 'terminal_exited', 'Terminal is disconnected');
       if (session.geometryUnknown) throw new ApiError(409, 'geometry_unknown', 'Display geometry is not synchronized; retry resizing before entering input');
       if (origin === 'plugin' && (session.humanLineLength || Date.now() < session.humanLeaseUntil)) {
-        throw new ApiError(409, 'human_busy', 'User is typing in this terminal; retry after the user submits or clears their input');
+        throw new ApiError(409, 'human_busy', 'Terminal has pending human input; retry after the user submits or cancels it');
       }
+      attemptedWrite = true;
       session.pty.write(body.data);
+      if (settleHuman) settleHuman(true);
       const result = { id, accepted: true, state: 'submitted', origin, ...(body.request_key ? { request_key: body.request_key } : {}) };
       if (body.request_key) {
         session.requests.set(body.request_key, { digest, result });
         if (session.requests.size > 500) session.requests.delete(session.requests.keys().next().value);
       }
       return result;
+      } catch (error) {
+        if (settleHuman) settleHuman(false, attemptedWrite);
+        throw error;
+      }
     });
+    if (origin === 'ui') {
+      if (!session.pendingHumanInputs) session.pendingHumanInputs = new Map();
+      if (body.request_key) session.pendingHumanInputs.set(body.request_key, { digest, promise: result });
+      result.then(() => { if (body.request_key) session.pendingHumanInputs.delete(body.request_key); }, () => {
+        if (body.request_key) session.pendingHumanInputs.delete(body.request_key);
+      });
+    }
+    return result;
   }
 
   async prompt(id, body) {
@@ -472,7 +477,7 @@ class TerminalBroker {
       if (!session.connected) throw new ApiError(409, 'terminal_exited', 'Terminal is disconnected');
       if (session.geometryUnknown) throw new ApiError(409, 'geometry_unknown', 'Display geometry is not synchronized; retry resizing before sending a task');
       if (session.humanLineLength || Date.now() < session.humanLeaseUntil) {
-        throw new ApiError(409, 'human_busy', 'User is typing in this terminal; retry after the user submits or clears their input');
+        throw new ApiError(409, 'human_busy', 'Terminal has pending human input; retry after the user submits or cancels it');
       }
       await this.refreshForeground(session, true);
       if (session.state !== 'agent') throw new ApiError(409, session.state === 'shell' ? 'agent_not_started' : 'agent_not_confirmed', 'Start Codex or another coding agent in this terminal first');
@@ -737,6 +742,51 @@ function recoveryPidState(pid) {
   catch (error) { return error.code === 'ESRCH' ? 'dead' : 'unknown'; }
 }
 
+function identityQuery(args) {
+  try {
+    const python = process.env.CEO_HUB_IDENTITY_PYTHON || process.env.CEO_HUB_PYTHON || 'python';
+    const result = execFileSync(python, ['-I', path.join(__dirname, 'process_identity.py'), ...args],
+      { encoding: 'utf8', windowsHide: true, timeout: 5000, maxBuffer: 32768 });
+    return JSON.parse(result);
+  } catch { return { state: 'unknown' }; }
+}
+
+function validOwnerIdentity(identity) {
+  const normalized = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+  return identity && Object.keys(identity).sort().join(',') === 'birth,executable,script'
+    && typeof identity.birth === 'string' && /^(win-filetime:[0-9]{1,24}|linux-start:[a-f0-9-]{36}:[0-9]{1,24})$/.test(identity.birth)
+    && ['executable', 'script'].every(key => typeof identity[key] === 'string' && identity[key].length > 0
+      && identity[key].length <= 4096 && !/[\x00-\x1f]/.test(identity[key]) && path.isAbsolute(identity[key]))
+    && ['node', 'node.exe'].includes(path.basename(identity.executable).toLowerCase())
+    && normalized(identity.script) === normalized(__filename);
+}
+
+function ownBrokerIdentity() {
+  const current = identityQuery(['observe', String(process.pid)]);
+  const identity = { birth: current.birth, executable: current.executable, script: path.resolve(__filename) };
+  if (current.state !== 'alive' || !validOwnerIdentity(identity)) throw new Error('Cannot establish terminal broker process birth identity');
+  return identity;
+}
+
+function recoveryOwnerState(owner, { pidState = recoveryPidState, query = identityQuery } = {}) {
+  if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || owner.pid > 2147483647
+      || (owner.owner_identity !== undefined && !validOwnerIdentity(owner.owner_identity))) return 'unknown';
+  const state = pidState(owner.pid);
+  if (state !== 'alive') return state;
+  const observation = query(['owner', String(owner.pid), JSON.stringify(owner.owner_identity ?? null), path.resolve(__filename)]);
+  return ['alive', 'dead'].includes(observation.state) ? observation.state : 'unknown';
+}
+
+function parseOwnerLock(raw) {
+  const text = raw.toString('utf8');
+  if (/^[1-9][0-9]{0,9}$/.test(text) && Number(text) <= 2147483647) return { pid: Number(text) };
+  const owner = JSON.parse(text);
+  if (!owner || Object.keys(owner).sort().join(',') !== 'owner_identity,pid'
+      || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || owner.pid > 2147483647
+      || !validOwnerIdentity(owner.owner_identity)) throw new Error('Broker lease owner is unknown');
+  return owner;
+}
+
 function recoveryGuard(filename, raw = process.env.CEO_HUB_RECOVERY_GUARD, referenceFile = path.resolve(__dirname, '.runtime', 'worker-terminal-reference.json')) {
   if (!raw) return null;
   try {
@@ -756,7 +806,7 @@ function recoveryGuard(filename, raw = process.env.CEO_HUB_RECOVERY_GUARD, refer
   } catch { throw new Error('Recovery authorization is invalid'); }
 }
 
-function verifyRecoveryInputs(filename, guard, { ownedLock = false, pidState = recoveryPidState } = {}) {
+function verifyRecoveryInputs(filename, guard, { ownedLock = false, pidState, ownerState, currentOwnerIdentity } = {}) {
   try {
     const same = (snapshot, hash, identity) => snapshot.hash === hash
       && snapshot.identity.ino === identity.ino && snapshot.identity.size === identity.size && snapshot.identity.mtime_ns === identity.mtime_ns;
@@ -768,17 +818,29 @@ function verifyRecoveryInputs(filename, guard, { ownedLock = false, pidState = r
     if (!same(snapshot, guard.descriptor_sha256, guard.descriptor_identity)) throw new Error();
     const descriptor = JSON.parse(snapshot.raw);
     const endpoint = new URL(descriptor.url);
+    // Legacy pidState is retained as a private unit-test hook. Production always
+    // checks the original process birth/image through the shared OS helper.
+    const stateOf = ownerState || (pidState ? owner => pidState(owner.pid) : recoveryOwnerState);
     if (descriptor.pid !== guard.pid || descriptor.version !== VERSION || endpoint.protocol !== 'http:'
         || endpoint.hostname !== '127.0.0.1' || !endpoint.port || endpoint.username || endpoint.password
-        || !['', '/'].includes(endpoint.pathname) || endpoint.search || endpoint.hash || pidState(guard.pid) !== 'dead') throw new Error();
+        || !['', '/'].includes(endpoint.pathname) || endpoint.search || endpoint.hash
+        || (descriptor.owner_identity !== undefined && !validOwnerIdentity(descriptor.owner_identity))
+        || stateOf(descriptor) !== 'dead') throw new Error();
     const lockfile = `${filename}.lock`;
     if (ownedLock) {
-      if (recoverySnapshot(lockfile, 64).raw.toString('ascii') !== String(process.pid)) throw new Error();
+      const owner = parseOwnerLock(recoverySnapshot(lockfile, 16384).raw);
+      if (owner.pid !== process.pid) throw new Error();
+      if (owner.owner_identity) {
+        if (JSON.stringify(owner.owner_identity) !== JSON.stringify(currentOwnerIdentity || ownBrokerIdentity())) throw new Error();
+      } else if (!pidState) throw new Error(); // Only old fixture hooks use PID-only child locks.
     } else if (guard.lock_sha256 === null) {
       if (fs.existsSync(lockfile)) throw new Error();
     } else {
-      const lock = recoverySnapshot(lockfile, 64);
-      if (!same(lock, guard.lock_sha256, guard.lock_identity) || lock.raw.toString('ascii') !== String(guard.pid)) throw new Error();
+      const lock = recoverySnapshot(lockfile, 16384);
+      const owner = parseOwnerLock(lock.raw);
+      if (!same(lock, guard.lock_sha256, guard.lock_identity) || owner.pid !== guard.pid
+          || JSON.stringify(owner.owner_identity) !== JSON.stringify(descriptor.owner_identity)
+          || stateOf(owner) !== 'dead') throw new Error();
     }
     return descriptor;
   } catch { throw new Error('Bound terminal owner changed or cannot be proved dead; recovery refused'); }
@@ -789,7 +851,9 @@ async function requireRefusedRecoveryPort(url) {
   await new Promise((resolve, reject) => {
     const probe = net.createConnection({ host: '127.0.0.1', port: Number(endpoint.port) });
     const fail = () => { probe.destroy(); reject(new Error('Bound terminal endpoint is not affirmatively offline; recovery refused')); };
-    probe.setTimeout(1000, fail);
+    // Windows can report a refused loopback connection after about two seconds.
+    // Extend only observation time: timeout/open/other errors still fail closed.
+    probe.setTimeout(4000, fail);
     probe.once('connect', fail);
     probe.once('error', error => { probe.destroy(); if (error.code === 'ECONNREFUSED') resolve(); else fail(); });
   });
@@ -810,7 +874,7 @@ async function initializeOwnedDisplay(filename, lockfile, guard, options = {}) {
   // Everything after lease acquisition belongs to one failure-cleanup scope.
   // In particular constructor/listen failures must not strand a new-child
   // lease next to the unchanged old descriptor, fencing all future recovery.
-  const ownedLease = options.ownedLease || recoverySnapshot(lockfile, 64);
+  const ownedLease = options.ownedLease || recoverySnapshot(lockfile, 16384);
   const verify = options.verify || verifyRecoveryInputs;
   const portProof = options.portProof || requireRefusedRecoveryPort;
   let server = null, temp = null, ownedTemp = null;
@@ -824,7 +888,8 @@ async function initializeOwnedDisplay(filename, lockfile, guard, options = {}) {
     const broker = (options.brokerFactory || (() => new TerminalBroker()))();
     server = (options.serverFactory || createServer)(broker, token, guard?.recovery_id || null);
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-    const descriptor = { url: `http://127.0.0.1:${server.address().port}`, token, pid: process.pid, version: VERSION };
+    const descriptor = { url: `http://127.0.0.1:${server.address().port}`, token, pid: process.pid, version: VERSION,
+      owner_identity: options.ownerIdentity || ownBrokerIdentity() };
     if (guard) descriptor.recovery_id = guard.recovery_id;
     temp = `${filename}.${process.pid}.tmp`;
     if (guard) verify(filename, guard, { ownedLock: true });
@@ -840,7 +905,7 @@ async function initializeOwnedDisplay(filename, lockfile, guard, options = {}) {
       try { server.close(() => resolve()); } catch { resolve(); }
     });
     if (temp) releaseOwnedStartupFile(temp, ownedTemp);
-    if (ownedLease.raw.toString('ascii') === String(process.pid)) releaseOwnedStartupFile(lockfile, ownedLease);
+    if (parseOwnerLock(ownedLease.raw).pid === process.pid) releaseOwnedStartupFile(lockfile, ownedLease);
     throw error;
   }
 }
@@ -859,33 +924,38 @@ async function main() {
     const existing = JSON.parse(fs.readFileSync(filename, 'utf8'));
     if (/^http:\/\/127\.0\.0\.1:\d+$/.test(existing.url)) {
       const result = await fetch(`${existing.url}/health`, { headers: { Authorization: `Bearer ${existing.token}` }, signal: AbortSignal.timeout(1000) });
-      if (result.ok) { process.stdout.write('CEO Hub terminal broker is already running.\n'); return; }
+      if (result.ok) { process.stdout.write('AgentCaptain terminal broker is already running.\n'); return; }
     }
   } catch {}
   const lockfile = `${filename}.lock`;
+  const ownerIdentity = ownBrokerIdentity();
   let lock;
   try { lock = fs.openSync(lockfile, 'wx', 0o600); }
   catch (error) {
     if (error.code !== 'EEXIST') throw error;
     if (guard) verifyRecoveryInputs(filename, guard);
-    let alive = false;
-    try { const owner = Number(fs.readFileSync(lockfile, 'utf8')); if (owner > 0) { process.kill(owner, 0); alive = true; } } catch {}
-    if (alive) { process.stdout.write('CEO Hub terminal broker is already starting.\n'); return; }
+    const previous = recoverySnapshot(lockfile, 16384);
+    const oldOwner = parseOwnerLock(previous.raw);
+    if (recoveryOwnerState(oldOwner) !== 'dead') throw new Error('Existing terminal broker lease is alive or unknown; not replacing it');
     if (guard) verifyRecoveryInputs(filename, guard);
-    fs.unlinkSync(lockfile);
+    if (!releaseOwnedStartupFile(lockfile, previous)) throw new Error('Existing terminal broker lease changed; not replacing it');
     lock = fs.openSync(lockfile, 'wx', 0o600);
   }
-  fs.writeFileSync(lock, String(process.pid));
+  fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, owner_identity: ownerIdentity }));
   fs.closeSync(lock);
-  const { broker, server, descriptor } = await initializeOwnedDisplay(filename, lockfile, guard);
-  process.stdout.write(`CEO Hub terminal broker listening on ${descriptor.url}\n`);
+  const publishedLease = recoverySnapshot(lockfile, 16384);
+  const { broker, server, descriptor } = await initializeOwnedDisplay(filename, lockfile, guard, { ownerIdentity });
+  process.stdout.write(`AgentCaptain terminal broker listening on ${descriptor.url}\n`);
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => {
     for (const session of broker.sessions.values()) if (session.connected) try { session.pty.kill(); } catch {}
-    try { if (JSON.parse(fs.readFileSync(filename, 'utf8')).pid === process.pid) fs.unlinkSync(filename); } catch {}
-    try { if (Number(fs.readFileSync(lockfile, 'utf8')) === process.pid) fs.unlinkSync(lockfile); } catch {}
+    try {
+      const current = JSON.parse(fs.readFileSync(filename, 'utf8'));
+      if (current.pid === process.pid && JSON.stringify(current.owner_identity) === JSON.stringify(ownerIdentity)) fs.unlinkSync(filename);
+    } catch {}
+    releaseOwnedStartupFile(lockfile, publishedLease);
     server.close(() => process.exit(0));
   });
 }
 
-module.exports = { TerminalBroker, ApiError, createServer, descriptorPath, shellQuote, classifyCommand, updateHumanInput, blockedScreen, spawnSshPipe, remoteBridgeCommand, directRootIdentity, nativeRootKind, recoveryGuard, verifyRecoveryInputs, initializeOwnedDisplay };
+module.exports = { TerminalBroker, ApiError, createServer, descriptorPath, shellQuote, classifyCommand, updateHumanInput, blockedScreen, spawnSshPipe, remoteBridgeCommand, directRootIdentity, nativeRootKind, recoveryGuard, verifyRecoveryInputs, requireRefusedRecoveryPort, initializeOwnedDisplay, recoveryOwnerState, validOwnerIdentity, ownBrokerIdentity, parseOwnerLock };
 if (require.main === module) main().catch(error => { process.stderr.write(`Terminal broker failed: ${error.message}\n`); process.exitCode = 1; });

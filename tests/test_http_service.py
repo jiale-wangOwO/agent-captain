@@ -53,6 +53,27 @@ class HttpServiceTests(unittest.TestCase):
         with self.assertRaises(HTTPError):
             self.request("/health", Host="evil.example")
 
+    def test_brand_mark_is_an_explicit_safe_local_static_route(self):
+        with self.opener.open(self.server.origin + "/agent-captain-mark.svg", timeout=10) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.headers["Content-Type"], "image/svg+xml")
+            self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+            self.assertIn("default-src 'self'", response.headers["Content-Security-Policy"])
+            self.assertIsNone(response.headers.get("Set-Cookie"))
+            payload = response.read().decode("utf-8")
+        self.assertIn("<svg", payload)
+        self.assertIn("AgentCaptain", payload)
+        self.assertNotRegex(payload, r"<script|<image|<foreignObject|href=|test-private-token")
+        for path in ("/assets/agent-captain-logo.svg", "/assets/pron-hub-logo.png",
+                     "/../assets/agent-captain-logo.svg", "/%2e%2e/assets/agent-captain-logo.svg",
+                     "/agent-captain-mark.svg/../config.json"):
+            with self.subTest(path=path), self.assertRaises(HTTPError) as error:
+                self.opener.open(self.server.origin + path, timeout=10)
+            self.assertEqual(error.exception.code, 404)
+        with self.assertRaises(HTTPError) as error:
+            self.opener.open(Request(self.server.origin + "/agent-captain-mark.svg", headers={"Host": "evil.example"}), timeout=10)
+        self.assertEqual(error.exception.code, 403)
+
     def test_web_cookie_requires_same_origin_for_mutation(self):
         cookie = "ceo_session=test-private-token"
         with self.assertRaises(HTTPError):
@@ -98,6 +119,20 @@ class HttpServiceTests(unittest.TestCase):
         result = self.request("/api/directories/list", {"host": "local"}, Cookie=cookie, Origin=self.server.origin)
         self.assertEqual(calls, [("local", "")])
         self.assertEqual(result["home"], "C:/Users/Test")
+
+    def test_create_preflight_connection_error_is_safe_and_does_not_create_terminal(self):
+        message = "无法通过 SSH 读取远端目录；请检查机器连接及远端 python3 后重试。"
+        self.hub.directories.home = Mock(side_effect=RuntimeError(message))
+        cookie = "ceo_session=test-private-token"
+        with self.assertRaises(HTTPError) as error:
+            self.request("/api/terminals/create", {
+                "host": "local", "cwd": "", "title": "New work", "request_key": "directory-preflight"
+            }, Cookie=cookie, Origin=self.server.origin)
+        self.assertEqual(error.exception.code, 400)
+        self.assertEqual(json.load(error.exception), {"error": message})
+        self.hub.terminals.create.assert_not_called()
+        self.assertEqual(self.hub.store.agents(), [])
+        self.assertEqual(self.hub.store.db.execute("select count(*) from operations").fetchone()[0], 0)
 
     def test_close_route_needs_explicit_confirmation(self):
         calls = []

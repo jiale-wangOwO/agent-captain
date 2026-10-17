@@ -5,8 +5,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const net = require('node:net');
 const { EventEmitter } = require('node:events');
-const { recoveryGuard, verifyRecoveryInputs, createServer, TerminalBroker, initializeOwnedDisplay } = require('../terminal_broker.cjs');
+const { recoveryGuard, verifyRecoveryInputs, createServer, TerminalBroker, initializeOwnedDisplay, requireRefusedRecoveryPort, ownBrokerIdentity, recoveryOwnerState, parseOwnerLock } = require('../terminal_broker.cjs');
 
 function fixture(t, withLock = true) {
   const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pron-recovery-test-')));
@@ -30,7 +31,12 @@ function fixture(t, withLock = true) {
     maintenance_sha256: maint.hash, maintenance_identity: maint.identity,
     lock_sha256: lock?.hash ?? null, lock_identity: lock?.identity ?? null,
     pid: 123, recovery_id: 'a'.repeat(32) };
-  return { filename, reference, maintenance, guard, valid: () => recoveryGuard(filename, JSON.stringify(guard), reference) };
+  const refresh = () => {
+    const nextDescriptor = snapshot(filename), nextLock = fs.existsSync(`${filename}.lock`) ? snapshot(`${filename}.lock`) : null;
+    Object.assign(guard, { descriptor_sha256: nextDescriptor.hash, descriptor_identity: nextDescriptor.identity,
+      lock_sha256: nextLock?.hash ?? null, lock_identity: nextLock?.identity ?? null });
+  };
+  return { filename, reference, maintenance, guard, refresh, valid: () => recoveryGuard(filename, JSON.stringify(guard), reference) };
 }
 
 test('recovery child accepts exact bounded guard but not altered schema, path, generation, or identities', t => {
@@ -84,6 +90,49 @@ test('previously absent lock cannot be silently reclaimed if another owner claim
   assert.equal(verifyRecoveryInputs(f.filename, f.guard, { pidState: () => 'dead' }).pid, 123);
   fs.writeFileSync(`${f.filename}.lock`, '999');
   assert.throws(() => verifyRecoveryInputs(f.filename, f.guard, { pidState: () => 'dead' }), /recovery refused/);
+});
+
+test('shared OS helper records the real current Node birth as a decimal string and exact broker script', () => {
+  const identity = ownBrokerIdentity();
+  assert.equal(typeof identity.birth, 'string');
+  assert.equal(identity.executable.toLowerCase(), process.execPath.toLowerCase());
+  assert.equal(identity.script, path.resolve(__dirname, '../terminal_broker.cjs'));
+  assert.equal(recoveryOwnerState({ pid: process.pid, owner_identity: identity }), 'alive');
+  assert.equal(recoveryOwnerState({ pid: process.pid, owner_identity: { ...identity, birth: 'win-filetime:1' } }), 'dead');
+  assert.equal(recoveryOwnerState({ pid: process.pid }), 'unknown');
+});
+
+test('birth-bearing descriptor and private lease must prove the same dead owner, not merely an equal PID', t => {
+  const f = fixture(t);
+  const identity = ownBrokerIdentity();
+  const descriptor = JSON.parse(fs.readFileSync(f.filename));
+  descriptor.owner_identity = identity;
+  fs.writeFileSync(f.filename, JSON.stringify(descriptor));
+  fs.writeFileSync(`${f.filename}.lock`, JSON.stringify({ pid: 123, owner_identity: identity }));
+  f.refresh();
+  const inspected = [];
+  const ownerState = owner => { inspected.push(owner); return 'dead'; };
+  assert.equal(verifyRecoveryInputs(f.filename, f.valid(), { ownerState }).pid, 123);
+  assert.equal(inspected.length, 2);
+  assert.deepEqual(inspected.map(owner => owner.owner_identity), [identity, identity]);
+  for (const state of ['alive', 'unknown']) {
+    assert.throws(() => verifyRecoveryInputs(f.filename, f.valid(), { ownerState: () => state }), /recovery refused/);
+  }
+  fs.writeFileSync(`${f.filename}.lock`, JSON.stringify({ pid: 123, owner_identity: { ...identity, birth: 'win-filetime:1' } }));
+  f.refresh();
+  assert.throws(() => verifyRecoveryInputs(f.filename, f.valid(), { ownerState }), /recovery refused/);
+  assert.equal(parseOwnerLock(fs.readFileSync(`${f.filename}.lock`)).owner_identity.birth, 'win-filetime:1');
+});
+
+test('recovery child cannot claim its own lease using the current PID but another process birth', t => {
+  const f = fixture(t);
+  const identity = ownBrokerIdentity();
+  fs.writeFileSync(`${f.filename}.lock`, JSON.stringify({ pid: process.pid, owner_identity: { ...identity, birth: 'win-filetime:1' } }));
+  assert.throws(() => verifyRecoveryInputs(f.filename, f.guard,
+    { ownedLock: true, ownerState: () => 'dead', currentOwnerIdentity: identity }), /recovery refused/);
+  fs.writeFileSync(`${f.filename}.lock`, JSON.stringify({ pid: process.pid, owner_identity: identity }));
+  assert.equal(verifyRecoveryInputs(f.filename, f.guard,
+    { ownedLock: true, ownerState: () => 'dead', currentOwnerIdentity: identity }).pid, 123);
 });
 
 test('after lock acquisition recovery validates only its own lease plus original descriptor and pointer', t => {
@@ -141,4 +190,33 @@ test('startup cleanup does not remove a replaced lease even if its text contains
   }), /fixture concurrent replacement/);
   assert.equal(fs.readFileSync(lockfile, 'utf8'), String(process.pid));
   assert.equal(fs.readFileSync(`${lockfile}.original`, 'utf8'), String(process.pid));
+});
+
+test('recovery port proof waits up to four seconds but accepts only affirmative refusal', async t => {
+  for (const outcome of ['ECONNREFUSED', 'timeout', 'connect', 'ETIMEDOUT', 'ECONNRESET', 'EACCES']) {
+    await t.test(outcome, async child => {
+      const probe = new EventEmitter();
+      let budget, expire, timer;
+      probe.setTimeout = (milliseconds, callback) => {
+        budget = milliseconds; expire = callback; timer = setTimeout(callback, milliseconds); return probe;
+      };
+      probe.destroy = () => { clearTimeout(timer); probe.destroyed = true; return probe; };
+      child.mock.method(net, 'createConnection', options => {
+        assert.deepEqual(options, { host: '127.0.0.1', port: 39001 });
+        return probe;
+      });
+      const pending = requireRefusedRecoveryPort('http://127.0.0.1:39001');
+      const checked = outcome === 'ECONNREFUSED' ? pending : assert.rejects(pending, /not affirmatively offline; recovery refused/);
+      assert.equal(budget, 4000);
+      if (outcome === 'timeout') expire();
+      else if (outcome === 'connect') probe.emit('connect');
+      else if (outcome === 'ECONNREFUSED') {
+        // Match the observed Windows loopback RST arriving after about 2s.
+        await new Promise(resolve => setTimeout(resolve, 2050));
+        probe.emit('error', Object.assign(new Error('fixture refusal'), { code: outcome }));
+      } else probe.emit('error', Object.assign(new Error('fixture unknown'), { code: outcome }));
+      await checked;
+      assert.equal(probe.destroyed, true);
+    });
+  }
 });

@@ -34,7 +34,9 @@ class ControllerBridgeTests(unittest.TestCase):
         self.thread.start()
         self.path.write_text(json.dumps({"url": f"http://127.0.0.1:{self.server.server_port}",
                                         "token": "private-controller-cap", "controller_id": "controller-test"}), encoding="utf-8")
-        self.env = patch.dict(os.environ, {"PRON_HUB_CONNECTION_FILE": str(self.path), "PRON_HUB_CONTROLLER_ID": "controller-test", "CEO_HUB_CONNECTION_FILE": "not-this-descriptor"})
+        self.env = patch.dict(os.environ, {"AGENTCAPTAIN_CONNECTION_FILE": "", "AGENTCAPTAIN_CONTROLLER_ID": "",
+                                          "PRON_HUB_CONNECTION_FILE": str(self.path), "PRON_HUB_CONTROLLER_ID": "controller-test",
+                                          "CEO_HUB_CONNECTION_FILE": "not-this-descriptor"})
         self.env.start()
 
     def tearDown(self):
@@ -57,7 +59,8 @@ class ControllerBridgeTests(unittest.TestCase):
         self.assertNotIn("private-controller-cap", json.dumps(response))
         bridge.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
         response = bridge.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        self.assertEqual(len(response["result"]["tools"]), 11)
+        self.assertEqual(len(response["result"]["tools"]), 12)
+        self.assertIn("get_management_policy", {item["name"] for item in response["result"]["tools"]})
         self.assertEqual(response["result"]["tools"][-1]["name"], "get_controller_context")
         self.assertEqual(len(self.calls), 1)
 
@@ -69,6 +72,29 @@ class ControllerBridgeTests(unittest.TestCase):
         self.reply = {"mode": "scoped", "controller_id": "different"}
         self.assertIn("error", self.initialize(bridge))
         self.assertFalse(bridge.initialized)
+
+    def test_canonical_manager_identity_wins_without_touching_legacy_descriptor(self):
+        with patch.dict(os.environ, {"AGENTCAPTAIN_CONNECTION_FILE": str(self.path),
+                                     "AGENTCAPTAIN_CONTROLLER_ID": "controller-test",
+                                     "PRON_HUB_CONNECTION_FILE": "unused-legacy.json",
+                                     "PRON_HUB_CONTROLLER_ID": "unused-legacy-identity"}):
+            bridge = mcp_bridge.McpBridge()
+            response = self.initialize(bridge)
+        self.assertIn("result", response)
+        self.assertTrue(bridge.scoped)
+        self.assertEqual(response["result"]["serverInfo"]["title"], "AgentCaptain")
+        self.assertEqual(self.calls, [{"body": {"tool": "get_controller_context", "arguments": {}},
+                                      "auth": "Bearer private-controller-cap"}])
+        self.assertNotIn("private-controller-cap", json.dumps(response))
+
+    def test_bad_canonical_manager_identity_never_downgrades_to_legacy_access(self):
+        with patch.dict(os.environ, {"AGENTCAPTAIN_CONNECTION_FILE": str(self.path),
+                                     "AGENTCAPTAIN_CONTROLLER_ID": "different-canonical-identity"}):
+            bridge = mcp_bridge.McpBridge()
+            response = self.initialize(bridge)
+        self.assertIn("error", response)
+        self.assertFalse(bridge.initialized)
+        self.assertEqual(self.calls, [])
 
     def test_missing_controller_descriptor_cannot_initialize_as_legacy(self):
         self.path.unlink()
@@ -82,7 +108,8 @@ class ControllerBridgeTests(unittest.TestCase):
             self.assertIn("result", self.initialize(bridge))
             bridge.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
             response = bridge.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        self.assertEqual(len(response["result"]["tools"]), 10)
+        self.assertEqual(len(response["result"]["tools"]), 11)
+        self.assertIn("get_management_policy", {item["name"] for item in response["result"]["tools"]})
 
     def test_custom_terminal_descriptor_and_logs_only_change_child_environment(self):
         runtime = Path(self.temp.name) / "broker-logs"
@@ -92,12 +119,12 @@ class ControllerBridgeTests(unittest.TestCase):
             process = Mock()
             process.poll.return_value = None
             with patch.object(client, "running", side_effect=[False, True]), patch("terminal_client.shutil.which", return_value="fake-node"), \
-                 patch("terminal_client.subprocess.Popen", return_value=process) as launch:
+                 patch("terminal_client.launch_background", return_value=process) as launch:
                 client.ensure_started()
             self.assertEqual(os.environ["CEO_HUB_TERMINAL_FILE"], "unchanged-worker.json")
-            self.assertEqual(launch.call_args.kwargs["env"]["CEO_HUB_TERMINAL_FILE"], str(custom.resolve()))
-            self.assertTrue((runtime / "terminal.out.log").is_file())
-            self.assertTrue((runtime / "terminal.err.log").is_file())
+            self.assertEqual(launch.call_args.kwargs["env_overrides"]["CEO_HUB_TERMINAL_FILE"], str(custom.resolve()))
+            self.assertEqual(launch.call_args.kwargs["stdout_path"], runtime / "terminal.out.log")
+            self.assertEqual(launch.call_args.kwargs["stderr_path"], runtime / "terminal.err.log")
 
 
 if __name__ == "__main__":

@@ -132,7 +132,7 @@ class LegacyAppServerHub:
         if not row:
             raise ValueError("未登记的 agent；请先在 UI 选择并连接该对话。")
         if plugin and not row["active"]:
-            raise PermissionError("该 agent 未激活；当前 Codex CEO 无权读取或控制。请在 UI 纳入管理范围。")
+            raise PermissionError("该 agent 未激活；当前 Codex Captain 无权读取或控制。请在 UI 纳入管理范围。")
         owner = self.owners.get((host, thread_id))
         connected = bool(owner and not owner.closed)
         blocked = any(message.get("params", {}).get("threadId") == thread_id for _, message in self.pending_approvals.values())
@@ -183,7 +183,7 @@ class LegacyAppServerHub:
             if not active:
                 for row in self.store.outbox("queued"):
                     if row["host"] == host and row["thread_id"] == thread_id and row["origin"] == "plugin":
-                        self.store.update_outbox(row["id"], "scope_revoked", error="已移出 CEO 管理范围；尚未提交的消息不会执行。")
+                        self.store.update_outbox(row["id"], "scope_revoked", error="已移出 Captain 管理范围；尚未提交的消息不会执行。")
         self.record_event("agent_activated" if active else "agent_deactivated", host=host, thread_id=thread_id)
         return self.get_agent(host, thread_id)
 
@@ -265,7 +265,7 @@ class LegacyAppServerHub:
             for row in pending:
                 agent = self.get_agent(host, thread_id)
                 if agent["access"] != "control" or (row["origin"] == "plugin" and not agent["active"]):
-                    self.store.update_outbox(row["id"], "scope_revoked", error="控制权限或 CEO 管理范围已撤销。")
+                    self.store.update_outbox(row["id"], "scope_revoked", error="控制权限或 Captain 管理范围已撤销。")
                     continue
                 self.store.update_outbox(row["id"], "submitting")
                 self.active[(host, thread_id)] = "submitting"
@@ -383,7 +383,7 @@ class LegacyAppServerHub:
         if tool == "list_active_agents":
             return {"agents": self.attached_agents(active_only=True), "controller": "current_codex_conversation",
                     "connected_hosts": [host for host, state in self.connections.items() if state.get("connected")],
-                    "scope_note": "只列 UI 已激活的 agent。没有全盘扫描，没有独立 CEO 模型。"}
+                    "scope_note": "只列 UI 已激活的 agent。没有全盘扫描，没有独立 Captain 模型。"}
         if tool == "poll_events":
             return self.plugin_events(arguments.get("after", 0), arguments.get("timeout_seconds", 0))
         if tool == "create_agent":

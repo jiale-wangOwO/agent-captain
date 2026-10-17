@@ -1,6 +1,6 @@
 # Third-party notices
 
-PRON Hub's own source is covered by [LICENSE](LICENSE). Dependencies keep their own licenses and copyright notices; the project's MIT license does not replace them.
+AgentCaptain's own source is covered by [LICENSE](LICENSE). Dependencies keep their own licenses and copyright notices; the project's MIT license does not replace them.
 
 The source repository does not vendor `node_modules/`. `npm ci` installs the locked dependencies. If you distribute installed dependencies, browser assets, native binaries, or a packaged application, preserve the upstream license text and copyright notices with those copies.
 
@@ -24,4 +24,4 @@ This is a practical attribution summary, **not an exhaustive transitive-dependen
 
 ## External software and names
 
-OpenSSH, Python, Node.js, tmux, Codex, and optional tunnel adapters are separate installations rather than copied project code. Their names and marks remain the property of their owners. PRON Hub is not an official OpenAI product and does not imply endorsement by any listed project.
+OpenSSH, Python, Node.js, tmux, Codex, and optional tunnel adapters are separate installations rather than copied project code. Their names and marks remain the property of their owners. AgentCaptain is not an official OpenAI product and does not imply endorsement by any listed project.

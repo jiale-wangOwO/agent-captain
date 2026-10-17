@@ -8,6 +8,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -15,6 +16,8 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse, quote
 import uuid
+from process_identity import broker_owner_state, observe_process, valid_owner_identity
+from background_process import BackgroundLaunchUnknown, background_environment, launch_background
 
 ROOT = Path(__file__).resolve().parent
 BROKER_WIRE_VERSION = "0.3.0"
@@ -105,6 +108,8 @@ class TerminalClient:
         if generation is not None and (not isinstance(generation, str) or len(generation) != 32
                                        or any(char not in "0123456789abcdef" for char in generation)):
             raise ValueError("Invalid terminal broker recovery generation")
+        if "owner_identity" in data and not valid_owner_identity(data["owner_identity"], ROOT / "terminal_broker.cjs"):
+            raise ValueError("Invalid terminal broker process birth identity")
         return data
 
     def descriptor(self):
@@ -196,13 +201,37 @@ class TerminalClient:
     def _port_state(url):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-                probe.settimeout(1)
+                # Windows loopback refusal can arrive after about two seconds.
+                # Wait for that affirmative result; timeouts remain unknown.
+                probe.settimeout(4)
                 result = probe.connect_ex(("127.0.0.1", urlparse(url).port))
             if result == 0:
                 return "open"
             return "refused" if result in (errno.ECONNREFUSED, 10061) else "unknown"
         except (OSError, ValueError):
             return "unknown"
+
+    def _owner_state(self, data):
+        state = self._pid_state(data["pid"])
+        if state != "alive":
+            return state
+        return broker_owner_state(data["pid"], data.get("owner_identity"), ROOT / "terminal_broker.cjs",
+                                  observation=observe_process(data["pid"]))
+
+    @staticmethod
+    def _lock_owner(raw):
+        try:
+            legacy = int(raw.decode("ascii"))
+            if raw == str(legacy).encode("ascii") and 0 < legacy <= 2147483647:
+                return {"pid": legacy}
+        except (ValueError, UnicodeError):
+            pass
+        value = json.loads(raw)
+        if (not isinstance(value, dict) or set(value) != {"pid", "owner_identity"}
+                or type(value["pid"]) is not int or not 0 < value["pid"] <= 2147483647
+                or not valid_owner_identity(value["owner_identity"], ROOT / "terminal_broker.cjs")):
+            raise ValueError("Invalid broker lease owner")
+        return value
 
     @staticmethod
     def _snapshot_file(filename, limit):
@@ -285,7 +314,7 @@ class TerminalClient:
         # endpoint that refuses authentication is NOT a stale, replaceable owner.
         refused = False
         try:
-            health = self.request("/health", timeout=2)
+            health = self.request("/health", timeout=4)
             if (health.get("ok") is True and health.get("pid") == data["pid"]
                     and health.get("recovery_id") == data.get("recovery_id")
                     and health.get("version") == BROKER_WIRE_VERSION and self._context_unchanged(context)):
@@ -297,7 +326,7 @@ class TerminalClient:
             refused = True
         except Exception:
             pass
-        pid_state = self._pid_state(data["pid"])
+        pid_state = self._owner_state(data)
         if pid_state != "dead":
             return self._lifecycle("blocked" if pid_state == "alive" else "unknown",
                                    "bound_owner_alive" if pid_state == "alive" else "bound_owner_pid_unknown", data)
@@ -307,10 +336,10 @@ class TerminalClient:
         lock_snapshot = None
         if os.path.lexists(lock_file):
             try:
-                lock_snapshot = self._snapshot_file(lock_file, 64)
-                lock_pid = int(lock_snapshot["raw"].decode("ascii"))
-                if (lock_snapshot["raw"] != str(lock_pid).encode("ascii")
-                        or lock_pid != data["pid"] or self._pid_state(lock_pid) != "dead"):
+                lock_snapshot = self._snapshot_file(lock_file, 16384)
+                lock_owner = self._lock_owner(lock_snapshot["raw"])
+                if (lock_owner["pid"] != data["pid"] or lock_owner.get("owner_identity") != data.get("owner_identity")
+                        or self._owner_state(lock_owner) != "dead"):
                     raise ValueError()
             except (OSError, ValueError, UnicodeError):
                 return self._lifecycle("blocked", "bound_owner_lock_unknown", data)
@@ -367,7 +396,8 @@ class TerminalClient:
             except OSError:
                 return self._lifecycle("blocked", "bound_owner_maintenance_failed", data)
             maintenance_snapshot = None
-            spawned = False
+            launch_attempted = False
+            preserve_maintenance = False
             try:
                 maintenance_snapshot = self._snapshot_file(maintenance, 256)
                 status = self._bound_check(context, own_maintenance=True)
@@ -391,12 +421,16 @@ class TerminalClient:
                 environment = os.environ.copy()
                 environment["CEO_HUB_TERMINAL_FILE"] = guard["descriptor_file"]
                 environment["CEO_HUB_RECOVERY_GUARD"] = json.dumps(guard, separators=(",", ":"))
+                environment["CEO_HUB_IDENTITY_PYTHON"] = sys.executable
                 self.runtime.mkdir(parents=True, exist_ok=True)
-                with (self.runtime / "terminal.out.log").open("ab") as output, (self.runtime / "terminal.err.log").open("ab") as error:
-                    process = subprocess.Popen([node, str(ROOT / "terminal_broker.cjs")], cwd=ROOT,
-                        stdin=subprocess.DEVNULL, stdout=output, stderr=error,
-                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), start_new_session=os.name != "nt", env=environment)
-                spawned = True
+                # A launch timeout may happen after WMI accepted its one-shot
+                # plan. Fence the attempt *before* crossing that boundary. An
+                # exception is not proof that no broker child was started.
+                launch_attempted = True
+                preserve_maintenance = True
+                process = launch_background([node, str(ROOT / "terminal_broker.cjs")], cwd=ROOT,
+                    stdout_path=self.runtime / "terminal.out.log", stderr_path=self.runtime / "terminal.err.log",
+                    env_overrides=background_environment(environment))
                 deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:
                     if not self._context_unchanged(context, include_descriptor=False) or not self._same_snapshot(maintenance_snapshot):
@@ -417,6 +451,7 @@ class TerminalClient:
                                 if (not self._context_unchanged(context, include_descriptor=False)
                                         or self._read_descriptor_file(context["descriptor"]["path"]) != current):
                                     return self._lifecycle("unknown", "bound_owner_changed_after_launch", current)
+                                preserve_maintenance = False
                                 return self._lifecycle("ready", "bound_owner_recovered", current,
                                                        owner_recovered=True, previous_pid=data["pid"],
                                                        previous_recovery_id=data.get("recovery_id"), recovery_id=recovery_id, started_empty=True)
@@ -427,14 +462,20 @@ class TerminalClient:
                     if process.poll() is not None:
                         # No optimistic success or retry: a child that failed
                         # publication may have raced another maintenance action.
+                        preserve_maintenance = False
                         return self._lifecycle("unknown", "bound_owner_launch_failed", data)
                     time.sleep(.15)
                 return self._lifecycle("unknown", "bound_owner_readiness_unknown", data)
-            except (OSError, ValueError, TypeError):
-                return self._lifecycle("unknown" if spawned else "blocked",
-                                       "bound_owner_readiness_unknown" if spawned else "bound_owner_maintenance_failed", data)
+            except BackgroundLaunchUnknown:
+                # The launcher's private receipt/launch ID remain available to
+                # operators for reconciliation. Never expose those paths or
+                # remove this original fence on an unconfirmed dispatch.
+                return self._lifecycle("unknown", "bound_owner_readiness_unknown", data)
+            except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError):
+                return self._lifecycle("unknown" if launch_attempted else "blocked",
+                                       "bound_owner_readiness_unknown" if launch_attempted else "bound_owner_maintenance_failed", data)
             finally:
-                if maintenance_snapshot is not None and self._same_snapshot(maintenance_snapshot):
+                if not preserve_maintenance and maintenance_snapshot is not None and self._same_snapshot(maintenance_snapshot):
                     try:
                         maintenance.unlink()
                     except OSError:
@@ -460,16 +501,16 @@ class TerminalClient:
             if not node:
                 raise RuntimeError("需要 Node.js；请安装 Node.js 后执行 npm ci。")
             if not (ROOT / "node_modules/node-pty").exists():
-                raise RuntimeError("终端依赖未安装；请在 PRON Hub 目录执行 npm ci。")
+                raise RuntimeError("终端依赖未安装；请在 AgentCaptain 目录执行 npm ci。")
             logs = self.runtime
             logs.mkdir(parents=True, exist_ok=True)
             inherited = self.launch_env() if callable(self.launch_env) else self.launch_env
             environment = os.environ.copy() if inherited is None else dict(inherited)
             environment["CEO_HUB_TERMINAL_FILE"] = str(chosen)
-            with (logs / "terminal.out.log").open("ab") as output, (logs / "terminal.err.log").open("ab") as error:
-                process = subprocess.Popen([node, str(ROOT / "terminal_broker.cjs")], cwd=ROOT,
-                    stdin=subprocess.DEVNULL, stdout=output, stderr=error,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), start_new_session=os.name != "nt", env=environment)
+            environment["CEO_HUB_IDENTITY_PYTHON"] = sys.executable
+            process = launch_background([node, str(ROOT / "terminal_broker.cjs")], cwd=ROOT,
+                stdout_path=logs / "terminal.out.log", stderr_path=logs / "terminal.err.log",
+                env_overrides=background_environment(environment))
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 if process.poll() is not None:
@@ -487,6 +528,48 @@ class TerminalClient:
         except Exception:
             return []
 
+    def ended_display_snapshot(self, terminal_id):
+        """Private, authenticated evidence for one terminated SSH display.
+
+        Never turn a failed registry query into an empty registry, launch an
+        owner, attach a PTY, or expose the descriptor capability. File-content
+        identities also bind older owners that have no recovery generation.
+        Callers must compare two receipts around their remote read-only proof.
+        """
+        try:
+            context = self._bound_context()
+            if self._bound_check(context).get("state") != "ready":
+                raise ValueError()
+            reply = self.request("/sessions", timeout=3)
+            records = reply.get("sessions") if isinstance(reply, dict) else None
+            if not isinstance(records, list) or any(not isinstance(item, dict) or not isinstance(item.get("id"), str) for item in records):
+                raise ValueError()
+            selected = [item for item in records if item["id"] == terminal_id]
+            if len(selected) != 1:
+                raise ValueError()
+            record = selected[0]
+            pid = record.get("pid")
+            if type(pid) is not int or not 0 < pid <= 2147483647:
+                raise ValueError()
+            pid_state = self._pid_state(pid)
+            if self._bound_check(context).get("state") != "ready":
+                raise ValueError()
+            data = context["data"]
+            return {"owner": {key: data.get(key) for key in ("pid", "version", "recovery_id")},
+                    "reference_sha256": context["reference"]["sha256"],
+                    "descriptor_sha256": context["descriptor"]["sha256"],
+                    "reference_identity": context["reference"]["identity"],
+                    "descriptor_identity": context["descriptor"]["identity"],
+                    # An old owner without a birth record was already proven
+                    # alive by two authenticated health checks above. Preserve
+                    # that compatible receipt; offline recovery still requires
+                    # the stricter _owner_state evidence and never trusts PID
+                    # existence alone.
+                    "owner_pid_state": self._owner_state(data) if "owner_identity" in data else self._pid_state(data["pid"]),
+                    "session": record, "display_pid_state": pid_state}
+        except Exception:
+            raise BrokerError("原显示结束证据尚不能确认；保留未知结果，不重复附着。", "ended_display_unconfirmed") from None
+
     def create(self, body):
         self.ensure_started()
         return self.request("/sessions/create", body)
@@ -501,6 +584,7 @@ class TerminalClient:
                     "connected": snapshot["connected"], "state": snapshot["state"], "status": snapshot["state"],
                     "command": snapshot.get("command", ""), "agent_ready": snapshot.get("agent_ready", False),
                     "blocked_reason": snapshot.get("blocked_reason"), "human_busy": snapshot.get("human_busy", False),
+                    "human_input": snapshot.get("human_input"),
                     "cols": snapshot["cols"], "rows": snapshot["rows"]}
         return self.request(f"/sessions/{quote(terminal_id, safe='')}/output?after={max(0, int(after))}")
 

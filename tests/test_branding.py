@@ -1,4 +1,4 @@
-"""PRON Hub public branding and backward-compatible identity contracts.
+"""AgentCaptain public branding and backward-compatible identity contracts.
 
 Tests use temporary configuration/storage and never connect to a real broker,
 SSH host, model, or user conversation.
@@ -33,11 +33,19 @@ class InertTerminals:
 
 
 class BrandingTests(unittest.TestCase):
+    def setUp(self):
+        environment = patch.dict(os.environ, {key: "" for key in (
+            "AGENTCAPTAIN_CONNECTION_FILE", "PRON_HUB_CONNECTION_FILE", "CEO_HUB_CONNECTION_FILE",
+            "AGENTCAPTAIN_CONTROLLER_ID", "PRON_HUB_CONTROLLER_ID")})
+        environment.start()
+        self.addCleanup(environment.stop)
+
     def test_public_release_versions_agree_without_changing_broker_protocol(self):
         package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
         lock = json.loads((ROOT / "package-lock.json").read_text(encoding="utf-8"))
-        self.assertEqual(package["name"], "pron-hub-terminal")
-        self.assertIn("Personal Remote Ops & Nodes Hub", package["description"])
+        self.assertEqual(package["name"], "agent-captain-terminal")
+        self.assertIn("AgentCaptain", package["description"])
+        self.assertIn("One captain for agents across your machines.", package["description"])
         self.assertEqual({hub.VERSION, terminal_hub.VERSION, mcp_bridge.VERSION,
                           package["version"], lock["version"], lock["packages"][""]["version"]}, {"0.7.0"})
         self.assertEqual(lock["name"], package["name"])
@@ -49,10 +57,11 @@ class BrandingTests(unittest.TestCase):
         configuration = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))
         self.assertEqual(configuration, {"hosts": {"local": {"label": "本机", "transport": "local"}}})
         html = (ROOT / "web/index.html").read_text(encoding="utf-8")
-        self.assertIn("<title>PRON Hub", html)
-        self.assertIn('aria-label="PRON Hub"', html)
-        self.assertIn("Personal Remote Ops &amp; Nodes Hub", html)
-        self.assertNotIn("CEO Hub", html)
+        self.assertIn("<title>AgentCaptain · 队长</title>", html)
+        self.assertIn('aria-label="AgentCaptain · 队长"', html)
+        self.assertIn("One captain for agents across your machines.", html)
+        self.assertIn("一个主控，统筹本机与远程 Agent。", html)
+        self.assertNotRegex(html, r"PRON|CEO|Personal Remote Ops|pron-hub-logo")
         # Build forbidden legacy values at runtime so a release-source scanner
         # does not mistake this regression's negative assertions for fixtures.
         for private_host in ("host" + "316" + "public", "server" + "316", "316" + " 服务器",
@@ -101,16 +110,45 @@ class BrandingTests(unittest.TestCase):
                                   "params": {"protocolVersion": "2025-11-25", "capabilities": {},
                                              "clientInfo": {"name": "branding-test", "version": "1"}}})
         info = response["result"]["serverInfo"]
-        self.assertEqual(info, {"name": "ceo-hub", "title": "PRON Hub", "version": "0.7.0"})
+        self.assertEqual(info, {"name": "ceo-hub", "title": "AgentCaptain", "version": "0.7.0"})
 
     def test_existing_connection_override_is_shared_by_service_and_adapter(self):
         with tempfile.TemporaryDirectory() as folder:
             descriptor = Path(folder) / "service.json"
             descriptor.write_text(json.dumps({"url": "http://127.0.0.1:8766", "token": "test-private-capability"}), encoding="utf-8")
-            with patch.dict(os.environ, {"CEO_HUB_CONNECTION_FILE": str(descriptor)}):
+            with patch.dict(os.environ, {"AGENTCAPTAIN_CONNECTION_FILE": "", "PRON_HUB_CONNECTION_FILE": "",
+                                         "CEO_HUB_CONNECTION_FILE": str(descriptor)}):
                 self.assertEqual(app.connection_file(), descriptor)
                 self.assertEqual(mcp_bridge.connection_file(), descriptor)
                 self.assertEqual(mcp_bridge.read_connection(), ("http://127.0.0.1:8766", "test-private-capability"))
+
+    def test_canonical_and_legacy_descriptor_overrides_have_explicit_precedence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            canonical, prior, oldest = (base / name for name in ("captain.json", "prior.json", "oldest.json"))
+            values = {"AGENTCAPTAIN_CONNECTION_FILE": str(canonical), "PRON_HUB_CONNECTION_FILE": str(prior),
+                      "CEO_HUB_CONNECTION_FILE": str(oldest)}
+            for missing, expected in (((), canonical), (("AGENTCAPTAIN_CONNECTION_FILE",), prior),
+                                      (("AGENTCAPTAIN_CONNECTION_FILE", "PRON_HUB_CONNECTION_FILE"), oldest)):
+                environment = dict(values) | {key: "" for key in missing}
+                with self.subTest(missing=missing), patch.dict(os.environ, environment):
+                    self.assertEqual(app.connection_file(), expected)
+                    self.assertEqual(mcp_bridge.connection_file(), expected)
+
+    def test_invalid_canonical_override_never_falls_back_to_another_capability(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            legacy = base / "legacy.json"
+            legacy.write_text(json.dumps({"url": "http://127.0.0.1:8766", "token": "legacy-private-capability"}), encoding="utf-8")
+            missing = base / "missing-canonical.json"
+            with patch.dict(os.environ, {"AGENTCAPTAIN_CONNECTION_FILE": str(missing),
+                                         "PRON_HUB_CONNECTION_FILE": str(legacy), "CEO_HUB_CONNECTION_FILE": str(legacy)}):
+                self.assertEqual(app.connection_file(), missing)
+                self.assertEqual(mcp_bridge.connection_file(), missing)
+                with self.assertRaises(mcp_bridge.BridgeError) as error:
+                    mcp_bridge.read_connection()
+                self.assertIn("AgentCaptain", str(error.exception))
+                self.assertNotIn("legacy-private-capability", str(error.exception))
 
     def test_compatibility_state_paths_and_terminal_identifiers_are_unchanged(self):
         for module in (app, mcp_bridge):
@@ -126,8 +164,9 @@ class BrandingTests(unittest.TestCase):
         result = subprocess.run([sys.executable, str(ROOT / "app.py"), "--help"],
                                 capture_output=True, encoding="utf-8", timeout=10)
         self.assertEqual(result.returncode, 0)
-        self.assertIn("PRON Hub (Personal Remote Ops & Nodes Hub)", result.stdout)
-        self.assertNotIn("CEO Hub", result.stdout)
+        self.assertIn("AgentCaptain", result.stdout)
+        self.assertIn("一个主控，统筹本机与远程 Agent。", result.stdout)
+        self.assertNotRegex(result.stdout, r"PRON|CEO Hub|Personal Remote Ops")
 
 
 if __name__ == "__main__":

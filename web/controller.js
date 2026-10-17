@@ -16,7 +16,7 @@
   async function api(path, body) {
     const response = await fetch(path, body === undefined ? {credentials: 'same-origin', cache: 'no-store'} : {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) { const error = new Error(errorText(data.error) || `请求失败 (${response.status})`); error.status = response.status; error.code = data.code || data.error?.code; throw error; }
+    if (!response.ok) { const sessionError = uiSessionError(path, body, response.status, data); if (sessionError) throw sessionError; const error = new Error(errorText(data.error) || `请求失败 (${response.status})`); error.status = response.status; error.code = data.code || data.error?.code; throw error; }
     return data;
   }
   function accept(result) {
@@ -54,9 +54,9 @@
   }
   function render() {
     const c = model.controller;
-    $('#controller-title').textContent = c?.title || '从一条管理会话，协调你的工作。';
+    $('#controller-title').textContent = c?.title || '一个主控，统筹本机与远程 Agent。';
     $('#controller-state').textContent = model.unsupported ? '后台尚未加载管理会话功能' : !model.loaded ? '正在检查管理会话' : !c ? '尚未创建管理会话' : c.state === 'ready' && !isReady(c) ? '身份或工具尚未核验' : labels[c.state] || '状态待核对';
-    $('#controller-owner').textContent = c ? c.input_owner === 'hub' ? '当前入口：PRON Hub' : c.input_owner === 'desktop' ? '当前入口：Codex（待核验）' : '当前没有输入入口' : '';
+    $('#controller-owner').textContent = c ? c.input_owner === 'hub' ? '当前入口：AgentCaptain' : c.input_owner === 'desktop' ? '当前入口：Codex（待核验）' : '当前没有输入入口' : '';
     $('#controller-phase').textContent = c?.phase ? `阶段：${c.phase}` : '';
     $('#controller-scope-count').textContent = `自动管理 ${Number(c?.effective_worker_count ?? registeredWorkers().length)} 个工作会话`;
     $('#controller-primary').textContent = model.busy ? '正在处理原请求…' : c ? '继续管理' : '启动管理会话';
@@ -66,9 +66,9 @@
     $('#controller-desktop').disabled = model.busy || !c?.session_id || c.input_owner !== 'hub' || !isReady(c);
     displayError('#controller-error', model.error || errorText(c?.error));
     if (model.unsupported) $('#controller-description').textContent = '当前后台尚不支持管理会话。已有工作终端仍可使用；请在空闲时按维护流程更新服务，不会自动重启或创建另一套后台。';
-    else $('#controller-description').textContent = c ? '已连接的工作会话自动交给管理者协调，无需逐个激活或授权。工作 agent 保持原来的使用方式，你保留最终决策权。' : '在本机创建真实的 Codex 管理会话，自动管理已连接的工作会话。PRON Hub 准备角色和工具，你只需交代目标。';
+    else $('#controller-description').textContent = c ? 'Captain 统一派发任务、跟进进度、协调协作并审查交付。工作 agent 保持原来的使用方式，你保留最终决策权。' : '你定目标，Captain 负责派发、跟进、协调和交付审查。在本机 Codex 管理会话中统一带队，不必逐个终端来回切换。';
     $('#controller-panel-title').textContent = c?.title || '管理会话';
-    $('#controller-panel-note').textContent = c?.state === 'desktop_unverified' ? '已释放 Hub 输入入口并提供同一会话链接；尚未验证 Codex 桌面端已接管，Hub 不会继续写入。返回 Hub 时恢复准确的原 Session，不 fork 或重发任务。' : c?.state === 'needs_attention' ? '请在下面的真实终端完成登录、信任或权限确认。系统不会自动审批；完成后继续核验身份与管理工具。' : '这是本机 Codex 的真实终端。只初始化管理角色和工具，首次不派发业务任务；“终端连接”不等于“管理工具已就绪”。';
+    $('#controller-panel-note').textContent = c?.state === 'desktop_unverified' ? '已释放网页输入入口并提供同一会话链接；尚未验证 Codex 桌面端已接管，AgentCaptain 不会继续写入。返回网页时恢复准确的原 Session，不 fork 或重发任务。' : c?.state === 'needs_attention' ? '请在下面的真实终端完成登录、信任或权限确认。系统不会自动审批；完成后继续核验身份与管理工具。' : '这是本机 Codex 的真实终端。只初始化管理角色和工具，首次不派发业务任务；“终端连接”不等于“管理工具已就绪”。';
     const details = $('#controller-details'); details.replaceChildren();
     if (c) for (const [label, value] of [['Session', c.session_id || '身份尚未核验'], ['管理工作区', c.workspace], ['终端 ID', c.terminal_id || '尚未创建'], ['工具握手', c.tools_ready ? '已核验' : '尚未核验'], ['桌面接管', c.desktop_verified ? '已核验' : '尚未核验']]) { details.append(node('dt', label), node('dd', value || '—')); }
     const term = model.terminal;
@@ -98,7 +98,7 @@
       if (!$('#controller-panel').hidden && model.controller?.terminal_id && (!model.terminal || model.terminal.terminalId !== model.controller.terminal_id)) await showTerminal(model.controller);
       model.unsupported = false; model.error = '';
     } catch (error) {
-      model.unsupported = [404, 405, 501].includes(error.status);
+      model.unsupported = error.code !== 'ui_session_expired' && [404, 405, 501].includes(error.status);
       model.error = model.unsupported ? '当前服务未提供管理会话 API。已有工作终端不受影响。' : `检查管理会话失败：${error.message}。保留原操作，不重复创建。`;
     } finally { model.loaded = true; model.checking = false; render(); }
   }
@@ -195,6 +195,7 @@
     const session = model.terminal; if (!session) return;
     // There is intentionally no close, resume, or flush-on-destroy request.
     disposeTerminalScroll(session);
+    disposeTerminalInput(session);
     session.disposed = true; clearTimeout(session.timer); clearTimeout(session.inputTimer); clearTimeout(session.resizeTimer); session.observer?.disconnect(); session.term.dispose(); model.terminal = null; $('#controller-terminal').replaceChildren();
   }
   async function showTerminal(c = model.controller) {
@@ -204,15 +205,13 @@
     disposeDisplay();
     if (!window.Terminal || !window.FitAddon?.FitAddon) throw new Error('终端组件未加载，请刷新页面。');
     const term = new window.Terminal({fontFamily: 'Cascadia Mono, Consolas, monospace', fontSize: 13, lineHeight: 1.15, cursorBlink: true, scrollback: 5000, convertEol: false, allowProposedApi: true, theme: {background: '#101517', foreground: '#dde7e0', cursor: '#b9e9c7', selectionBackground: '#45634f99'}});
-    for (const identifier of [{final: 'n'}, {prefix: '?', final: 'n'}, {final: 'c'}, {prefix: '>', final: 'c'}, {final: 't'}]) term.parser.registerCsiHandler(identifier, () => true);
-    for (const identifier of [{intermediates: '$', final: 'q'}, {intermediates: '+', final: 'q'}]) term.parser.registerDcsHandler(identifier, () => true);
-    for (const identifier of [4, 10, 11, 12]) term.parser.registerOscHandler(identifier, data => data.split(';').includes('?'));
+    installTerminalProtocolGuards(term);
     const fit = new window.FitAddon.FitAddon(); term.loadAddon(fit); term.open($('#controller-terminal'));
     const session = {kind: 'controller', controllerId: c.id, terminalId: c.terminal_id, key: c.id, agent: c, term, fit, seq: 0, initialized: false, disposed: false, displayConnected: c.connected !== false, closing: false, closed: c.state === 'closed', pasteReading: false, wheelRemainder: 0, wheelBuffer: null, frameGeneration: 0, forceSnapshot: true, writingFrame: false, restoringFrame: false, fitPending: false, resizeGeneration: 0, resizePending: false, targetSize: '', timer: null, inputTimer: null, resizeTimer: null, input: '', inputChain: Promise.resolve(), size: '', observer: null, inputError: '', pollError: '', resizeError: ''};
     model.terminal = session;
     initializeTerminalScroll(session);
     term.attachCustomKeyEventHandler(event => handleTerminalKey(session, event)); term.attachCustomWheelEventHandler?.(() => false);
-    term.onData(data => { if (!canWriteTerminal(session)) return; session.input += data; if (!session.inputTimer) session.inputTimer = setTimeout(() => flushTerminalInput(session), 12); });
+    initializeTerminalInput(session);
     term.onResize(({cols, rows}) => scheduleResize(session, cols, rows));
     session.observer = new ResizeObserver(() => { if (!session.disposed && !$('#controller-panel').hidden && $('#controller-terminal').clientWidth > 0) safeFit(session); }); session.observer.observe($('#controller-terminal'));
     await pollTerminal(session); render();
@@ -233,7 +232,7 @@
       if (typeof result.url !== 'string' || result.url !== `codex://threads/${c.session_id}`) throw new Error('后台没有返回准确原会话链接，已停止打开操作。');
       accept(result); const link = $('#controller-desktop-link'); link.href = result.url; link.hidden = false;
       $('#controller-desktop-submit').hidden = true;
-      displayError('#controller-desktop-error', 'Hub 输入入口已释放。点击链接打开同一会话；桌面接管与工具可用性尚未核验。');
+      displayError('#controller-desktop-error', '网页输入入口已释放。点击链接打开同一会话；桌面接管与工具可用性尚未核验。');
     } finally { model.busy = false; render(); }
   }
   async function closeManager() {

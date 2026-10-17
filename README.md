@@ -1,16 +1,26 @@
-# PRON Hub
+# AgentCaptain · 队长
 
 <p align="center">
-  <img src="assets/pron-hub-logo.png" alt="PRON Hub" width="640">
+  <img src="assets/agent-captain-logo.svg" alt="AgentCaptain" width="640">
 </p>
 
-**Personal Remote Ops & Nodes Hub** — one Codex conversation to coordinate your connected working agents, on your computer and remote Linux machines.
+**One captain for agents across your machines.**
+
+Manage local and remote coding agents through one lead agent. Your Captain turns goals into assignments, follows up with workers, reviews delivery evidence, and brings decisions back to you.
 
 [中文说明](README.zh-CN.md) · [Agent workbench](docs/agent-workbench.md) · [Management-session design and limits](docs/management-session-product.md) · [SSH transport contract](docs/ssh-transport.md) · [Codex maintenance](docs/codex-maintenance.md) · [Security](SECURITY.md)
 
-PRON Hub is a single-user, local-first connection service for Codex. **Version 0.7 makes connected work automatically manageable:** name sessions directly on their cards or detail view, then coordinate registered workers across machines without activation switches or per-worker grant checklists. Search, filters, pinning, and safe reconnection remain available. The management-session MVP introduced in 0.5 creates a real local Codex conversation with its role, tools, and authenticated management identity initialized. That integration remains experimental; version-specific live integration and desktop transfer are not certified by the unit tests.
+AgentCaptain is a single-user, local-first management workspace for coding agents on your computer and remote Linux machines. **Version 0.7 makes connected work automatically manageable:** name sessions directly on their cards or detail view, then coordinate registered workers across machines without activation switches or per-worker grant checklists. Search, filters, pinning, and safe reconnection remain available. The management-session MVP introduced in 0.5 creates a real local Codex conversation with its role, tools, and authenticated management identity initialized. That integration remains experimental; version-specific live integration and desktop transfer are not certified by the unit tests.
 
-The **controller is the model in that native Codex conversation**, acting as your CEO: collect evidence, convey tasks, and summarize what needs your decision. The human retains final authority. The Hub runs no separate model backend, does not inject a CEO role into workers, and does not automatically wake a dormant conversation. Each worker still has a real terminal in which you can use your normal Codex workflow or talk directly.
+The **Captain is the model in that native Codex conversation**, acting as a domain-expert manager: clarify unfamiliar details with the responsible worker, break down and delegate objectives, follow up and correct gaps, review evidence, and summarize decisions. The workers do the actual engineering; the Captain does not default to bypassing them with its own SSH or code changes. The human retains final authority. AgentCaptain runs no separate model backend, does not change the workers' roles, and does not automatically wake a dormant conversation. Each worker still has a real terminal in which you can use your normal Codex workflow or talk directly.
+
+## Why use it
+
+- **One conversation instead of many windows.** Ask your Captain for progress and blockers across local and remote machines.
+- **Delegate the management work.** Give an objective; let the Captain handle assignments, follow-up, coordination, and review within your instructions.
+- **Keep evidence and delivery straight.** Read actual session output, distinguish a completion claim from verified results, and reconcile uncertain submissions before sending again.
+- **Stay close to the work.** Open any worker's real terminal and talk directly whenever you want.
+- **Keep the final say.** You set priorities and boundaries; consequential decisions, sign-in, trust, and approvals remain yours.
 
 ## What it does
 
@@ -19,7 +29,7 @@ The **controller is the model in that native Codex conversation**, acting as you
 - Prepares a dedicated management workspace, persistent role guidance, and an independently authenticated MCP tool connection without manual plugin installation.
 - Opens a shell in a selected project directory, or the user's home directory.
 - Lets the human and controller read and write the same worker terminal.
-- Automatically includes all registered open shared workers, including temporarily disconnected original terminals; separately limits new-worker creation to explicitly chosen machine/project-directory roots. Startup does not scan every machine or history.
+- Automatically includes all registered open shared workers, including temporarily disconnected original terminals; separately limits new-worker creation by Hub-created managers to explicitly chosen machine/project-directory roots. Startup does not scan every machine or history.
 - Reads persisted output from an exactly associated Codex session, including paginated long messages and optional tool records.
 - Preserves delivery identity across uncertain submissions and gives human typing priority.
 - Keeps terminals independent of the browser and Python UI service.
@@ -42,20 +52,22 @@ The Python service uses the standard library. Terminal dependencies are installe
 ## Quick start
 
 ```sh
-git clone https://github.com/jiale-wangOwO/pron-hub.git
-cd pron-hub
+git clone https://github.com/jiale-wangOwO/agent-captain.git agent-captain
+cd agent-captain
 npm ci
 python app.py serve
 ```
 
-Open [http://127.0.0.1:8766/](http://127.0.0.1:8766/). If the repository is still private, cloning requires GitHub access.
+Open [http://127.0.0.1:8766/](http://127.0.0.1:8766/). The repository is private, so cloning requires GitHub access.
 
-On Windows, `run_pron.cmd` starts the per-user service in the background and opens the UI. `run_ceo.cmd` is a backward-compatible alias. For explicit background operation:
+On Windows, `run_agentcaptain.cmd` starts the per-user service in the background and opens the UI. For explicit background operation:
 
 ```sh
 python service.py start
 python service.py status
 ```
+
+On Windows, the background launcher uses a hidden, current-user WMI process factory so the web service and terminal broker outlive a temporary launching tool. Private, one-shot launch plans, actual-process identity receipts, and exit logs are stored under `.runtime/background-launches/`. Launch uncertainty is reported explicitly, with no automatic retry or fallback into the launching tool's process lifetime. This does not make the services immune to Windows shutdown, sleep, or network loss. See [background service lifecycle](docs/background-service.md) for diagnostics and recovery boundaries.
 
 No administrator service or automatic startup is installed. A fresh configuration contains **only the local machine**. Add remote machines yourself in the UI, using a generic SSH alias such as `dev-workstation`; credentials remain in your existing SSH setup.
 
@@ -69,7 +81,7 @@ No administrator service or automatic startup is installed. A fresh configuratio
 
 For this workflow, **do not manually install the legacy plugin**: the Hub-generated manager already receives its identity-specific tool configuration. Before starting, make sure your local Codex installation and normal account/provider setup work. If initialization fails or its outcome is unknown, inspect the reported phase and original identity; the Hub does not delete locks, fork, or restart the shared Codex background server to conceal an error.
 
-The default management workspace is outside the source checkout: `%LOCALAPPDATA%/PRONHub/management-workspaces/<controller-id>` on Windows, or `$XDG_STATE_HOME/pron-hub/management-workspaces/<controller-id>` (default `~/.local/state/...`) on Linux/macOS. This avoids trusting the whole Hub repository just to enter a manager. Codex may still require you to confirm trust for that new owned directory; the Hub never accepts this prompt for you.
+New management workspaces are outside the source checkout: `%LOCALAPPDATA%/AgentCaptain/management-workspaces/<controller-id>` on Windows, or `$XDG_STATE_HOME/agent-captain/management-workspaces/<controller-id>` (default `~/.local/state/...`) on Linux/macOS. Already registered workspaces retain their exact saved paths; renaming the product does not move them. This avoids trusting the whole repository just to enter a Captain. Codex may still require you to confirm trust for that new owned directory; AgentCaptain never accepts this prompt for you.
 
 The first self-check inherits your model/reasoning settings and can take several minutes. Its asynchronous launch remains visible; the Hub does not switch models or start duplicates because it is slow. Initialization is bounded to ten minutes, preserving any verified Session ID for reconciliation and exact resume after a timeout.
 
@@ -84,6 +96,14 @@ For example:
 > Read the authorized slides and server workers, summarize actual progress and evidence, and list decisions I need to make. Do not send new tasks yet.
 
 > Send this fix request to the authorized server worker, then summarize its result and verification.
+
+### Manage an objective, not every message
+
+Giving the manager an objective authorizes relevant investigation, questions to the responsible worker, delegation, clarifications, follow-up, corrections, and collection of acceptance evidence within that scope. You do not need to approve each ordinary management message again. A read-only request remains read-only; a materially expanded goal, a new permission boundary, or an unrelated destructive/external action still requires your decision. Login, secrets, trust and worker approval prompts remain yours, and new-worker creation by Hub-created managers still requires configured machine/project roots.
+
+The manager first reads the selected worker's latest actual conversation output and existing delivery state, rather than scanning every machine or redispatching work already in progress. If it lacks domain context, it asks that worker for the authoritative source, current revision, relevant failures and next steps. It then sends normal user-style tasks or questions with a clear objective and acceptance criteria—no hidden management protocol or worker role change. Repository investigation, implementation, tests and PR-state checks belong to the worker; the manager reviews the results and requests missing evidence or rework. Platform maintenance is a separate engineering role only when you explicitly ask to fix the Hub or its connection tooling.
+
+Reports distinguish **submitted**, **working**, **reported / awaiting acceptance**, **verified**, and **blocked**. A written input or a worker's completion claim is not verified completion: the report needs the applicable specification/revision, test commands and results, artifacts and remaining gaps. If you designate the latest specification as authoritative, the worker must verify that upstream revision rather than assume an expected fix has landed. See the [management contract](docs/management-session-product.md) for the full loop and boundaries. Follow-up here does not imply automatic background model wake-ups or an unattended scheduler.
 
 ### Continue in the Codex desktop app (experimental)
 
@@ -106,7 +126,7 @@ Workers and managers are separate records and terminal services. A manager is no
 
 ## Optional: connect an existing Codex chat with the legacy plugin
 
-This is a compatibility path for a chat you already run, not a required step for Hub-created management sessions. Both paths can manage the same registered open shared workers; neither requires a global activation list or a per-manager worker checklist. A Hub-created manager retains its independent authenticated identity, lifecycle, delivery records, and explicit new-creation directory settings. The identity-only `get_controller_context` tool is not available to legacy credentials; legacy and manager creation privileges remain separately enforced.
+This is a compatibility path for a chat you already run, not a required step for Hub-created management sessions. Both paths can manage the same registered open shared workers; neither requires a global activation list or a per-manager worker checklist. A Hub-created manager retains its independent authenticated identity, lifecycle, delivery records, and explicit new-creation directory settings. The identity-only `get_controller_context` tool is not available to legacy credentials. The existing-chat plugin uses a shared service credential and retains its compatibility creation channel; it does not enforce an independent manager's creation-directory roots. Prefer a Hub-created management session when you need those explicit directory limits. This compatibility channel does not authorize unrelated tasks or bypass human approvals; see [the security boundary](SECURITY.md#legacy-existing-chat-integration).
 
 First prepare a **machine-local** marketplace from the repository root:
 
@@ -118,7 +138,7 @@ The script prints `marketplace_root` and installation commands. Register the pri
 
 ```sh
 codex plugin marketplace add "<printed marketplace_root>"
-codex plugin add pron-hub@pron-hub-local
+codex plugin add agent-captain@agent-captain-local
 ```
 
 The generator only creates files. It does **not** install the plugin, edit Codex settings, read a service token, or restart anything. The generated MCP command uses the Python interpreter that ran the script, an absolute path to its retained bridge, and a non-secret reference to the checkout's service descriptor. If you move the checkout, regenerate the plugin configuration.
@@ -129,7 +149,7 @@ The generator only creates files. It does **not** install the plugin, edit Codex
 python scripts/configure_plugin.py --output .runtime/plugin-marketplace-v2
 ```
 
-Existing outputs are deliberately not overwritten. The repository's `pron-hub-source` catalog is an unconfigured, **skill-only** source template, not a connected Hub; do not install it as a substitute for the generated `pron-hub-local` marketplace. This integration is local, not an official public-directory listing or a cloud-accessible MCP service.
+Existing outputs are deliberately not overwritten. The repository's `agent-captain-source` catalog is an unconfigured, **skill-only** source template, not a connected service; do not install it as a substitute for the generated `agent-captain-local` marketplace. This integration is local, not an official public-directory listing or a cloud-accessible MCP service.
 
 If tools do not appear in an existing chat, select the plugin in a new chat. Reload the Codex app only when necessary; installing a plugin does not replace the tool context of an already-running chat. See the [official plugin CLI reference](https://learn.chatgpt.com/docs/cli/reference) for client-side commands.
 
@@ -179,15 +199,15 @@ The management terminal is separate from worker terminals. **Hide display** or c
 | `read_agent` | Read its exact-session output with pagination |
 | `send_agent_message` | Deliver ordinary user task text |
 | `send_terminal_input` | Send explicitly authorized raw terminal input |
-| `create_agent` | Open a worker terminal in the identity's explicitly configured connected-machine/project-directory roots; the result automatically joins registered work |
+| `create_agent` | Open a worker terminal; Hub-created managers are limited to their explicitly configured connected-machine/project-directory roots. The result automatically joins registered work |
 | `get_delivery` | Reconcile a durable submission |
 | `poll_events` | Read incremental registered-worker events |
 
-Read, write, delivery lookup, and event tools authenticate their caller and operate on registered open shared workers, not arbitrary sessions or manager terminals. Worker membership is automatic, but connection/readiness checks, human-draft protection, closed-session rejection, and independent lifecycle checks remain enforced. Existing queued writes retain their original request identity; old unknown or revoked operations are not replayed by this migration. Creating new workers still requires the caller's explicit machine/project-directory roots. The service does not automatically approve worker actions, recursively create managers, or start a new controller turn.
+Read, write, delivery lookup, and event tools authenticate their caller and operate on registered open shared workers, not arbitrary sessions or manager terminals. Worker membership is automatic, but connection/readiness checks, human-draft protection, closed-session rejection, and independent lifecycle checks remain enforced. Existing queued writes retain their original request identity; old unknown or revoked operations are not replayed by this migration. Creating new workers through a Hub-created manager requires its explicit machine/project-directory roots; the existing-chat plugin retains the separate compatibility channel described above. The service does not automatically approve worker actions, recursively create managers, or start a new controller turn.
 
 ## SSH and tunnels
 
-Remote operation remains ordinary OpenSSH. An external tool such as TunnelTerm may expose a loopback SSH port or `ProxyCommand`; PRON Hub does not import that tool or manage its login/window lifecycle.
+Remote operation remains ordinary OpenSSH. An external tool such as TunnelTerm may expose a loopback SSH port or `ProxyCommand`; AgentCaptain does not import that tool or manage its login/window lifecycle.
 
 Validate a **persistent display plus concurrent short SSH requests**, not just one successful banner or `ssh host true`. Keep host-key checking enabled. See [the SSH transport contract](docs/ssh-transport.md) for stdin, concurrency, resize, and disconnect requirements.
 
@@ -203,7 +223,7 @@ For an already-running older bridge, an explicitly registered private `.runtime/
 
 Each manager's workspace contains its own `AGENTS.md` and `.codex/config.toml`. Its identity-specific connection is also supplied explicitly when the Hub launches or resumes Codex, without changing the user's global configuration. Whether a desktop client loads the same project configuration and trust is part of the experimental transfer check, not an assumed guarantee. The Hub's API checks and creation-root limits do not restrict Codex's unrelated native tools, other plugins, or the user's SSH/system permissions.
 
-The rename deliberately preserves existing wire/state identifiers: `ceo_hub`, `ceo-hub`, `ceohub-`, `CEO_HUB_*`, `%LOCALAPPDATA%/CEOHub/`, and `~/.local/state/ceo-hub/`. Do not delete installed legacy plugin caches or rewrite working terminal IDs as a branding migration.
+Branding updates do not replace running workers, rewrite terminal or native Session IDs, or replay tasks. Existing installations retain their saved records and compatibility identifiers; see [rename and compatibility notes](docs/rebranding.md) before changing a deployment.
 
 Browser key input is not saved in the delivery database. Terminal output may still contain secrets a user prints, and controller-submitted tasks/deliveries are local private data. Do not commit `.runtime/`, connection descriptors, authentication files, or personal configuration. This is not a multi-tenant security boundary; do not expose the service on the public network.
 
@@ -235,4 +255,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development and [SECURITY.md](SECURIT
 
 ## License
 
-PRON Hub is MIT licensed. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). OpenAI, Codex, and third-party service names belong to their respective owners; this is an independent project.
+AgentCaptain is MIT licensed. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). OpenAI, Codex, and third-party service names belong to their respective owners; this is an independent project.

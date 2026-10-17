@@ -85,7 +85,7 @@ class ConnectionAnchorTests(unittest.TestCase):
         client = TerminalClient()
         self.assertEqual(client.descriptor()["pid"], 123)
         with patch.object(client, "request", return_value={"pid": 123, "version": "0.3.0"}), \
-             patch("terminal_client.subprocess.Popen", side_effect=AssertionError("must not restart original broker")):
+             patch("terminal_client.launch_background", side_effect=AssertionError("must not restart original broker")):
             client.ensure_started()
         self.assertEqual(set(json.loads(self.reference.read_text())), {"descriptor_file"})
         self.assertNotIn("fixture-capability-not-real", self.reference.read_text())
@@ -110,7 +110,7 @@ class ConnectionAnchorTests(unittest.TestCase):
             with self.subTest(value=list(value)):
                 with self.assertRaises(ValueError):
                     terminal_client.descriptor_path()
-                with patch("terminal_client.subprocess.Popen", side_effect=AssertionError("no alternate owner")):
+                with patch("terminal_client.launch_background", side_effect=AssertionError("no alternate owner")):
                     self.assertEqual(client.sessions(), [])
                     with self.assertRaises(BrokerError) as error:
                         client.create({"cwd": str(self.root)})
@@ -126,7 +126,7 @@ class ConnectionAnchorTests(unittest.TestCase):
         for changes in ({"url": "http://other.example:3"}, {"token": "bad\ncredential"}, {}):
             self.descriptor(**changes)
             with patch.object(client, "request", side_effect=ConnectionError("bound owner unavailable")), \
-                 patch("terminal_client.subprocess.Popen", side_effect=AssertionError("no second owner")):
+                 patch("terminal_client.launch_background", side_effect=AssertionError("no second owner")):
                 with self.assertRaises(BrokerError) as error:
                     client.create({"cwd": str(self.root)})
                 self.assertEqual(error.exception.code, "bound_transport_unavailable")
@@ -140,9 +140,9 @@ class ConnectionAnchorTests(unittest.TestCase):
         with patch.object(client, "running", side_effect=[False, True]), \
              patch("terminal_client.shutil.which", return_value="fake-node"), \
              patch.object(Path, "exists", return_value=True), \
-             patch("terminal_client.subprocess.Popen", return_value=process) as launch:
+             patch("terminal_client.launch_background", return_value=process) as launch:
             client.ensure_started()
-        self.assertEqual(launch.call_args.kwargs["env"]["CEO_HUB_TERMINAL_FILE"], str(self.legacy_terminal.resolve()))
+        self.assertEqual(launch.call_args.kwargs["env_overrides"]["CEO_HUB_TERMINAL_FILE"], str(self.legacy_terminal.resolve()))
         self.assertEqual(os.environ["CEO_HUB_TERMINAL_FILE"], "")
         self.assertEqual(json.loads(self.reference.read_text())["descriptor_file"], str(self.legacy_terminal.resolve()))
 
@@ -164,7 +164,7 @@ class ConnectionAnchorTests(unittest.TestCase):
             self.pin()
             return True
         with patch.object(client, "running", side_effect=competing), \
-             patch("terminal_client.subprocess.Popen", side_effect=AssertionError("no replacement")):
+             patch("terminal_client.launch_background", side_effect=AssertionError("no replacement")):
             with self.assertRaises(BrokerError) as error:
                 client.ensure_started()
             self.assertEqual(error.exception.code, "bound_transport_unavailable")

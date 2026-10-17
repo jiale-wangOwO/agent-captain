@@ -20,6 +20,16 @@ let restoreAgentKey = agentKeyFromHash() || (typeof workbenchSaved.agent === 'st
 const renameDrafts = new Map();
 const reconnectOperations = new Map(Array.isArray(workbenchSaved.reconnect) ? workbenchSaved.reconnect.filter(entry => Array.isArray(entry) && typeof entry[0] === 'string' && typeof entry[1]?.requestKey === 'string') : []);
 const agentRecoveryNotices = new Map();
+const pendingCreateStorageKey = 'pron-hub.pending-terminal-create.v1';
+let pendingTerminalCreate = null, pendingCreateStorageError = false, submittingTerminalCreate = false;
+try {
+  const stored = terminalCreateStorage()?.getItem(pendingCreateStorageKey);
+  if (stored) {
+    const value = JSON.parse(stored);
+    if (value?.version !== 1 || !validTerminalCreateBody(value.body)) throw new Error('Invalid pending terminal request');
+    pendingTerminalCreate = value;
+  }
+} catch (_) { pendingCreateStorageError = true; }
 let displayServiceStatus = null, displayServiceCheck = null, displayServiceCheckedAt = 0, displayServiceApiMissing = false, displayRecoveryTarget = null;
 let reconnectReconcileTarget = null;
 const displayServiceHelp = '本机显示服务离线不等于远端任务退出。恢复只启动显示服务，不重启 Codex、不发送输入，也不重建已经结束的本机终端。';
@@ -84,9 +94,31 @@ function renderWorkbenchFilters() {
 }
 function dateText(value) { if (!value) return ''; const date = new Date(typeof value === 'number' ? value * (value < 1e12 ? 1000 : 1) : value); return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN'); }
 function toast(text) { $('#toast').textContent = text; $('#toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('#toast').hidden = true; }, 7500); }
+// These exact GET routes use the same deliberately opaque authentication
+// response in app.py. Do not reinterpret an arbitrary missing resource as auth.
+const protectedUiGetPaths = new Set(['/api/state', '/api/terminal-service/status', '/api/terminals/output', '/api/terminals/history', '/api/controllers', '/api/controllers/get', '/api/controllers/output']);
+function uiSessionError(path, body, status, data) {
+  const expired = status === 403 && data?.error === 'Invalid session or origin'
+    || body === undefined && status === 404 && protectedUiGetPaths.has(String(path).split('?')[0]) && data?.error === 'Not found or unauthorized';
+  return expired ? Object.assign(new Error('页面认证已失效，可能是 AgentCaptain 后台已重启。请刷新页面重新连接；已保存的原终端打开请求会保留，不会自动创建或重发输入。'), {code: 'ui_session_expired', status}) : null;
+}
 async function request(path, body) {
-  const response = await fetch(path, body === undefined ? {credentials: 'same-origin', cache: 'no-store'} : {method: 'POST', credentials: 'same-origin', keepalive: path === '/api/terminals/input', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
-  const data = await response.json().catch(() => ({})); if (!response.ok) { const error = new Error(typeof data.error === 'string' ? data.error : data.error?.message || `请求失败 (${response.status})`); error.status = response.status; error.code = data.code || data.error?.code; error.recovery = data.recovery; throw error; } return data;
+  let response;
+  try { response = await fetch(path, body === undefined ? {credentials: 'same-origin', cache: 'no-store'} : {method: 'POST', credentials: 'same-origin', keepalive: path === '/api/terminals/input', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)}); }
+  catch (_) { throw Object.assign(new Error('无法连接本机 AgentCaptain 后台，可能正在停止或重启。请先恢复后台；这不证明远端 SSH 或工作进程已经退出。未收到确认的请求不会自动重发。'), {code: 'hub_unreachable'}); }
+  let data;
+  try { data = await response.json(); }
+  catch (_) {
+    if (response.ok) throw Object.assign(new Error('AgentCaptain 后台响应格式异常，尚不能确认请求结果。请恢复后台后核对原请求，不要重新创建终端或重发输入。'), {code: 'hub_response_invalid', status: response.status});
+    data = {};
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw Object.assign(new Error('AgentCaptain 后台响应格式异常，尚不能确认请求结果。请核对原请求，不会自动重试。'), {code: 'hub_response_invalid', status: response.status});
+  if (!response.ok) {
+    const sessionError = uiSessionError(path, body, response.status, data);
+    if (sessionError) throw sessionError;
+    const error = new Error(typeof data.error === 'string' ? data.error : data.error?.message || `请求失败 (${response.status})`); error.status = response.status; error.code = data.code || data.error?.code; error.recovery = data.recovery; throw error;
+  }
+  return data;
 }
 async function action(element, task) { element.disabled = true; try { await task(); } catch (error) { toast(error.message); } finally { element.disabled = false; if (['terminal-connect', 'terminal-copy', 'terminal-paste'].includes(element.id)) renderDetail(); } }
 function button(text, className, onClick) { const element = node('button', text, className); element.type = 'button'; element.onclick = () => action(element, onClick); return element; }
@@ -353,6 +385,7 @@ function disposeTerminal() {
   if (terminalSession.input) flushTerminalInput(terminalSession);
   terminalSession.disposed = true; clearTimeout(terminalSession.timer); clearTimeout(terminalSession.inputTimer); clearTimeout(terminalSession.resizeTimer);
   disposeTerminalScroll(terminalSession);
+  disposeTerminalInput(terminalSession);
   terminalSession.observer.disconnect(); terminalSession.term.dispose(); terminalSession = null; $('#terminal').replaceChildren(); showTerminalError('');
   hideTerminalContext();
 }
@@ -663,23 +696,57 @@ async function writeTerminalFrame(session, data, reset, cols, rows) {
     else { view?.marker?.dispose?.(); rememberTerminalScroll(session); }
   }
 }
+function installTerminalProtocolGuards(term) {
+  // Only the canonical broker terminal answers remote queries. In particular,
+  // DECRQM ($p) otherwise generates a browser onData mode report with no key.
+  for (const identifier of [{final: 'n'}, {prefix: '?', final: 'n'}, {final: 'c'}, {prefix: '>', final: 'c'}, {final: 't'},
+    {intermediates: '$', final: 'p'}, {prefix: '?', intermediates: '$', final: 'p'}]) term.parser.registerCsiHandler(identifier, () => true);
+  for (const identifier of [{intermediates: '$', final: 'q'}, {intermediates: '+', final: 'q'}]) term.parser.registerDcsHandler(identifier, () => true);
+  for (const identifier of [4, 10, 11, 12]) term.parser.registerOscHandler(identifier, data => data.split(';').includes('?'));
+}
+function initializeTerminalInput(session) {
+  // xterm emits focus reports synchronously from its textarea DOM listeners.
+  // Do not classify every identical byte string as protocol: a real paste can
+  // contain those exact bytes. The captured event scopes this narrow filter.
+  const container = session.term.element, textarea = session.term.textarea;
+  const markFocus = event => {
+    if (session.disposed || !textarea || event.target !== textarea) return;
+    const marker = {data: event.type === 'focus' ? '\x1b[I' : '\x1b[O'};
+    session.focusProtocolEvent = marker;
+    Promise.resolve().then(() => { if (session.focusProtocolEvent === marker) session.focusProtocolEvent = null; });
+  };
+  if (container?.addEventListener && textarea) {
+    container.addEventListener('focus', markFocus, true); container.addEventListener('blur', markFocus, true);
+    session.inputFocusListeners = {container, markFocus};
+  }
+  session.term.onData(data => {
+    if (session.focusProtocolEvent?.data === data) { session.focusProtocolEvent = null; return; }
+    if (!canWriteTerminal(session)) return;
+    session.input += data;
+    if (!session.inputTimer) session.inputTimer = setTimeout(() => flushTerminalInput(session), 12);
+  });
+}
+function disposeTerminalInput(session) {
+  const listeners = session.inputFocusListeners;
+  if (listeners) {
+    listeners.container.removeEventListener('focus', listeners.markFocus, true);
+    listeners.container.removeEventListener('blur', listeners.markFocus, true);
+  }
+  session.inputFocusListeners = null; session.focusProtocolEvent = null;
+}
 async function openTerminal(agent, options = {}) {
   if (terminalSession?.key === agentKey(agent)) return;
   disposeTerminal();
   if (!window.Terminal || !window.FitAddon?.FitAddon) throw new Error('终端组件未加载。请刷新页面；若仍失败，请检查后台的本地 xterm 资源。');
   const term = new window.Terminal({fontFamily: 'Cascadia Mono, Consolas, monospace', fontSize: 13, lineHeight: 1.15, cursorBlink: true, scrollback: 5000, convertEol: false, allowProposedApi: true, theme: {background: '#101517', foreground: '#dde7e0', cursor: '#b9e9c7', selectionBackground: '#45634f99'}});
-  // The broker's canonical terminal answers device queries even with no UI.
-  // Consuming them here avoids duplicate replies being mistaken for user input.
-  for (const identifier of [{final: 'n'}, {prefix: '?', final: 'n'}, {final: 'c'}, {prefix: '>', final: 'c'}, {final: 't'}]) term.parser.registerCsiHandler(identifier, () => true);
-  for (const identifier of [{intermediates: '$', final: 'q'}, {intermediates: '+', final: 'q'}]) term.parser.registerDcsHandler(identifier, () => true);
-  for (const identifier of [4, 10, 11, 12]) term.parser.registerOscHandler(identifier, data => data.split(';').includes('?'));
+  installTerminalProtocolGuards(term);
   const fit = new window.FitAddon.FitAddon(); term.loadAddon(fit); term.open($('#terminal'));
-  const session = {key: agentKey(agent), agent, term, fit, seq: 0, initialized: false, disposed: false, displayConnected: agent.connected !== false, closing: false, closed: isClosedAgent(agent), pasteReading: false, wheelRemainder: 0, wheelBuffer: null, frameGeneration: 0, forceSnapshot: true, writingFrame: false, restoringFrame: false, fitPending: false, resizeGeneration: 0, resizePending: false, targetSize: '', timer: null, inputTimer: null, resizeTimer: null, input: '', inputChain: Promise.resolve(), size: '', observer: null, inputError: '', pollError: '', resizeError: ''};
+  const session = {key: agentKey(agent), agent, term, fit, seq: 0, initialized: false, disposed: false, displayConnected: agent.connected !== false, closing: false, closed: isClosedAgent(agent), pasteReading: false, wheelRemainder: 0, wheelBuffer: null, frameGeneration: 0, forceSnapshot: true, writingFrame: false, restoringFrame: false, fitPending: false, resizeGeneration: 0, resizePending: false, geometryUnknown: false, resizeRecoveryAttempts: 0, resizeRecoveryRetryAt: 0, targetSize: '', timer: null, inputTimer: null, resizeTimer: null, input: '', inputChain: Promise.resolve(), size: '', observer: null, inputError: '', pollError: '', resizeError: ''};
   terminalSession = session;
   initializeTerminalScroll(session);
   term.attachCustomKeyEventHandler(event => handleTerminalKey(session, event));
   term.attachCustomWheelEventHandler?.(() => false);
-  term.onData(data => { if (!canWriteTerminal(session)) return; session.input += data; if (!session.inputTimer) session.inputTimer = setTimeout(() => flushTerminalInput(session), 12); });
+  initializeTerminalInput(session);
   term.onResize(({cols, rows}) => scheduleResize(session, cols, rows));
   session.observer = new ResizeObserver(() => { if (!session.disposed && $('#terminal').clientWidth > 0) safeFit(session); }); session.observer.observe($('#terminal'));
   requestAnimationFrame(() => safeFit(session));
@@ -708,7 +775,16 @@ function scheduleResize(session, cols, rows) {
   if (window.PronTerminalHistory?.isActive?.(session)) return;
   if (session.kind === 'controller' && !window.PronController?.isDisplayVisible(session)) return;
   const size = `${cols}:${rows}`;
-  if ((session.resizePending && session.targetSize === size) || (!session.resizePending && session.size === size)) return;
+  const recoveringGeometry = session.geometryUnknown === true;
+  // A canonical snapshot only establishes how to parse the frame, not that the
+  // remote PTY accepted its size. An uncertain resize needs a verified resize
+  // ACK even when that snapshot reports the same dimensions as the browser.
+  if ((session.resizePending && session.targetSize === size) || (!session.resizePending && session.size === size && !recoveringGeometry)) return;
+  if (recoveringGeometry && (session.resizeRecoveryAttempts || 0) >= 3) {
+    session.resizeError = '终端尺寸仍未同步，自动重试已暂停。请检查机器连接后点「刷新画面」重试；不会重启工作会话。';
+    renderTerminalErrors(session); return;
+  }
+  if (recoveringGeometry && Date.now() < (session.resizeRecoveryRetryAt || 0)) return;
   session.targetSize = size;
   const generation = session.resizeGeneration = (session.resizeGeneration || 0) + 1;
   session.frameGeneration = (session.frameGeneration || 0) + 1;
@@ -718,15 +794,18 @@ function scheduleResize(session, cols, rows) {
     session.resizeTimer = null;
     if (window.PronTerminalHistory?.isActive?.(session)) { cancelPendingResize(session); return; }
     if (session.closing || session.closed || !sessionConnected(session)) { cancelPendingResize(session); return; }
+    if (recoveringGeometry) session.resizeRecoveryAttempts = (session.resizeRecoveryAttempts || 0) + 1;
     try {
       await request(terminalApiPath(session, 'resize'), {...terminalApiIdentity(session), cols, rows});
       if (session.disposed || !isTerminalDisplayCurrent(session) || generation !== session.resizeGeneration) return;
       session.size = size; session.resizePending = false; session.resizeError = '';
+      session.geometryUnknown = false; session.resizeRecoveryAttempts = 0; session.resizeRecoveryRetryAt = 0;
       session.frameGeneration = (session.frameGeneration || 0) + 1;
       session.forceSnapshot = true; renderTerminalErrors(session);
     } catch (error) {
       if (session.disposed || !isTerminalDisplayCurrent(session) || generation !== session.resizeGeneration) return;
       session.resizePending = false; session.targetSize = ''; session.forceSnapshot = true;
+      if (recoveringGeometry) session.resizeRecoveryRetryAt = Date.now() + Math.min(30000, 2000 * 2 ** (session.resizeRecoveryAttempts - 1));
       if (isDisconnectedError(error)) { updateDisplayConnection(session, false); renderTerminalErrors(session); return; }
       session.resizeError = `调整终端尺寸失败：${error.message}`; renderTerminalErrors(session);
     }
@@ -753,6 +832,10 @@ async function pollTerminal(session) {
     session.seq = Number(result.seq ?? result.current_seq ?? session.seq);
     session.forceSnapshot = false;
     if (reset && result.cols >= 2 && result.rows >= 2) session.size = `${result.cols}:${result.rows}`;
+    // Older snapshot adapters expose the same fence as blocked_reason instead
+    // of geometry_unknown. Neither pixels nor matching dimensions clear it.
+    session.geometryUnknown = result.geometry_unknown === true || result.blocked_reason === 'geometry_unknown';
+    if (!session.geometryUnknown) { session.resizeRecoveryAttempts = 0; session.resizeRecoveryRetryAt = 0; }
     session.initialized = true;
     const outputState = result.status || result.state;
     if (typeof result.connected === 'boolean') updateDisplayConnection(session, result.connected);
@@ -768,7 +851,7 @@ async function pollTerminal(session) {
   } catch (error) {
     if (session.disposed || !isTerminalDisplayCurrent(session)) return;
     terminalStatusElement(session).textContent = '终端连接暂时不可用';
-    session.pollError = `${error.message}。可尝试「重新连接」；重新连接不会自动创建第二个终端。`;
+    session.pollError = ['hub_unreachable', 'ui_session_expired', 'hub_response_invalid'].includes(error.code) ? error.message : `${error.message}。可尝试「重新连接」；重新连接不会自动创建第二个终端。`;
     renderTerminalErrors(session); delay = 2000;
   } finally {
     if (!session.disposed && isTerminalDisplayCurrent(session) && (session.kind !== 'controller' || window.PronController?.canReadDisplay(session))) session.timer = setTimeout(() => pollTerminal(session), delay);
@@ -964,18 +1047,18 @@ async function readHistory() {
   finally { if (generation === historyGeneration) $('#refresh-history').disabled = false; }
 }
 function renderOutbox() {
-  const box = $('#outbox'); box.replaceChildren(); const records = state.outbox.slice().sort((a, b) => (b.time || 0) - (a.time || 0)).slice(0, 8); if (!records.length) empty(box, '暂无 CEO 发送记录。你在终端直接输入时不会生成任务卡。');
+  const box = $('#outbox'); box.replaceChildren(); const records = state.outbox.slice().sort((a, b) => (b.time || 0) - (a.time || 0)).slice(0, 8); if (!records.length) empty(box, '暂无 Captain 发送记录。你在终端直接输入时不会生成任务卡。');
   for (const message of records) { const card = node('article', null, 'feedback-card'), agent = state.agents.find(item => item.host === message.host && item.thread_id === message.thread_id); card.append(node('strong', deliveryLabels[message.state] || message.state || '已记录'), node('div', `${agent?.alias || shortId(message.thread_id)} · ${message.host}`, 'muted'), node('p', message.text || '')); if (message.error) card.append(node('p', message.error, 'error-text')); box.append(card); }
 }
 function renderEvents(events) {
   for (const item of events || []) { const id = item.id ?? `${item.kind}:${JSON.stringify(item.data)}`; activity.set(id, item); if (typeof item.id === 'number') cursor = Math.max(cursor, item.id); }
   while (activity.size > 60) activity.delete(activity.keys().next().value); const list = $('#activity'); list.replaceChildren();
-  const kinds = {terminal_created: '打开工作终端', terminal_connected: '终端重新连接', terminal_exited: '显示连接已结束', terminal_closed: '关闭工作终端', terminal_state: '终端状态更新', terminal_output: '终端输出更新', terminal_input_submitted: 'CEO 终端输入送达', message_submitted: 'CEO 消息提交', agent_created: '创建工作终端', agent_attached: '连接工作终端', agent_updated: '工作名称或置顶已更新', agent_reconnected: '已附着原工作终端', agent_activated: '纳入 CEO 管理', agent_deactivated: '移出 CEO 管理', host_connected: '机器连接', host_unavailable: '机器连接不可用', host_configured: '机器配置更新', error: '后台错误'};
+  const kinds = {terminal_created: '打开工作终端', terminal_connected: '终端重新连接', terminal_exited: '显示连接已结束', terminal_closed: '关闭工作终端', terminal_state: '终端状态更新', terminal_output: '终端输出更新', terminal_input_submitted: 'Captain 终端输入送达', message_submitted: 'Captain 消息提交', agent_created: '创建工作终端', agent_attached: '连接工作终端', agent_updated: '工作名称或置顶已更新', agent_reconnected: '已附着原工作终端', agent_activated: '纳入 Captain 管理', agent_deactivated: '移出 Captain 管理', host_connected: '机器连接', host_unavailable: '机器连接不可用', host_configured: '机器配置更新', error: '后台错误'};
   for (const item of Array.from(activity.values()).reverse().slice(0, 12)) { const data = item.data || {}, row = node('article', null, 'event-row'); row.append(node('strong', kinds[item.kind] || item.kind || '后台事件'), node('span', [data.host, shortId(data.thread_id), dateText(item.time || item.created_at || item.timestamp)].filter(Boolean).join(' · '), 'muted')); if (data.text || data.reason) row.append(node('p', String(data.text || data.reason).slice(0, 280))); list.append(row); }
   if (!list.childElementCount) empty(list, '暂无连接事件。');
 }
 async function refresh(force = false) {
-  if (refreshing) { await refreshTask; if (!force) return; }
+  if (refreshing) { const previous = await refreshTask; if (!force) return previous; }
   refreshing = true;
   refreshTask = (async () => {
   try {
@@ -995,23 +1078,113 @@ async function refresh(force = false) {
     // Independent diagnostics must not delay the selected terminal's frame
     // pipeline or a reconnect ACK. This still performs a throttled GET only.
     void checkDisplayServiceStatus();
-  } catch (error) { $('#status').textContent = '后台服务未连接'; $('#status').classList.remove('online'); }
-  finally { refreshing = false; }
+    return true;
+  } catch (error) { $('#status').textContent = error.code === 'ui_session_expired' ? '页面认证已失效 · 请刷新页面' : error.code === 'hub_response_invalid' ? '后台响应异常 · 原工作会话未确认退出' : '后台服务未连接 · 请恢复 AgentCaptain 后台'; $('#status').classList.remove('online'); return false; }
+  finally { refreshing = false; renderPendingCreateNotice(); }
   })();
-  await refreshTask;
+  return await refreshTask;
 }
 function openMachine(host) { $('#machine-form').reset(); $('#machine-id').value = host?.id || ''; $('#machine-id').readOnly = !!host; $('#machine-label').value = host?.label || ''; $('#machine-transport').value = host?.transport || 'ssh'; $('#machine-target').value = host?.target || host?.targetAlias || ''; updateMachineTransport(); $('#machine-dialog').showModal(); }
 function updateMachineTransport() { const local = $('#machine-transport').value === 'local'; $('#machine-target').disabled = local; $('#machine-target').required = !local; }
+function terminalCreateStorage() { return window.sessionStorage || window.localStorage; }
+function validTerminalCreateBody(body) {
+  const boundedText = (value, max, empty = false) => typeof value === 'string' && (empty || !!value) && value.length <= max && !/[\x00-\x1f\x7f-\x9f]/.test(value);
+  return !!body && typeof body === 'object' && !Array.isArray(body)
+    && Object.keys(body).every(key => ['host', 'cwd', 'title', 'cols', 'rows', 'request_key', 'thread_id'].includes(key))
+    && boundedText(body.host, 200) && boundedText(body.cwd, 4096, true) && boundedText(body.title, 200)
+    && typeof body.request_key === 'string' && /^[A-Za-z0-9_.:-]{1,200}$/.test(body.request_key)
+    && Number.isInteger(body.cols) && body.cols >= 20 && body.cols <= 500 && Number.isInteger(body.rows) && body.rows >= 5 && body.rows <= 200
+    && (!Object.hasOwn(body, 'thread_id') || boundedText(body.thread_id, 200));
+}
+function storePendingTerminalCreate(body) {
+  const value = {version: 1, state: 'unknown', body: {...body}}, serialized = JSON.stringify(value);
+  try {
+    const storage = terminalCreateStorage();
+    if (!storage?.setItem || !storage?.getItem) throw new Error('Storage unavailable');
+    storage.setItem(pendingCreateStorageKey, serialized);
+    if (storage.getItem(pendingCreateStorageKey) !== serialized) throw new Error('Pending request was not retained');
+    pendingTerminalCreate = value;
+  } catch (_) {
+    throw Object.assign(new Error('浏览器无法可靠保存原终端请求，尚未发送创建。请允许本站会话存储后重试；不会在丢失请求键的情况下创建终端。'), {code: 'create_storage_unavailable'});
+  }
+  renderPendingCreateNotice();
+}
+function clearPendingTerminalCreate() {
+  try {
+    const storage = terminalCreateStorage();
+    if (storage?.removeItem) storage.removeItem(pendingCreateStorageKey); else storage?.setItem(pendingCreateStorageKey, '');
+    if (storage?.getItem(pendingCreateStorageKey)) throw new Error('Pending request still present');
+    pendingTerminalCreate = null;
+  } catch (_) { /* Retain a safe same-key receipt if completed-request cleanup fails. */ }
+  renderPendingCreateNotice();
+}
+function renderPendingCreateNotice() {
+  const pending = pendingTerminalCreate?.body;
+  $('#pending-create-notice').hidden = !pending && !pendingCreateStorageError;
+  $('#pending-create-open').disabled = !pending;
+  $('#pending-create-message').textContent = pendingCreateStorageError
+    ? '浏览器中有无法读取的终端打开记录；请先核对已有登记，不能用新请求绕过未确认结果。'
+    : pending ? `终端打开请求待核对：${state.hosts.find(host => host.id === pending.host)?.label || pending.host} · ${pending.title}。关闭此对话框或刷新当前页面会保留同一请求；不会自动创建终端。` : '';
+}
+function renderCreateRequestState(target = createTarget) {
+  if (!target || target !== createTarget) return;
+  const locked = !!target.fingerprint;
+  $('#create-title').disabled = locked; $('#create-cwd').disabled = locked; $('#browse-directory').disabled = locked;
+  $('#create-save').disabled = submittingTerminalCreate;
+  $('#create-save').textContent = locked ? '核对原打开请求' : '打开终端';
+  $('#create-status').hidden = !locked;
+  $('#create-status').textContent = locked ? '此请求已提交但结果仍需核对。机器、目录、名称和请求键已固定；点击仅以原请求核对，不自动启动第二个终端。' : '';
+}
 function openCreate(thread = null, hostId = selectedHost) {
-  createTarget = {host: hostId, thread_id: thread?.thread_id || thread?.id || null, requestKey: crypto.randomUUID(), fingerprint: null}; const host = state.hosts.find(item => item.id === hostId);
+  if (pendingCreateStorageError) { toast('原终端请求记录无法读取，请先核对已有登记；不会生成新请求键绕过未知结果。'); return; }
+  const pending = pendingTerminalCreate?.body;
+  if (pending) {
+    hostId = pending.host; thread = pending.thread_id ? {thread_id: pending.thread_id, title: pending.title, cwd: pending.cwd} : null;
+    createTarget = {host: hostId, thread_id: pending.thread_id || null, requestKey: pending.request_key, fingerprint: JSON.stringify(pending), body: {...pending}};
+  } else createTarget = {host: hostId, thread_id: thread?.thread_id || thread?.id || null, requestKey: crypto.randomUUID(), fingerprint: null};
+  const host = state.hosts.find(item => item.id === hostId);
   $('#create-form').reset(); $('#create-heading').textContent = thread ? '在终端中继续对话' : '打开工作终端'; $('#create-host').textContent = `运行位置：${host?.label || hostId}`;
-  $('#create-title').value = thread?.alias || thread?.title || thread?.name || ''; $('#create-cwd').value = thread?.cwd || '';
+  $('#create-title').value = pending?.title || thread?.alias || thread?.title || thread?.name || ''; $('#create-cwd').value = pending?.cwd ?? thread?.cwd ?? '';
   $('#create-title').placeholder = `留空使用：${defaultWorkerName(hostId, thread?.cwd)}`;
   $('#create-resume-guide').hidden = !thread; if (thread) $('#create-resume-command').textContent = resumeCommand(createTarget.thread_id);
+  renderCreateRequestState();
   $('#create-dialog').showModal();
 }
+async function submitCreateTerminal() {
+  if (!createTarget || submittingTerminalCreate) return;
+  const target = createTarget, cwd = $('#create-cwd').value.trim(), body = {host: target.host, cwd, title: $('#create-title').value.trim() || defaultWorkerName(target.host, cwd), cols: 120, rows: 32, request_key: target.requestKey};
+  if (target.thread_id) body.thread_id = target.thread_id;
+  const fingerprint = JSON.stringify(body);
+  if (target.fingerprint && target.fingerprint !== fingerprint || pendingTerminalCreate && JSON.stringify(pendingTerminalCreate.body) !== fingerprint) throw new Error('原打开请求结果尚未核对，不能修改配置或换请求键创建另一个终端。请先核对原请求。');
+  if (!validTerminalCreateBody(body)) throw new Error('终端设置无效，请核对机器、名称和目录；本次尚未发送。');
+  const host = state.hosts.find(item => item.id === body.host);
+  if (cwd && !cwd.startsWith('/') && !(host?.transport === 'local' && /^[A-Za-z]:[\\/]/.test(cwd))) throw new Error('项目目录必须是这台机器上的绝对路径，或留空使用主目录；本次尚未发送。');
+  storePendingTerminalCreate(body);
+  target.fingerprint = fingerprint; target.body = {...body}; submittingTerminalCreate = true; renderCreateRequestState(target);
+  try {
+    const result = await request('/api/terminals/create', body), agent = result.agent || result, id = agent.thread_id || result.thread_id;
+    if (typeof result.created !== 'boolean') throw new Error('后台尚未明确确认终端打开结果，原请求仍待核对；不会换键重复创建。');
+    if (typeof id !== 'string' || !id) throw new Error('后台没有返回终端标识，原打开请求仍待核对；不会换键重复创建。');
+    if (agent.host !== body.host || body.thread_id && id !== body.thread_id) throw new Error('后台返回的终端身份不匹配，原请求仍待核对，不会重复创建。');
+    if (result.created === false) {
+      const fresh = await refresh(true), registered = state.agents.find(item => item.host === body.host && item.thread_id === id);
+      if (!fresh || !registered) throw new Error('原终端打开结果尚未确认，登记表也暂不能重新核验。已保留原请求，请恢复后台后继续核对。');
+      if (typeof agent.terminal_id !== 'string' || !agent.terminal_id || registered.terminal_id !== agent.terminal_id || registered.connected !== true || !isTerminal(registered) || isClosedAgent(registered) || isClosingAgent(registered)) throw new Error('原终端已登记，但显示连接尚未确认。原请求仍保留；可收起此窗口核对该原终端，不会另行创建或重发输入。');
+    }
+    clearPendingTerminalCreate();
+    if (createTarget !== target) { await refresh(true); toast('此前的终端打开请求已处理，结果保留在对应机器的登记表中。'); return; }
+    selectedHost = body.host; selectedAgent = null; $('#create-dialog').close(); await refresh(true);
+    const registered = state.agents.find(item => item.host === body.host && item.thread_id === id);
+    if (registered) await selectAgent(registered); else toast('终端已登记，等待列表刷新；不会重复创建。');
+    if (result.created === false) toast('已重新核验同一登记的原终端显示连接；没有另行创建或重发输入。');
+    return result;
+  } catch (error) {
+    if (createTarget === target) { $('#create-status').hidden = false; $('#create-status').textContent = `${error.message} 原请求和配置已保留；恢复后台后可核对原打开请求。`; }
+    throw error;
+  } finally { submittingTerminalCreate = false; renderCreateRequestState(); renderPendingCreateNotice(); }
+}
 function openDirectories() {
-  if (!createTarget || !$('#create-dialog').open) return;
+  if (!createTarget || createTarget.fingerprint || !$('#create-dialog').open) return;
   directoryTarget = {create: createTarget, host: createTarget.host, view: null};
   const host = state.hosts.find(item => item.id === directoryTarget.host);
   $('#directory-host').textContent = `浏览位置：${host?.label || directoryTarget.host}`;
@@ -1039,13 +1212,14 @@ async function loadDirectory(path = '') {
   } catch (error) {
     if (!isCurrentDirectory(target, generation)) return;
     $('#directory-loading').textContent = ''; $('#directory-error').hidden = false;
-    $('#directory-error').textContent = `目录读取失败：${error.message}`;
-    $('#directory-note').textContent = '可以直接使用主目录创建终端，再手动 cd；也可以回到创建窗口输入绝对路径。';
+    const hostName = state.hosts.find(item => item.id === target.host)?.label || target.host;
+    $('#directory-error').textContent = `${hostName} 目录读取失败：${error.message}`;
+    $('#directory-note').textContent = '请先按上方提示检查机器连接、路径或权限，再重新读取目录。创建窗口的设置会保留；不会自动创建终端。';
   }
 }
 function selectDirectory(path) {
   const target = directoryTarget;
-  if (!target || createTarget !== target.create || !$('#create-dialog').open) { $('#directory-dialog').close(); return; }
+  if (!target || createTarget !== target.create || createTarget.fingerprint || !$('#create-dialog').open) { $('#directory-dialog').close(); return; }
   $('#create-cwd').value = path; $('#create-title').placeholder = `留空使用：${defaultWorkerName(createTarget.host, path)}`; $('#directory-dialog').close(); $('#create-cwd').focus();
 }
 function openCloseTerminal() {
@@ -1111,6 +1285,7 @@ $('#agent-host-filter').onchange = () => { agentFilters.host = $('#agent-host-fi
 $('#agent-status-filter').onchange = () => { agentFilters.status = $('#agent-status-filter').value; persistWorkbench(); renderAgents(true); };
 $('#all-machines').onclick = () => { agentFilters.host = ''; persistWorkbench(); renderHosts(); renderAgents(true); };
 $('#new-agent').onclick = () => { if (currentHost()) openCreate(null, agentFilters.host || selectedHost); };
+$('#pending-create-open').onclick = () => openCreate();
 $('#continue-terminal').onclick = () => { const agent = currentAgent(); if (agent) openCreate(agent, agent.host); };
 $('#browse-directory').onclick = openDirectories;
 $('#create-cwd').oninput = () => { if (createTarget) $('#create-title').placeholder = `留空使用：${defaultWorkerName(createTarget.host, $('#create-cwd').value.trim())}`; };
@@ -1121,20 +1296,7 @@ $('#directory-select').onclick = () => { if (directoryTarget?.view?.path) select
 $('#directory-use-home').onclick = () => selectDirectory('');
 $('#directory-dialog').addEventListener('close', () => { directoryTarget = null; directoryGeneration++; });
 $('#create-dialog').addEventListener('close', () => { createTarget = null; if ($('#directory-dialog').open) $('#directory-dialog').close(); });
-$('#create-form').onsubmit = event => { event.preventDefault(); action($('#create-save'), async () => {
-  if (!createTarget) return; const target = createTarget, cwd = $('#create-cwd').value.trim(), body = {host: target.host, cwd, title: $('#create-title').value.trim() || defaultWorkerName(target.host, cwd), cols: 120, rows: 32, request_key: target.requestKey};
-  if (target.thread_id) body.thread_id = target.thread_id;
-  const fingerprint = JSON.stringify(body);
-  if (target.fingerprint && target.fingerprint !== fingerprint) throw new Error('这个打开请求已经提交过。请先取消并重新打开对话框，再提交修改后的配置；不会用同一个请求重复创建不同终端。');
-  target.fingerprint = fingerprint;
-  const result = await request('/api/terminals/create', body), agent = result.agent || result, id = agent.thread_id || result.thread_id;
-  if (!id) throw new Error('后台没有返回终端标识。请查看连接记录后重试。');
-  if (createTarget !== target) { await refresh(true); toast('此前的终端打开请求已处理，结果保留在对应机器的登记表中。'); return; }
-  selectedHost = body.host; selectedAgent = null; $('#create-dialog').close(); await refresh(true);
-  const registered = state.agents.find(item => item.host === body.host && item.thread_id === id);
-  if (registered) await selectAgent(registered); else toast('终端已创建，等待登记表刷新。');
-  if (result.created === false) toast('终端创建结果未确认。已保留同一终端的登记，请用「重新连接」核对；不会再次创建不同终端。' + (result.delivery?.error ? ' ' + result.delivery.error : ''));
-}); };
+$('#create-form').onsubmit = event => { event.preventDefault(); void action($('#create-save'), submitCreateTerminal); };
 $('#refresh-history').onclick = () => action($('#refresh-history'), readHistory);
 $('#terminal-connect').onclick = () => action($('#terminal-connect'), reconnectTerminal);
 $('#terminal-service-recover').onclick = () => action($('#terminal-service-recover'), openDisplayServiceRecovery);

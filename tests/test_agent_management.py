@@ -142,6 +142,15 @@ class AgentManagementTests(unittest.TestCase):
         self.assertFalse(result["management"]["needs_attention"])
         self.assertEqual(self.probes, [])
 
+    def test_unsubmitted_draft_is_not_presented_as_current_typing(self):
+        self.terminals.records[TERMINAL].update(human_busy=True,
+            human_input={"state": "draft", "reason": "uncertain_input"})
+        result = self.hub.get_agent("remote", "worker")
+        self.assertTrue(result["human_busy"])
+        self.assertEqual(result["human_input"], {"state": "draft", "reason": "uncertain_input"})
+        self.assertEqual(result["management"]["label"], "输入状态待确认")
+        self.assertEqual(self.probes, [])
+
     def test_unconfirmed_recovery_warns_even_if_broker_cached_connected_ready(self):
         for code in ("original_session_missing", "original_session_changed", "reconnect_unknown"):
             self.hub.store.setting(self.hub._recovery_key("remote", "worker"),
@@ -193,15 +202,17 @@ class AgentManagementTests(unittest.TestCase):
         self.hub.terminal_input("remote", "worker", "human-message")
         self.assertEqual(self.terminals.writes[-1][1], "input")
 
-    def test_route_failure_is_safe_and_cached_same_key_never_retries(self):
+    def test_pre_attach_route_failure_rechecks_readonly_on_explicit_same_key(self):
         self.disconnected()
         self.answer = {"ok": False, "exists": False, "reason": "route_unavailable"}
         result = self.hub.reconnect_agent("remote", "worker", request_key="route")
         self.assertEqual(result["recovery"]["code"], "route_unavailable")
+        self.assertTrue(result["recovery"]["retryable"])
         repeated = self.hub.reconnect_agent("remote", "worker", request_key="route")
         self.assertEqual(repeated["operation_state"], "blocked")
-        self.assertEqual(len(self.probes), 1)
+        self.assertEqual(len(self.probes), 2)
         self.assertEqual(self.creates(), [])
+        self.assertEqual(self.terminals.writes, [])
 
     def test_closed_and_close_unknown_never_probe_or_attach(self):
         for mode in ("closed", "closing", "close_unknown"):
@@ -265,6 +276,8 @@ class AgentManagementTests(unittest.TestCase):
         self.assertEqual(result["identity"], IDENTITY)
         argv = run.call_args.args[0]
         self.assertEqual(argv[-2], "fake-ssh-target")
+        self.assertIn("ControlMaster=no", argv)
+        self.assertIn("ControlPersist=no", argv)
         self.assertIn("probe --session " + TERMINAL, argv[-1])
         self.assertNotIn("new-session", argv[-1])
         with patch("terminal_hub.subprocess.run", return_value=types.SimpleNamespace(returncode=1, stdout="", stderr="PRIVATE_SECRET")):

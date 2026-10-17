@@ -52,10 +52,35 @@ class FakeService:
 
 
 class McpBridgeTests(unittest.TestCase):
+    def test_public_management_policy_is_local_read_only_and_not_a_grant(self):
+        bridge = mcp_bridge.McpBridge()
+        response = self.initialize(bridge)
+        self.assertEqual(response["result"]["instructions"], mcp_bridge.MCP_INSTRUCTIONS)
+        with patch.object(mcp_bridge, "call_service", side_effect=AssertionError("policy must not call HTTP")), \
+             patch.object(mcp_bridge, "read_descriptor", side_effect=AssertionError("policy must not read credentials")):
+            result = self.call(bridge, "get_management_policy")["result"]
+            self.assertFalse(result["isError"])
+            policy = result["structuredContent"]
+            self.assertEqual(policy["execution_policy"], "delegate_first")
+            self.assertEqual(policy["decision_owner"], "human_user")
+            self.assertFalse(policy["capability_grant"])
+            policy["direct_execution_exceptions"].append("forged_grant")
+            fresh = self.call(bridge, "get_management_policy")["result"]["structuredContent"]
+            self.assertNotIn("forged_grant", fresh["direct_execution_exceptions"])
+            for arguments in [{"controller_id": "forged"}, {"grant_all": True}, {"agent_id": "spark::worker"}]:
+                self.assertTrue(self.call(bridge, "get_management_policy", arguments)["result"]["isError"])
+        self.assertTrue(mcp_bridge.TOOLS_BY_NAME["get_management_policy"]["annotations"]["readOnlyHint"])
+
+    def test_public_management_policy_requires_the_protocol_handshake(self):
+        bridge = mcp_bridge.McpBridge()
+        self.assertEqual(self.call(bridge, "get_management_policy")["error"]["code"], -32002)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.descriptor = Path(self.temp.name) / "service.json"
-        self.env = patch.dict(os.environ, {"CEO_HUB_CONNECTION_FILE": str(self.descriptor),
+        self.env = patch.dict(os.environ, {"AGENTCAPTAIN_CONNECTION_FILE": "", "PRON_HUB_CONNECTION_FILE": "",
+                                           "AGENTCAPTAIN_CONTROLLER_ID": "", "PRON_HUB_CONTROLLER_ID": "",
+                                           "CEO_HUB_CONNECTION_FILE": str(self.descriptor),
                                            "HTTP_PROXY": "http://127.0.0.1:1"})
         self.env.start()
         self.services = []
@@ -100,7 +125,7 @@ class McpBridgeTests(unittest.TestCase):
         self.assertEqual(responses[0]["result"]["serverInfo"]["version"], mcp_bridge.VERSION)
         self.assertEqual(responses[2]["result"], {})
         names = {item["name"] for item in responses[1]["result"]["tools"]}
-        self.assertEqual(names, {"list_active_agents", "get_agent", "read_agent", "update_agent", "reconnect_agent", "send_agent_message", "send_terminal_input", "create_agent", "poll_events", "get_delivery"})
+        self.assertEqual(names, {"list_active_agents", "get_agent", "read_agent", "update_agent", "reconnect_agent", "send_agent_message", "send_terminal_input", "create_agent", "poll_events", "get_delivery", "get_management_policy"})
         self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "ceo-hub")
         self.assertEqual(responses[0]["result"]["serverInfo"]["version"], "0.7.0")
         self.assertNotIn("private-secret", process.stdout)
@@ -386,8 +411,8 @@ class McpBridgeTests(unittest.TestCase):
         self.initialize(bridge)
         result = self.call(bridge)["result"]
         self.assertTrue(result["isError"])
-        self.assertIn("run_pron.cmd", result["content"][0]["text"])
-        self.assertIn("PRON Hub", result["content"][0]["text"])
+        self.assertIn("run_agentcaptain.cmd", result["content"][0]["text"])
+        self.assertIn("AgentCaptain", result["content"][0]["text"])
         self.assertNotIn("Traceback", result["content"][0]["text"])
 
     def test_long_poll_does_not_block_other_calls(self):

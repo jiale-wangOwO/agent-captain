@@ -1,6 +1,6 @@
 # Security and trust boundaries
 
-PRON Hub is a personal operations tool, not a multi-tenant remote-access gateway.
+AgentCaptain is a personal operations tool, not a multi-tenant remote-access gateway.
 Its default HTTP interface is loopback-only. Keep it on `127.0.0.1`; do not expose
 the web interface or terminal broker directly to a LAN or the Internet. SSH is the
 remote-machine boundary, including when an independent tunnel service provides
@@ -59,7 +59,7 @@ uncertain/`unknown`, and already cancelled/revoked records are not revived or
 rewritten. Migration performs no terminal input, process start, SSH attachment,
 or task replay. Automatic management is not retroactive consent to send old work.
 
-These boundaries apply to **PRON Hub APIs only**. They do not sandbox Codex's
+These boundaries apply to **AgentCaptain APIs only**. They do not sandbox Codex's
 other native tools, other plugins, or the operating-system privileges of its
 user and SSH accounts. A same-user local process with access to private state
 may obtain a capability. This remains a single-user product, not tenant or OS
@@ -108,7 +108,7 @@ command simply because the terminal is connected.
   every conversation on it. Opening a normal shell is distinct from having a
   ready Codex agent; the user starts Codex and handles its startup prompts.
 - Complete sign-in, credential entry, provider selection, and approval prompts
-  yourself. PRON Hub must not automatically accept worker permissions, bypass
+  yourself. AgentCaptain must not automatically accept worker permissions, bypass
   approval dialogs, or answer startup menus as ordinary task text.
 - Restarting or updating a shared Codex background server can interrupt other
   clients. Check their state and coordinate an idle maintenance window. Never

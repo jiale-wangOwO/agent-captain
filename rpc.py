@@ -99,7 +99,7 @@ class Rpc:
                 if isinstance(ready, Exception):
                     raise ready
             self.call("initialize", {
-                "clientInfo": {"name": "ceo_hub", "title": "CEO Hub", "version": "0.2.0"},
+                "clientInfo": {"name": "ceo_hub", "title": "AgentCaptain", "version": "0.2.0"},
                 "capabilities": {"experimentalApi": True},
             }, timeout=30)
             self.notify("initialized", {})

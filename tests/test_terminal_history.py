@@ -184,9 +184,9 @@ class HubTerminalHistoryTests(unittest.TestCase):
         self.assertFalse(result["history_complete"])
         run.assert_called_once()
         args, kwargs = run.call_args
-        self.assertEqual(args[0][:10], ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ConnectTimeout=10", "fake316",
+        self.assertEqual(args[0], ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPersist=no", "-o", "ConnectTimeout=30", "fake316",
                                        "python3 - --session " + TERMINAL + " --lines 5000"])
-        self.assertEqual(kwargs["timeout"], 25)
+        self.assertEqual(kwargs["timeout"], 45)
         self.assertIn("def capture_history", kwargs["input"])
         self.assertFalse(self.terminals.writes)
         self.assertFalse(any(call[0] == "create" for call in self.terminals.calls))

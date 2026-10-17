@@ -1,12 +1,12 @@
 # 外部 SSH 传输接口约定
 
-PRON Hub 的远端接口是普通 OpenSSH。对于通过 VS Code Remote Tunnel 访问的机器，外部适配工具负责提供可用的 SSH 字节传输；PRON Hub 不依赖该工具的源码、MCP、实例编号、文件队列或登录状态。
+AgentCaptain 的远端接口是普通 OpenSSH。对于通过 VS Code Remote Tunnel 访问的机器，外部适配工具负责提供可用的 SSH 字节传输；AgentCaptain 不依赖该工具的源码、MCP、实例编号、文件队列或登录状态。
 
 ## 配置边界
 
 - 外部工具提供仅监听本机 loopback 的 TCP 入口，或标准 SSH `ProxyCommand` 字节通道。它负责多路连接、全双工、背压、断线清理和自身的启动/恢复。
 - OpenSSH 的 host 配置负责目标、用户、公钥和服务器主机身份校验。不能通过跳过主机密钥验证掩盖接入错误；Windows loopback 转发不要求 `ControlMaster`。
-- 用户在 PRON Hub 的机器配置 UI 中填写机器名称及普通 SSH alias。Hub 只保存 `transport: ssh` 与该 alias，不保存 Tunnel 登录令牌或 SSH 私钥。
+- 用户在 AgentCaptain 的机器配置 UI 中填写机器名称及普通 SSH alias。Hub 只保存 `transport: ssh` 与该 alias，不保存 Tunnel 登录令牌或 SSH 私钥。
 - 远端使用自己的 SSH 服务、Python 3、tmux。连接机器或打开 shell 不会启动/恢复 Codex，也不选择模型供应商。
 
 ## 必须验证的行为
@@ -25,4 +25,4 @@ Hub 的常驻显示使用 `ssh -tt`；目录、历史、前台身份与尺寸控
 
 ## 状态与授权
 
-机器已登记、SSH 可连接、终端已打开、工作 agent 已运行和 CEO 已激活是不同状态。UI 中的激活开关仍决定 CEO 的访问范围；外部传输不能绕过该开关、用户草稿保护或工作 agent 的审批。
+机器已登记、SSH 可连接、终端已打开、工作 agent 前台可交互是不同状态。已登记、未关闭且绑定原共享终端的工作 agent 自动纳入 Captain 的管理列表，不需要激活开关；临时显示断线保留原登记，但不代表可以发送任务。外部传输不能绕过认证、前台就绪核验、用户草稿保护或工作 agent 的审批；新建终端仍需单独满足机器与项目目录设置。

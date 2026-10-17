@@ -1,4 +1,4 @@
 @echo off
 rem Backward-compatible launcher; state and running worker identities stay unchanged.
-call "%~dp0run_pron.cmd" %*
+call "%~dp0run_agentcaptain.cmd" %*
 exit /b %errorlevel%

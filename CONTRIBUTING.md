@@ -1,4 +1,4 @@
-# Contributing to PRON Hub
+# Contributing to AgentCaptain
 
 Thanks for helping make personal multi-machine agent management more reliable.
 Keep contributions small, reproducible, and explicit about authority and failure

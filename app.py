@@ -25,7 +25,9 @@ def legacy_connection_file():
 
 
 def connection_file():
-    override = os.environ.get("CEO_HUB_CONNECTION_FILE")
+    override = (os.environ.get("AGENTCAPTAIN_CONNECTION_FILE")
+                or os.environ.get("PRON_HUB_CONNECTION_FILE")
+                or os.environ.get("CEO_HUB_CONNECTION_FILE"))
     if override:
         return Path(override).expanduser()
     # Checkout-owned state is shared by ordinary shells and packaged desktop
@@ -143,6 +145,7 @@ def create_server(hub, port=8766, token=None):
             assets = {"/": ("index.html", "text/html; charset=utf-8"),
                       "/ui.js": ("ui.js", "text/javascript; charset=utf-8"),
                       "/controller.js": ("controller.js", "text/javascript; charset=utf-8"),
+                      "/agent-captain-mark.svg": ("agent-captain-mark.svg", "image/svg+xml"),
                       "/terminal_history.js": ("terminal_history.js", "text/javascript; charset=utf-8"),
                       "/style.css": ("style.css", "text/css; charset=utf-8"),
                       "/prose.css": ("prose.css", "text/css; charset=utf-8")}
@@ -248,6 +251,8 @@ def create_server(hub, port=8766, token=None):
                     self.respond(200, hub.reconnect_agent(body["host"], body["thread_id"], request_key=body.get("request_key")))
                 elif self.path == "/api/agents/reconcile-reconnect":
                     self.respond(200, hub.reconcile_reconnect(body["host"], body["thread_id"], body.get("request_key"), confirm=body.get("confirm") is True))
+                elif self.path == "/api/agents/reconcile-original-worker":
+                    self.respond(200, hub.reconcile_original_worker(body["host"], body["thread_id"], body.get("request_key"), confirm=body.get("confirm") is True))
                 elif self.path == "/api/terminals/create":
                     self.respond(200, hub.create_terminal(body["host"], body.get("cwd", ""), body["title"], body.get("thread_id"),
                         body.get("cols", 100), body.get("rows", 30), body.get("active") is True, body.get("request_key")))
@@ -297,8 +302,8 @@ def serve(port=8766):
     temporary.replace(descriptor)
     sync_connection_aliases(payload)
     atexit.register(hub.close)
-    print(f"PRON Hub connection service {VERSION}: {server.origin}", flush=True)
-    print("CEO 是当前 Codex 对话；本服务不运行管理模型、不自动扫描对话。", flush=True)
+    print(f"AgentCaptain connection service {VERSION}: {server.origin}", flush=True)
+    print("Captain 是当前 Codex 管理对话；本服务不另运行管理模型、不自动扫描对话。", flush=True)
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
@@ -311,7 +316,7 @@ def serve(port=8766):
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    parser = argparse.ArgumentParser(description="PRON Hub (Personal Remote Ops & Nodes Hub) — 本机和 SSH 上的 Codex 会话管理入口")
+    parser = argparse.ArgumentParser(description="AgentCaptain · 队长 — 一个主控，统筹本机与远程 Agent。")
     sub = parser.add_subparsers(dest="command", required=True)
     web = sub.add_parser("serve")
     web.add_argument("--port", type=int, default=8766)

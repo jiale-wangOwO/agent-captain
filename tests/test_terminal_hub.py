@@ -390,6 +390,44 @@ class TerminalHubTests(unittest.TestCase):
             restored = self.hub.connect_terminal("316", created["thread_id"])
         self.assertEqual(restored["cwd"], "/home/selected-user")
 
+    def test_home_probe_failure_has_no_create_side_effects_and_same_key_recovers_once(self):
+        self.hub.hosts["spark"] = {"transport": "ssh", "target": "fake-spark", "label": "Spark"}
+        args = {"host": "spark", "cwd": "", "title": "Spark shell", "request_key": "spark-home-probe"}
+        message = "Spark 连接不可用；请恢复 SSH 连接后重试，新终端尚未创建。"
+        with patch.object(self.hub.directories, "home", side_effect=RuntimeError(message)) as home, \
+             patch.object(self.hub.store, "begin_operation", wraps=self.hub.store.begin_operation) as begin, \
+             patch.object(self.hub.store, "remember", wraps=self.hub.store.remember) as remember:
+            # Failure precedes durable creation intent, so it must not consume
+            # the key or leave an uncertain terminal for the user to reconcile.
+            for _ in range(2):
+                with self.assertRaises(RuntimeError) as raised:
+                    self.hub.create_terminal(**args)
+                self.assertEqual(str(raised.exception), message)
+            self.assertEqual(home.call_count, 2)
+            begin.assert_not_called()
+            remember.assert_not_called()
+        self.assertEqual(self.hub.store.agents(), [])
+        self.assertEqual(self.hub.store.db.execute("select count(*) from operations").fetchone()[0], 0)
+        self.assertEqual(self.hub.store.outbox(), [])
+        self.assertEqual(self.hub.store.events(), [])
+        self.assertEqual(self.terminals.records, {})
+        self.assertFalse(any(call[0] in ("create", "write") for call in self.terminals.calls))
+
+        self.restart()
+        with patch.object(self.hub.directories, "home", return_value="/home/spark-user"):
+            created = self.hub.create_terminal(**args)
+            replay = self.hub.create_terminal(**args)
+        self.assertTrue(created["created"])
+        self.assertEqual(created["cwd"], "/home/spark-user")
+        self.assertEqual(replay, created)
+        self.restart()
+        with patch.object(self.hub.directories, "home", return_value="/home/spark-user"):
+            self.assertEqual(self.hub.create_terminal(**args), created)
+        self.assertEqual(sum(call[0] == "create" for call in self.terminals.calls), 1)
+        self.assertEqual(len(self.terminals.records), 1)
+        self.assertEqual(len(self.hub.store.agents()), 1)
+        self.assertEqual(self.terminals.writes, [], "A retried home probe must not start Codex or send a task")
+
     def test_explicit_close_requires_confirmation_and_targets_only_registered_terminal(self):
         first = self.register()
         keeper_id = "ceohub-1123456789abcdef01234567"

@@ -7,12 +7,14 @@ module's authenticated descriptor files.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -22,10 +24,11 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import urlparse
 
 from terminal_client import BrokerError, TerminalClient
+from management_policy import MANAGEMENT_POLICY, MANAGER_ROLE, POLICY_VERSION
 
 ROOT = Path(__file__).resolve().parent
 INITIALIZATION = (
-    "Initialize this personal management session. Call only the PRON Hub "
+    "Initialize this personal management session. Call only the AgentCaptain "
     "get_controller_context tool to verify this management identity and automatic worker access. "
     "Do not read worker history, send messages, create workers, modify files, "
     "or perform business tasks. Briefly explain your verified scope and wait "
@@ -33,7 +36,7 @@ INITIALIZATION = (
     "are managed automatically; creating new workers still requires explicit project roots. "
     "Never claim tool readiness without the tool."
 )
-ROLE = """# PRON Hub personal management session
+LEGACY_ROLE = """# PRON Hub personal management session
 
 You are the human user's management agent, not a business-project worker.
 The human retains final decisions. Use PRON Hub tools to read evidence,
@@ -62,19 +65,20 @@ PRON Hub checks management identity and registered worker boundaries in its
 own APIs; it does not isolate all Codex or operating-system
 tools. Preserve Codex sandbox and human approval boundaries.
 """
+ROLE = MANAGER_ROLE
 ERRORS = {
-    "codex_unavailable": "管理会话的 Codex 启动入口未保存、失效或尚未核验；请确认原入口与安装，PRON Hub 不会自动改用其他版本。",
+    "codex_unavailable": "管理会话的 Codex 启动入口未保存、失效或尚未核验；请确认原入口与安装，AgentCaptain 不会自动改用其他版本。",
     "bootstrap_failed": "初始化未完成；已保存的会话身份不会被替换，请检查本机登录或配置后恢复。",
     "bootstrap_timeout": "初始化超时；不会自动创建另一条会话或重发任务。",
     "bootstrap_unknown": "启动结果未知；不能重复新建，请核对原启动。",
     "invalid_session_event": "原生会话身份事件不合法或互相冲突，未采用猜测身份。",
-    "tools_unverified": "会话已创建，但 PRON Hub 工具连接尚未核验。",
+    "tools_unverified": "会话已创建，但 AgentCaptain 工具连接尚未核验。",
     "terminal_unavailable": "管理终端尚未连接；恢复仍使用已保存的精确会话。",
     "terminal_unknown": "管理终端启动结果未知；请先核查原连接，不重复启动。",
     "needs_attention": "请在管理终端处理登录、信任、会话占用或启动提示；不会自动批准或重启后台。",
     "desktop_unverified": "已释放 Hub 输入入口并准备打开原会话；桌面接管和工具连接尚未实机核验。",
     "login_required": "本机 Codex 登录尚未就绪；请在 Codex 中完成登录，再核对原管理会话。",
-    "configuration_required": "本机 Codex 模型或配置尚未就绪；请由用户修正配置，PRON Hub 不改写供应商或凭据。",
+    "configuration_required": "本机 Codex 模型或配置尚未就绪；请由用户修正配置，AgentCaptain 不改写供应商或凭据。",
     "daemon_settings_conflict": "Codex 共享后台版本或功能设置不兼容；不会自动重启共享后台，请先确认维护范围。",
     "session_in_use": "原会话被另一入口占用；请先关闭那里，再恢复同一会话，不 fork 或删除锁。",
 }
@@ -111,9 +115,15 @@ def default_workspace_root(runtime=None):
         return Path(runtime) / "workspaces"
     if os.name == "nt":
         base = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
-        return base / "PRONHub" / "management-workspaces"
+        return base / "AgentCaptain" / "management-workspaces"
     base = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state")))
-    return base / "pron-hub" / "management-workspaces"
+    return base / "agent-captain" / "management-workspaces"
+
+
+def legacy_workspace_root():
+    """Keep exact previously owned workspaces usable without moving user data."""
+    current = default_workspace_root()
+    return current.parent.parent / ("PRONHub" if os.name == "nt" else "pron-hub") / current.name
 
 
 def manager_launch_environment(environ=None, platform=None, registry=None):
@@ -364,6 +374,125 @@ class ControllerService:
             return {row[0]: json.loads(row[1]) for row in self.store.db.execute(
                 "select host,roots from controller_host_scope where controller_id=? order by host", (cid,))}
 
+    @staticmethod
+    def _policy_status(status, reason=None, updated=False):
+        result = {"version": POLICY_VERSION, "status": status,
+                  "workspace_updated": updated, "instructions_available": True,
+                  "reload_required": False}
+        if reason:
+            result["reason"] = reason
+        return result
+
+    def _policy_path(self, row):
+        """A policy hash is ownership evidence, never filesystem authority.
+
+        Only the exact owned CID directory in the configured workspace base or
+        historical runtime/workspaces base is eligible. Check all ancestors so
+        symlinks and Windows junctions cannot redirect even a matching file.
+        """
+        workspace = Path(row["workspace"])
+        candidates = (self.workspace_root / row["id"], self.runtime / "workspaces" / row["id"])
+        if self.workspace_root == default_workspace_root():
+            candidates += (legacy_workspace_root() / row["id"],)
+        if not workspace.is_absolute() or workspace not in candidates:
+            raise ValueError("unsafe_workspace")
+        for component in (workspace, *workspace.parents):
+            if component.is_symlink() or getattr(component, "is_junction", lambda: False)():
+                raise ValueError("linked_workspace")
+        if not workspace.is_dir():
+            raise ValueError("missing_workspace")
+        path = workspace / "AGENTS.md"
+        if path.is_symlink() or getattr(path, "is_junction", lambda: False)():
+            raise ValueError("linked_policy")
+        return path
+
+    @staticmethod
+    def _read_policy_file(path):
+        """Bounded, no-follow regular single-link read with identity evidence."""
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise ValueError("non_owned_policy_file")
+            data = stream.read(131073)
+        signature = (metadata.st_dev, metadata.st_ino, metadata.st_size,
+                     metadata.st_mtime_ns, metadata.st_ctime_ns)
+        return data, signature
+
+    def _policy_observation(self, row):
+        """Inspect without changing files, settings, identities or terminals."""
+        try:
+            path = self._policy_path(row)
+            data, signature = self._read_policy_file(path)
+            if len(data) > 131072:
+                return self._policy_status("custom_preserved", "oversized_policy"), path, data, signature
+            text = data.decode("utf-8").replace("\r\n", "\n")
+            record = self.store.setting("controller-policy-file:" + row["id"])
+            digest = hashlib.sha256(data).hexdigest()
+            recorded = (isinstance(record, dict) and record.get("sha256") == digest
+                        and isinstance(record.get("version"), str))
+            if text == ROLE:
+                status = self._policy_status("current")
+            elif text == LEGACY_ROLE or recorded:
+                status = self._policy_status("outdated", "owned_generated_policy")
+            else:
+                status = self._policy_status("custom_preserved", "unrecognized_or_modified_policy")
+            return status, path, data, signature
+        except FileNotFoundError:
+            return self._policy_status("missing", "policy_file_missing"), None, None, None
+        except UnicodeDecodeError:
+            return self._policy_status("custom_preserved", "unrecognized_policy_encoding"), None, None, None
+        except ValueError:
+            return self._policy_status("unsafe_path", "policy_ownership_unverified"), None, None, None
+        except OSError:
+            return self._policy_status("unavailable", "policy_file_unavailable"), None, None, None
+
+    def _record_policy_file(self, row, data):
+        self.store.setting("controller-policy-file:" + row["id"], {
+            "version": POLICY_VERSION, "sha256": hashlib.sha256(data).hexdigest()})
+
+    def _sync_policy(self, row):
+        """Explicit management actions may update only witnessed generated text.
+
+        Custom content, unknown files, links and missing files are never
+        repaired or overwritten. The public context always carries the latest
+        instructions independently, so an already-running model needs neither
+        a restart nor an injected business prompt to read the new policy.
+        """
+        with self._lock:
+            status, path, data, signature = self._policy_observation(row)
+            if status["status"] == "current":
+                self._record_policy_file(row, data)
+                return status
+            if status["status"] != "outdated":
+                return status
+            temporary = path.with_name(".agentcaptain-policy-" + secrets.token_hex(12) + ".tmp")
+            owned_temporary = False
+            try:
+                _private_write(temporary, ROLE)
+                owned_temporary = True
+                # Recheck both the path and bytes immediately before an atomic
+                # replacement; any human edit observed in between is retained.
+                current_path = self._policy_path(row)
+                current_data, current_signature = self._read_policy_file(current_path)
+                if current_path != path or current_data != data or current_signature != signature:
+                    return self._policy_status("custom_preserved", "changed_during_sync")
+                temporary.replace(path)
+                generated, _ = self._read_policy_file(path)
+                self._record_policy_file(row, generated)
+                return self._policy_status("current", updated=True)
+            except (ValueError, OSError):
+                return self._policy_status("unavailable", "policy_sync_unavailable")
+            finally:
+                # Only this method's exclusively created temporary is removed;
+                # no user file, session, credential or other temporary is touched.
+                if owned_temporary:
+                    try:
+                        if temporary.exists() and not temporary.is_symlink():
+                            temporary.unlink()
+                    except OSError:
+                        pass
+
     def _safe(self, row):
         scope = self.allowed_agents(row["id"])
         code = row.get("error_code")
@@ -373,6 +502,7 @@ class ControllerService:
                 "effective_worker_count": len(scope),
                 "scope": scope, "worker_access": "automatic", "scope_note": "已连接的工作终端自动纳入管理；新建工作终端仍需明确项目目录。",
                 "allowed_hosts": self.allowed_hosts(row["id"]), "desktop_verified": False,
+                "policy_version": POLICY_VERSION, "policy_sync": self._policy_observation(row)[0],
                 "error": {"code": code, "message": ERRORS.get(code, ERRORS["bootstrap_unknown"])} if code else None,
                 "created_at": row["created_at"], "connected": False, "agent_ready": False, "blocked_reason": None}
 
@@ -480,7 +610,8 @@ class ControllerService:
                 if old:
                     if old[0] != fingerprint:
                         raise ValueError("同一请求键不能用于不同管理会话配置。")
-                    return self.get(old[1])
+                    sync = self._sync_policy(self._row(old[1]))
+                    return self.get(old[1]) | {"policy_sync": sync}
             if not body.get("new", False):
                 row = self.store.db.execute("select id from controllers order by created_at limit 1").fetchone()
                 if row:
@@ -492,9 +623,10 @@ class ControllerService:
                     if key:
                         with self.store.db:
                             self.store.db.execute("insert into controller_preparations values(?,?,?)", (key, fingerprint, row[0]))
-                    return self.get(row[0])
+                    sync = self._sync_policy(previous)
+                    return self.get(row[0]) | {"policy_sync": sync}
             if not self.origin:
-                raise RuntimeError("请先启动 PRON Hub 本机工具网关。")
+                raise RuntimeError("请先启动 AgentCaptain 本机工具网关。")
             cid = str(uuid.uuid4())
             workers, roots = self._validate_scope(cid, body.get("agent_ids", []), body.get("allowed_hosts", []), body.get("host_roots", {}))
             owned = self.runtime / cid
@@ -509,10 +641,10 @@ class ControllerService:
             _private_write(descriptor, json.dumps({"url": self.origin, "token": token, "controller_id": cid, "version": "0.7.0"}))
             _private_write(workspace / "AGENTS.md", ROLE)
             settings = self._mcp_settings(descriptor, cid)
-            lines = ["[mcp_servers.pron_hub]", "command = " + json.dumps(settings["command"]),
+            lines = ["[mcp_servers.agent_captain]", "command = " + json.dumps(settings["command"]),
                      "args = " + json.dumps(settings["args"]), "required = true", "startup_timeout_sec = 30",
-                     "[mcp_servers.pron_hub.env]", "PRON_HUB_CONNECTION_FILE = " + json.dumps(str(descriptor)),
-                     "PRON_HUB_CONTROLLER_ID = " + json.dumps(cid)]
+                     "[mcp_servers.agent_captain.env]", "AGENTCAPTAIN_CONNECTION_FILE = " + json.dumps(str(descriptor)),
+                     "AGENTCAPTAIN_CONTROLLER_ID = " + json.dumps(cid)]
             _private_write(workspace / ".codex" / "config.toml", "\n".join(lines) + "\n")
             now = time.time()
             with self.store.db:
@@ -523,18 +655,32 @@ class ControllerService:
                     self.store.db.execute("insert into controller_preparations values(?,?,?)", (key, fingerprint, cid))
                 self.store.db.executemany("insert or ignore into controller_worker_scope values(?,?,?)", ((cid, h, t) for h, t in workers))
                 self.store.db.executemany("insert into controller_host_scope values(?,?,?)", ((cid, h, json.dumps(p)) for h, p in roots.items()))
+            generated, _ = self._read_policy_file(workspace / "AGENTS.md")
+            self._record_policy_file(self._row(cid), generated)
             return self.get(cid)
 
     @staticmethod
     def _mcp_settings(descriptor, cid):
         return {"command": sys.executable, "args": [str(ROOT / "mcp_bridge.py")], "env": {
-            "PRON_HUB_CONNECTION_FILE": str(descriptor), "PRON_HUB_CONTROLLER_ID": cid}}
+            "AGENTCAPTAIN_CONNECTION_FILE": str(descriptor), "AGENTCAPTAIN_CONTROLLER_ID": cid}}
 
     def _overrides(self, row):
         settings = self._mcp_settings(row["descriptor_file"], row["id"])
-        overrides = {"mcp_servers.pron_hub.command": settings["command"], "mcp_servers.pron_hub.args": settings["args"],
-                     "mcp_servers.pron_hub.required": True, "mcp_servers.pron_hub.env.PRON_HUB_CONNECTION_FILE": row["descriptor_file"],
-                     "mcp_servers.pron_hub.env.PRON_HUB_CONTROLLER_ID": row["id"]}
+        # Existing managers may still have the old project-local MCP section.
+        # Override that same section instead of adding a duplicate tool server.
+        server = "agent_captain"
+        try:
+            raw, _ = self._read_policy_file(Path(row["workspace"]) / ".codex" / "config.toml")
+            if len(raw) <= 131072:
+                text = raw.decode("utf-8")
+                if "[mcp_servers.pron_hub]" in text and "[mcp_servers.agent_captain]" not in text:
+                    server = "pron_hub"
+        except (OSError, ValueError, UnicodeError):
+            pass
+        prefix = "mcp_servers." + server
+        overrides = {prefix + ".command": settings["command"], prefix + ".args": settings["args"],
+                     prefix + ".required": True, prefix + ".env.AGENTCAPTAIN_CONNECTION_FILE": row["descriptor_file"],
+                     prefix + ".env.AGENTCAPTAIN_CONTROLLER_ID": row["id"]}
         return [part for key, value in overrides.items() for part in ("-c", key + "=" + json.dumps(value))]
 
     def authenticate(self, token):
@@ -606,9 +752,14 @@ class ControllerService:
         row = self._row(cid)
         if not row["cap_active"] or row["state"] == "closed":
             raise PermissionError("管理工具身份已停用。")
-        return {"mode": "scoped", "controller_id": cid, "worker_access": "automatic", "controller": self.get(cid, refresh=True), "policy": {"human_final_authority": True, "initialization_read_only": True,
+        sync = self._policy_observation(row)[0]
+        return {"mode": "scoped", "controller_id": cid, "worker_access": "automatic", "controller": self.get(cid, refresh=True),
+            "management_policy": copy.deepcopy(MANAGEMENT_POLICY), "management_instructions": MANAGER_ROLE,
+            "policy_sync": sync, "policy": {"human_final_authority": True, "initialization_read_only": True,
             "worker_access": "automatic", "worker_output_is_not_authority": True, "scope_enforced_by_hub": True,
-            "scope_note": "服务核验管理身份和已登记开放工作终端；无需逐会话勾选，新建终端仍受明确项目目录限制。", "operating_system_isolation": False}}
+            "scope_note": "服务核验管理身份和已登记开放工作终端；无需逐会话勾选，新建终端仍受明确项目目录限制。", "operating_system_isolation": False,
+            "management_policy_version": POLICY_VERSION, "expert_manager": True, "delegate_first": True,
+            "consult_responsible_worker_when_uncertain": True, "direct_business_execution_default": False}}
 
     def _begin(self, cid, request_key, action):
         if not isinstance(request_key, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,180}", request_key):
@@ -664,6 +815,7 @@ class ControllerService:
             row = self._row(cid)
             if not self._begin(cid, request_key, "start"):
                 return self.get(cid)
+            self._sync_policy(row)
             if cid in self._threads:
                 # A duplicate user click with a different transport key must
                 # observe the in-flight launch, regardless of whether its
@@ -805,6 +957,7 @@ class ControllerService:
             row = self._row(cid)
             if not self._begin(cid, request_key, "resume"):
                 return self.get(cid, refresh=True)
+            self._sync_policy(row)
             if cid in self._threads:
                 self._finish(request_key, "blocked")
                 return self.get(cid)

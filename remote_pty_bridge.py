@@ -479,5 +479,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except (OSError, ValueError, BridgeError, subprocess.TimeoutExpired):
-        print("CEO Hub display attachment failed; remote agent session was not closed", file=sys.stderr, flush=True)
+        print("AgentCaptain display attachment failed; remote agent session was not closed", file=sys.stderr, flush=True)
         sys.exit(1)

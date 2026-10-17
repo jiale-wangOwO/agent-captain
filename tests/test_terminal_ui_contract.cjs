@@ -263,6 +263,39 @@ test('directory chooser requests only selected host and uses real home returned 
   assert.equal(get('#create-cwd').value, '/home/server-user');
 });
 
+test('directory connection failure preserves creation settings and does not suggest bypassing it', async () => {
+  const { context, get, calls } = uiHarness();
+  const previousFetch = context.fetch;
+  let unavailable = true;
+  context.fetch = async (url, options) => {
+    if (url !== '/api/directories/list') return previousFetch(url, options);
+    calls.push({ url, options });
+    return unavailable
+      ? { ok: false, json: async () => ({ error: '远端 SSH 连接已中断，请恢复机器连接后重试。' }) }
+      : { ok: true, json: async () => ({ path: '/home/spark-user', home: '/home/spark-user', parent: '/home', roots: [], directories: [] }) };
+  };
+  context.openCreate(null, 'spark');
+  get('#create-title').value = 'My Spark task';
+  const requestKey = vm.runInContext('createTarget.requestKey', context);
+  context.openDirectories();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(get('#directory-error').hidden, false);
+  assert.match(get('#directory-error').textContent, /spark.*SSH/);
+  assert.match(get('#directory-note').textContent, /检查机器连接/);
+  assert.doesNotMatch(get('#directory-note').textContent, /直接使用主目录创建/);
+  assert.equal(get('#directory-select').disabled, true);
+  assert.equal(get('#create-title').value, 'My Spark task');
+  assert.equal(vm.runInContext('createTarget.requestKey', context), requestKey);
+  assert.equal(calls.filter(call => call.url === '/api/terminals/create').length, 0);
+  unavailable = false;
+  await context.loadDirectory('');
+  assert.equal(get('#directory-error').hidden, true);
+  assert.equal(get('#directory-select').disabled, false);
+  assert.equal(get('#directory-path').value, '/home/spark-user');
+  assert.equal(vm.runInContext('createTarget.requestKey', context), requestKey);
+  assert.equal(calls.filter(call => call.url === '/api/terminals/create').length, 0);
+});
+
 test('late directory response cannot overwrite a newer path selection', async () => {
   const { context, get } = uiHarness();
   const previousFetch = context.fetch;

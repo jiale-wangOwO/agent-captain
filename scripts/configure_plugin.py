@@ -1,4 +1,4 @@
-"""Prepare a machine-local PRON Hub plugin without editing Codex settings.
+"""Prepare a machine-local AgentCaptain plugin without editing Codex settings.
 
 The source repository contains no personal interpreter paths or credentials.
 Generated stdio commands refer to a retained directory rather than assuming a
@@ -15,13 +15,13 @@ from pathlib import Path
 from typing import Any
 
 
-PLUGIN_NAME = "pron-hub"
-MARKETPLACE_NAME = "pron-hub-local"
-SOURCE_MARKETPLACE_NAME = "pron-hub-source"
+PLUGIN_NAME = "agent-captain"
+MARKETPLACE_NAME = "agent-captain-local"
+SOURCE_MARKETPLACE_NAME = "agent-captain-source"
 GENERATOR_VERSION = 1
 SOURCE_FILES = (
     ".codex-plugin/plugin.json",
-    "skills/pron-hub/SKILL.md",
+    "skills/agent-captain/SKILL.md",
     "README.md",
 )
 
@@ -37,13 +37,16 @@ def _json_bytes(value: Any) -> bytes:
 def configure_plugin(output: Path | str | None = None, *,
                      repo_root: Path | str | None = None,
                      python_executable: Path | str | None = None,
-                     legacy_ceo_identity: bool = False) -> dict[str, Any]:
+                     legacy_ceo_identity: bool = False,
+                     legacy_pron_identity: bool = False) -> dict[str, Any]:
     """Generate only into a new directory; never read live Hub/Codex state.
 
     ``repo_root`` and ``python_executable`` are injectable for isolated tests.
     The CLI always uses its own interpreter and the source checkout containing
     this script. No install, refresh, or service restart is performed.
     """
+    if legacy_ceo_identity and legacy_pron_identity:
+        raise ConfigurationError("Choose only one compatibility identity. No output was generated.")
     root = Path(repo_root or Path(__file__).resolve().parents[1]).resolve()
     destination = Path(output) if output is not None else root / ".runtime" / "plugin-marketplace"
     destination = destination.expanduser().absolute()
@@ -79,13 +82,17 @@ def configure_plugin(output: Path | str | None = None, *,
         if bridge_source.is_symlink() or not bridge_source.is_file():
             raise ConfigurationError("The standalone MCP bridge source is missing or is a symlink.")
         bridge_bytes = bridge_source.read_bytes()
+        policy_source = root / "management_policy.py"
+        if policy_source.is_symlink() or not policy_source.is_file():
+            raise ConfigurationError("The standalone management policy source is missing or is a symlink.")
+        policy_bytes = policy_source.read_bytes()
     except (OSError, ValueError, UnicodeError):
         raise ConfigurationError("Cannot read valid plugin source files. No output was generated.") from None
     if (not isinstance(manifest, dict) or manifest.get("name") != PLUGIN_NAME
             or manifest.get("skills") != "./skills/"
             or manifest.get("mcpServers") != "./.mcp.json"
             or not isinstance(manifest.get("version"), str)):
-        raise ConfigurationError("The plugin manifest does not match the supported PRON Hub package layout.")
+        raise ConfigurationError("The plugin manifest does not match the supported AgentCaptain package layout.")
     if mcp_template != {"mcpServers": {}}:
         raise ConfigurationError("The repository MCP template must not contain machine-specific commands or credentials.")
     if (not isinstance(marketplace, dict) or marketplace.get("name") != SOURCE_MARKETPLACE_NAME
@@ -93,31 +100,38 @@ def configure_plugin(output: Path | str | None = None, *,
             or len(marketplace["plugins"]) != 1
             or not isinstance(marketplace["plugins"][0], dict)
             or marketplace["plugins"][0].get("name") != PLUGIN_NAME
-            or marketplace["plugins"][0].get("source") != {"source": "local", "path": "./plugins/pron-hub"}):
-        raise ConfigurationError("The marketplace does not match the supported PRON Hub package layout.")
+            or marketplace["plugins"][0].get("source") != {"source": "local", "path": "./plugins/agent-captain"}):
+        raise ConfigurationError("The marketplace does not match the supported AgentCaptain package layout.")
     # Keep the repo-discovered skill-only source catalog distinct from the
     # configured marketplace. Otherwise source selection could silently install
     # the unconfigured template under the same marketplace identity.
-    plugin_name = "ceo-hub" if legacy_ceo_identity else PLUGIN_NAME
-    marketplace_name = "ceo-hub-local" if legacy_ceo_identity else MARKETPLACE_NAME
-    server_name = "ceo_hub" if legacy_ceo_identity else "pron_hub"
     if legacy_ceo_identity:
+        plugin_name, marketplace_name, server_name = "ceo-hub", "ceo-hub-local", "ceo_hub"
+        connection_env = "CEO_HUB_CONNECTION_FILE"
+    elif legacy_pron_identity:
+        plugin_name, marketplace_name, server_name = "pron-hub", "pron-hub-local", "pron_hub"
+        connection_env = "PRON_HUB_CONNECTION_FILE"
+    else:
+        plugin_name, marketplace_name, server_name = PLUGIN_NAME, MARKETPLACE_NAME, "agent_captain"
+        connection_env = "AGENTCAPTAIN_CONNECTION_FILE"
+    if legacy_ceo_identity or legacy_pron_identity:
         # Explicit compatibility output only. Never inspect installed caches or
         # infer identity from user settings, and never copy any credentials.
         try:
-            skill = prepared.pop("skills/pron-hub/SKILL.md").decode("utf-8")
+            skill = prepared.pop("skills/agent-captain/SKILL.md").decode("utf-8")
             readme = prepared["README.md"].decode("utf-8")
         except UnicodeError:
             raise ConfigurationError("The compatibility source text is not valid UTF-8. No output was generated.") from None
         manifest["name"] = plugin_name
         prepared[".codex-plugin/plugin.json"] = _json_bytes(manifest)
-        if not skill.startswith("---\nname: pron-hub\n") and not skill.startswith("---\r\nname: pron-hub\r\n"):
+        if not skill.startswith("---\nname: agent-captain\n") and not skill.startswith("---\r\nname: agent-captain\r\n"):
             raise ConfigurationError("The source skill identity cannot be converted safely. No output was generated.")
-        prepared["skills/ceo-hub/SKILL.md"] = skill.replace("name: pron-hub", "name: ceo-hub", 1).encode("utf-8")
+        prepared[f"skills/{plugin_name}/SKILL.md"] = skill.replace(
+            "name: agent-captain", "name: " + plugin_name, 1).encode("utf-8")
         prepared["README.md"] = readme.replace(
-            "`pron-hub` skill", "`ceo-hub` compatibility skill", 1).encode("utf-8")
+            "`agent-captain` skill", f"`{plugin_name}` compatibility skill", 1).encode("utf-8")
     marketplace["name"] = marketplace_name
-    marketplace["interface"] = {"displayName": "PRON Hub local tools"}
+    marketplace["interface"] = {"displayName": "AgentCaptain local tools"}
     marketplace["plugins"][0]["name"] = plugin_name
     marketplace["plugins"][0]["source"] = {"source": "local", "path": "./plugins/" + plugin_name}
 
@@ -127,11 +141,12 @@ def configure_plugin(output: Path | str | None = None, *,
         "command": str(interpreter), "args": ["-u", str(bridge_output)],
         # This is a location only, never a copied/read credential. The cached
         # bridge and ordinary-shell web service must address the same checkout.
-        "env": {"CEO_HUB_CONNECTION_FILE": str(root / ".runtime" / "service.json")}
+        "env": {connection_env: str(root / ".runtime" / "service.json")}
     }}}
-    marker = {"generator": "pron-hub-configure-plugin", "schema_version": GENERATOR_VERSION,
+    marker = {"generator": "agent-captain-configure-plugin", "schema_version": GENERATOR_VERSION,
               "plugin": plugin_name, "plugin_version": manifest["version"],
               "legacy_ceo_identity": bool(legacy_ceo_identity),
+              "legacy_pron_identity": bool(legacy_pron_identity),
               "retain_generated_directory": True}
 
     # Reserve a new target exclusively. Do not replace it atomically via rename:
@@ -151,13 +166,15 @@ def configure_plugin(output: Path | str | None = None, *,
                 stream.write(content)
         with bridge_output.open("xb") as stream:
             stream.write(bridge_bytes)
+        with (plugin_output / "management_policy.py").open("xb") as stream:
+            stream.write(policy_bytes)
         with (plugin_output / ".mcp.json").open("xb") as stream:
             stream.write(_json_bytes(mcp))
         marketplace_output = destination / ".agents" / "plugins" / "marketplace.json"
         marketplace_output.parent.mkdir(parents=True, exist_ok=True)
         with marketplace_output.open("xb") as stream:
             stream.write(_json_bytes(marketplace))
-        with (destination / ".pron-hub-generated.json").open("xb") as stream:
+        with (destination / ".agent-captain-generated.json").open("xb") as stream:
             stream.write(_json_bytes(marker))
     except OSError:
         # Retain a partial directory rather than deleting anything another
@@ -171,6 +188,7 @@ def configure_plugin(output: Path | str | None = None, *,
             "bridge": str(bridge_output), "plugin": f"{plugin_name}@{marketplace_name}",
             "version": manifest["version"], "commands": commands,
             "legacy_ceo_identity": bool(legacy_ceo_identity),
+            "legacy_pron_identity": bool(legacy_pron_identity),
             "retain_generated_directory": True}
 
 
@@ -179,13 +197,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path,
                         help="New output directory (default: <checkout>/.runtime/plugin-marketplace). Existing targets are refused.")
     parser.add_argument("--json", action="store_true", help="Print generation metadata as JSON.")
-    parser.add_argument("--legacy-ceo-identity", action="store_true",
-                        help="Generate a CEO-compatible ceo-hub@ceo-hub-local package for an explicit same-identity upgrade; default PRON identity is unchanged.")
+    identities = parser.add_mutually_exclusive_group()
+    identities.add_argument("--legacy-ceo-identity", action="store_true",
+                            help="Keep ceo-hub@ceo-hub-local and ceo_hub identifiers for an explicit same-identity upgrade; displayed product remains AgentCaptain.")
+    identities.add_argument("--legacy-pron-identity", action="store_true",
+                            help="Keep pron-hub@pron-hub-local and pron_hub identifiers for an explicit same-identity upgrade; displayed product remains AgentCaptain.")
     args = parser.parse_args(argv)
     try:
-        result = configure_plugin(args.output, legacy_ceo_identity=args.legacy_ceo_identity)
+        result = configure_plugin(args.output, legacy_ceo_identity=args.legacy_ceo_identity,
+                                  legacy_pron_identity=args.legacy_pron_identity)
     except ConfigurationError as exc:
-        print(f"PRON Hub plugin: {exc}", file=sys.stderr)
+        print(f"AgentCaptain plugin: {exc}", file=sys.stderr)
         return 1
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
