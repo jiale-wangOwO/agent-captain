@@ -141,31 +141,35 @@ class SlowSSHMCPBudgetTests(unittest.TestCase):
         return opener.open.call_args.kwargs["timeout"]
 
     def test_read_and_reconnect_have_distinct_bounded_ssh_budgets(self):
-        for name, timeout in (("read_agent", 180), ("reconnect_agent", 240)):
+        for name, timeout in (("read_agent", 210), ("reconnect_agent", 330)):
             with self.subTest(tool=name):
                 self.assertEqual(self.service_timeout(name, {"agent_id": "remote::worker", "request_key": "same-key"}), timeout)
 
     def test_reconnect_budget_covers_four_bounded_identity_checks_and_display_rpcs(self):
         ssh_checks = 4 * 45
-        display_rpcs = 2 * 20
+        display_rpcs = 2 * 55
         registry_reads = 2 * 3
-        self.assertEqual(ssh_checks + display_rpcs + registry_reads, 226)
+        self.assertEqual(ssh_checks + display_rpcs + registry_reads, 296)
         self.assertLess(ssh_checks + display_rpcs + registry_reads, self.service_timeout("reconnect_agent"))
 
-    def test_machine_local_retained_plugin_source_uses_matching_budgets_without_reading_credentials(self):
-        filename = (Path(__file__).resolve().parents[1] / ".runtime" / "plugin-marketplace-ceo-v0.7.0-release"
-                    / "plugins" / "ceo-hub" / "mcp_bridge.py")
-        if not filename.is_file():
-            self.skipTest("Machine-local generated plugin source is not present in a clean checkout")
-        spec = importlib.util.spec_from_file_location("slow_ssh_retained_plugin_fixture", filename)
-        retained = importlib.util.module_from_spec(spec)
-        # Script execution normally adds its own directory to sys.path. Do not
-        # accidentally import a policy from the old flat checkout layout.
-        with patch.dict(sys.modules), patch.object(sys, "path", [str(filename.parent), *sys.path]):
-            spec.loader.exec_module(retained)
-        for name in ("read_agent", "reconnect_agent", "send_message", "send_terminal_input", "update_agent", "poll_events"):
-            with self.subTest(tool=name):
-                self.assertEqual(self.service_timeout(name, bridge=retained), self.service_timeout(name))
+    def test_generated_plugin_uses_matching_budgets_without_reading_credentials(self):
+        root = Path(__file__).resolve().parents[1]
+        generator_spec = importlib.util.spec_from_file_location("slow_ssh_plugin_generator", root / "scripts/configure_plugin.py")
+        generator = importlib.util.module_from_spec(generator_spec)
+        generator_spec.loader.exec_module(generator)
+        with tempfile.TemporaryDirectory() as temporary:
+            result = generator.configure_plugin(Path(temporary) / "plugin", repo_root=root)
+            filename = Path(result["plugin_root"]) / "mcp_bridge.py"
+            spec = importlib.util.spec_from_file_location("slow_ssh_generated_plugin_fixture", filename)
+            generated = importlib.util.module_from_spec(spec)
+            with patch.dict(sys.modules), patch.object(sys, "path", [str(filename.parent), *sys.path]):
+                spec.loader.exec_module(generated)
+            for name in ("read_agent", "reconnect_agent", "send_message", "send_terminal_input", "update_agent", "poll_events"):
+                with self.subTest(tool=name):
+                    self.assertEqual(self.service_timeout(name, bridge=generated), self.service_timeout(name))
+
+    def test_read_budget_covers_snapshot_and_three_independent_identity_reads(self):
+        self.assertLess(55 + 3 * 45, self.service_timeout("read_agent"))
 
     def test_deliveries_input_and_other_tools_keep_original_120_second_budget(self):
         for name in ("send_message", "send_terminal_input", "update_agent", "get_agent", "list_active_agents",

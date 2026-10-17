@@ -71,6 +71,28 @@ class TerminalClientTests(unittest.TestCase):
         self.assertEqual(result["ansi"], view["ansi"])
         snapshot.assert_called_once_with("ceohub-0123456789abcdef", 5000)
 
+    def test_slow_foreground_checks_finish_within_loopback_delivery_budget(self):
+        self.descriptor()
+        terminal = "ceohub-0123456789abcdef"
+        cases = (
+            (lambda: self.client.snapshot(terminal, 1), 45),
+            (lambda: self.client.output(terminal, after=1), 45),
+            (lambda: self.client.write(terminal, "input", {"data": "fixture"}), 45),
+            (lambda: self.client.write(terminal, "prompt", {"text": "fixture"}), 90),
+        )
+        for call, checks_budget in cases:
+            with self.subTest(checks_budget=checks_budget), patch.object(self.client.opener, "open") as opened:
+                opened.return_value.__enter__.return_value.read.return_value = b"{}"
+                call()
+                timeout = opened.call_args.kwargs["timeout"]
+                self.assertGreaterEqual(timeout, checks_budget + 5)
+                self.assertLess(timeout, 120, "The MCP request must outlast broker delivery checks")
+        for operation in ("resize", "close"):
+            with self.subTest(operation=operation), patch.object(self.client.opener, "open") as opened:
+                opened.return_value.__enter__.return_value.read.return_value = b"{}"
+                self.client.write(terminal, operation, {})
+                self.assertEqual(opened.call_args.kwargs["timeout"], 20)
+
     def test_manager_launch_environment_is_lazy_and_only_copied_into_owned_child(self):
         inherited = {"KEEP": "yes", "HTTP_PROXY": "http://127.0.0.1:7890"}
         callback = Mock(return_value=inherited)

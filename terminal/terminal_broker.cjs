@@ -537,8 +537,12 @@ class TerminalBroker {
 
   async probeForeground(session) {
     if (session.transport === 'ssh') {
-      const result = await commandResult(sshExecutable(), ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', session.target,
-        remoteForegroundCommand(session.id)]);
+      // Relayed SSH can take longer than 12 seconds even when the remote probe
+      // itself is immediate. Bound the complete independent query generously;
+      // its failure still clears identity rather than reusing an old proof.
+      const result = await commandResult(sshExecutable(), ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20',
+        '-o', 'ControlMaster=no', '-o', 'ControlPersist=no', '-o', 'ControlPath=none', session.target,
+        remoteForegroundCommand(session.id)], 45000);
       const marker = 'CEO_HUB_FOREGROUND_RESULT=';
       const line = String(result.stdout || '').split(/\r?\n/).reverse().find(line => line.startsWith(marker));
       let identity;

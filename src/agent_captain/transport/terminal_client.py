@@ -21,6 +21,12 @@ from agent_captain.infrastructure.background_process import BackgroundLaunchUnkn
 
 from agent_captain.paths import ROOT
 BROKER_WIRE_VERSION = "0.3.0"
+# An SSH foreground check can take 45 seconds on a relayed route. Snapshots,
+# output and raw input wait for one check; prompt delivery verifies twice.
+# Keep the loopback request alive long enough to receive the broker's result
+# instead of abandoning a still-running check or an uncertain input action.
+FOREGROUND_RPC_TIMEOUT = 55
+PROMPT_RPC_TIMEOUT = 105
 
 
 def broker_script(identity=None):
@@ -587,7 +593,8 @@ class TerminalClient:
         return self.request("/sessions/create", body)
 
     def snapshot(self, terminal_id, lines=60):
-        return self.request(f"/sessions/{quote(terminal_id, safe='')}/snapshot?lines={min(5000, max(1, int(lines)))}")
+        return self.request(f"/sessions/{quote(terminal_id, safe='')}/snapshot?lines={min(5000, max(1, int(lines)))}",
+                            timeout=FOREGROUND_RPC_TIMEOUT)
 
     def output(self, terminal_id, after=0):
         if int(after) == 0:
@@ -598,9 +605,11 @@ class TerminalClient:
                     "blocked_reason": snapshot.get("blocked_reason"), "human_busy": snapshot.get("human_busy", False),
                     "human_input": snapshot.get("human_input"),
                     "cols": snapshot["cols"], "rows": snapshot["rows"]}
-        return self.request(f"/sessions/{quote(terminal_id, safe='')}/output?after={max(0, int(after))}")
+        return self.request(f"/sessions/{quote(terminal_id, safe='')}/output?after={max(0, int(after))}",
+                            timeout=FOREGROUND_RPC_TIMEOUT)
 
     def write(self, terminal_id, action, body):
         if action not in ("input", "prompt", "resize", "close"):
             raise ValueError("Unknown terminal action")
-        return self.request(f"/sessions/{quote(terminal_id, safe='')}/{action}", body)
+        timeout = PROMPT_RPC_TIMEOUT if action == "prompt" else FOREGROUND_RPC_TIMEOUT if action == "input" else 20
+        return self.request(f"/sessions/{quote(terminal_id, safe='')}/{action}", body, timeout=timeout)

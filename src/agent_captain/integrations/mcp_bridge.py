@@ -174,13 +174,15 @@ def call_service(name: str, arguments: dict[str, Any]) -> Any:
     if name == "poll_events":
         timeout = max(65, arguments.get("timeout_seconds", 0) + 10)
     elif name == "reconnect_agent":
-        # Continuity checks can need four 45-second SSH reads around the
-        # bounded display RPCs. Keep this allowance separate from delivery.
-        timeout = 240
+        # Continuity checks can need four 45-second SSH reads around display
+        # RPCs that wait for a fresh foreground proof on relayed routes.
+        # Keep this allowance separate from delivery.
+        timeout = 330
     elif name == "read_agent":
-        # Verified output uses three independent bounded SSH reads. Neither
-        # read allowance changes uncertain terminal-input delivery semantics.
-        timeout = 180
+        # A display snapshot can wait up to 55 seconds; verified output then
+        # uses three independent 45-second SSH reads. Leave time for both.
+        # Read allowance never changes uncertain-input delivery semantics.
+        timeout = 210
     else:
         timeout = 120
     try:

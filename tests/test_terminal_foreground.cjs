@@ -62,6 +62,48 @@ test('process-race or parse failure does not reuse a previously trusted Codex st
   assert.equal(f.current.state, 'unknown');
 });
 
+test('a timed-out foreground check clears readiness until a fresh process proof succeeds', async () => {
+  const f = await fixture(codexViaNode);
+  await f.broker.refreshForeground(f.current, true);
+  assert.equal(f.broker.describe(f.current).agent_ready, true);
+  let checks = 0;
+  f.broker.probe = async () => {
+    checks++;
+    throw Object.assign(new Error('foreground query exceeded its budget'), { code: 'ETIMEDOUT', killed: true });
+  };
+  await assert.rejects(f.broker.prompt(f.id, { text: 'do not reuse the old proof', request_key: 'timeout-fence' }),
+    error => error.code === 'agent_not_confirmed');
+  assert.equal(f.current.state, 'unknown');
+  assert.equal(f.current.agentIdentity, null);
+  assert.equal(f.broker.describe(f.current).agent_ready, false);
+  assert.equal(checks, 1);
+  assert.deepEqual(f.writes, []);
+
+  f.broker.probe = async () => { checks++; return { ...codexViaNode, agent_pid: 301, agent_start_ticks: 10301 }; };
+  await f.broker.refreshForeground(f.current, true);
+  assert.equal(checks, 2, 'Recovery requires a new identity query, not restoration of a cached ready state');
+  assert.equal(f.broker.describe(f.current).agent_ready, true);
+  assert.equal(f.current.agentIdentity.pid, 301);
+  assert.equal(f.current.agentIdentity.startTicks, 10301);
+  assert.deepEqual(f.writes, [], 'Checking and recovering readiness never sends task input');
+});
+
+test('a timeout during the final fresh identity check prevents task input', async () => {
+  const f = await fixture(codexViaNode);
+  let checks = 0;
+  f.broker.probe = async () => {
+    if (++checks === 1) return codexViaNode;
+    throw Object.assign(new Error('final foreground query timed out'), { code: 'ETIMEDOUT', killed: true });
+  };
+  await assert.rejects(f.broker.prompt(f.id, { text: 'must not be delivered', request_key: 'final-timeout-fence' }),
+    error => error.code === 'agent_not_confirmed');
+  assert.equal(checks, 2);
+  assert.equal(f.current.state, 'unknown');
+  assert.equal(f.current.agentIdentity, null);
+  assert.equal(f.broker.describe(f.current).agent_ready, false);
+  assert.deepEqual(f.writes, []);
+});
+
 test('last-moment PID, start time, or foreground group change prevents submitting into a replacement process', async () => {
   for (const changed of [{ agent_pid: 999 }, { agent_start_ticks: 99999 }, { foreground_pgid: 999 }]) {
     const f = await fixture(codexViaNode);
