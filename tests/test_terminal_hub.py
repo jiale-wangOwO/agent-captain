@@ -9,10 +9,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from terminal_client import BrokerError
-from terminal_hub import Hub
+from agent_captain.transport.terminal_client import BrokerError
+from agent_captain.core.terminal_hub import Hub
 
 
 class FakeTerminals:
@@ -166,8 +166,8 @@ class TerminalHubTests(unittest.TestCase):
 
     def test_startup_and_registry_never_launch_or_scan_agents(self):
         self.hub.close()
-        with patch("terminal_hub.subprocess.run", side_effect=AssertionError("no SSH at startup")), \
-             patch("terminal_hub.catalog.main", side_effect=AssertionError("no history scan")):
+        with patch("agent_captain.core.terminal_hub.subprocess.run", side_effect=AssertionError("no SSH at startup")), \
+             patch("agent_captain.core.terminal_hub.catalog.main", side_effect=AssertionError("no history scan")):
             self.hub = Hub(self.temp.name, terminals=self.terminals)
             self.hub.plugin_call("list_active_agents", {})
             self.hub.attached_agents()

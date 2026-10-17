@@ -2,7 +2,7 @@
 // Fake terminal sink only: no SSH process, PTY, model, or real agent message.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { TerminalBroker } = require('../terminal_broker.cjs');
+const { TerminalBroker } = require('../terminal/terminal_broker.cjs');
 
 async function fixture(result) {
   const writes = [], stats = { probes: 0 }; let output;

@@ -9,11 +9,11 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import catalog
-from legacy_appserver_hub import LegacyAppServerHub as Hub
-from rpc import Rpc
-from store import Store
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from agent_captain.sessions import catalog
+from agent_captain.legacy.legacy_appserver_hub import LegacyAppServerHub as Hub
+from agent_captain.legacy.rpc import Rpc
+from agent_captain.infrastructure.store import Store
 
 
 class HistoryTests(unittest.TestCase):

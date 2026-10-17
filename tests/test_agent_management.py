@@ -10,12 +10,12 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
-from terminal_hub import Hub
-from terminal_client import BrokerError
-from store import Store
+from agent_captain.core.terminal_hub import Hub
+from agent_captain.transport.terminal_client import BrokerError
+from agent_captain.infrastructure.store import Store
 from tests.test_terminal_hub import FakeTerminals
 from tests.test_controller_scope import Controllers
-from app import create_server
+from agent_captain.server.app import create_server
 from urllib.request import Request, ProxyHandler, build_opener
 from urllib.error import HTTPError
 
@@ -271,7 +271,7 @@ class AgentManagementTests(unittest.TestCase):
         # Restore the real implementation but fake every SSH subprocess.
         self.hub._probe_remote_terminal = types.MethodType(Hub._probe_remote_terminal, self.hub)
         reply = types.SimpleNamespace(returncode=0, stdout="CEO_HUB_PTY_RESULT=" + json.dumps(self.answer), stderr="")
-        with patch("terminal_hub.subprocess.run", return_value=reply) as run:
+        with patch("agent_captain.core.terminal_hub.subprocess.run", return_value=reply) as run:
             result = self.hub._probe_remote_terminal("remote", TERMINAL)
         self.assertEqual(result["identity"], IDENTITY)
         argv = run.call_args.args[0]
@@ -280,7 +280,7 @@ class AgentManagementTests(unittest.TestCase):
         self.assertIn("ControlPersist=no", argv)
         self.assertIn("probe --session " + TERMINAL, argv[-1])
         self.assertNotIn("new-session", argv[-1])
-        with patch("terminal_hub.subprocess.run", return_value=types.SimpleNamespace(returncode=1, stdout="", stderr="PRIVATE_SECRET")):
+        with patch("agent_captain.core.terminal_hub.subprocess.run", return_value=types.SimpleNamespace(returncode=1, stdout="", stderr="PRIVATE_SECRET")):
             result = self.hub._probe_remote_terminal("remote", TERMINAL)
         self.assertNotIn("PRIVATE_SECRET", json.dumps(result))
 
@@ -301,7 +301,7 @@ class AgentManagementTests(unittest.TestCase):
         self.hub._probe_remote_terminal = types.MethodType(Hub._probe_remote_terminal, self.hub)
         for text, expected in (("Permission denied (publickey) PRIVATE_DETAIL", "ssh_auth_required"),
                                ("Host key verification failed PRIVATE_DETAIL", "ssh_host_key_required")):
-            with patch("terminal_hub.subprocess.run", return_value=types.SimpleNamespace(returncode=1, stdout="", stderr=text)):
+            with patch("agent_captain.core.terminal_hub.subprocess.run", return_value=types.SimpleNamespace(returncode=1, stdout="", stderr=text)):
                 result = self.hub._probe_remote_terminal("remote", TERMINAL)
             self.assertEqual(result["reason"], expected)
             self.assertNotIn("PRIVATE_DETAIL", json.dumps(result))

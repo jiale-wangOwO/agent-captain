@@ -8,7 +8,7 @@ const path = require('node:path');
 const os = require('node:os');
 const pty = require('node-pty');
 const { Terminal } = require('@xterm/headless');
-const { shellQuote, spawnSshPipe } = require('../terminal_broker.cjs');
+const { shellQuote, spawnSshPipe } = require('../terminal/terminal_broker.cjs');
 const target = process.env.CEO_HUB_TEST_SSH_TARGET;
 if (!target) throw new Error('Set CEO_HUB_TEST_SSH_TARGET to a test SSH target');
 const ssh = process.platform === 'win32' ? path.join(process.env.WINDIR || 'C:\\Windows', 'System32', 'OpenSSH', 'ssh.exe') : 'ssh';

@@ -11,8 +11,8 @@ import uuid
 from pathlib import Path
 from urllib.request import Request, ProxyHandler, build_opener
 
-from app import create_server
-from hub import Hub, ROOT
+from agent_captain.server.app import create_server
+from agent_captain.core.hub import Hub, ROOT
 
 
 @unittest.skipUnless(os.environ.get("CEO_HUB_LIVE_TESTS") == "1", "opt-in real local PTY; no model inference")
@@ -26,7 +26,7 @@ class LiveSharedTerminalTests(unittest.TestCase):
             descriptor = Path(temporary) / "connection.json"
             descriptor.write_text(json.dumps({"url": web.origin, "token": web.session_token}), encoding="utf-8")
             env = {**os.environ, "CEO_HUB_CONNECTION_FILE": str(descriptor)}
-            bridge = subprocess.Popen([sys.executable, "-u", str(ROOT / "mcp_bridge.py")], stdin=subprocess.PIPE,
+            bridge = subprocess.Popen([sys.executable, "-u", str(ROOT / "scripts/captain.py"), "mcp"], stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", env=env,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             opener = build_opener(ProxyHandler({}))

@@ -1,14 +1,14 @@
 """Explicit maintenance for the pinned worker display service, never agents.
 
-Use ``python terminal_service.py status`` for a read-only check, or
-``python terminal_service.py recover --confirm`` for a safe offline-owner
+Use ``python scripts/captain.py terminal status`` for a read-only check, or
+``python scripts/captain.py terminal recover --confirm`` for a safe offline-owner
 recovery. This command does not connect machines or initialize work sessions.
 """
 import argparse
 import json
 import sys
 
-from terminal_client import TerminalClient
+from agent_captain.transport.terminal_client import TerminalClient
 
 
 def main(argv=None):

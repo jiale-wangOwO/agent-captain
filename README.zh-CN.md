@@ -51,12 +51,14 @@
 git clone https://github.com/jiale-wangOwO/agent-captain.git agent-captain
 cd agent-captain
 npm ci
-python app.py serve
+python scripts/captain.py serve
 ```
 
 打开 **[localhost:8766](http://127.0.0.1:8766/)**。仓库目前仍为 **private**，克隆需要访问权限。全新配置只有本机，不会自行发现或连接你的服务器。
 
-Windows 可双击 `run_agentcaptain.cmd`，在当前用户后台启动服务并打开工作台；也可显式运行 `python service.py start`、`python service.py status`。不会安装管理员服务或开机自启。
+Windows 可双击 `run_agentcaptain.cmd`，在当前用户后台启动服务并打开工作台；也可显式运行 `python scripts/captain.py service start`、`python scripts/captain.py service status`。不会安装管理员服务或开机自启。
+
+希望使用简短命令时，可在本仓库执行 `python -m pip install -e .`，之后使用 `agent-captain serve` 或 `agent-captain service start`。仍需保留仓库和 npm 依赖；这不是独立打包的桌面安装器。
 
 1. **接入工作。** 按需添加 SSH 别名，选择项目目录、打开终端，自行运行 `codex`、`codex-switch` 或常用启动器。
 2. **启动队长。** 点击 **「启动管理会话」**，Hub 为原生本机 Codex 对话准备角色、身份和工具。这条路径无需手动安装插件；登录、信任与权限提示仍由你确认。
@@ -89,6 +91,7 @@ Hub 创建的队长有独立工具身份，**新建工作终端**受明确的机
 | 管理、派发、验收、权限和生命周期 | [管理会话产品约定](docs/management-session-product.md) |
 | 服务掉线、SSH 路由、Codex 后台包 | [恢复与维护导航](docs/index.md#recover-and-maintain) |
 | 测试、提交安全检查、贡献流程 | [贡献说明](CONTRIBUTING.md) |
+| 源码分层、组件边界、已有安装迁移 | [仓库结构](docs/repository-layout.md) |
 
 ## 参与贡献
 

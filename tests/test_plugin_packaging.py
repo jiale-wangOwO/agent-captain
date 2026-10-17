@@ -28,8 +28,11 @@ class PluginPackagingTests(unittest.TestCase):
         marketplace = self.clone / ".agents" / "plugins"
         marketplace.mkdir(parents=True)
         shutil.copyfile(ROOT / ".agents" / "plugins" / "marketplace.json", marketplace / "marketplace.json")
-        shutil.copyfile(ROOT / "mcp_bridge.py", self.clone / "mcp_bridge.py")
-        shutil.copyfile(ROOT / "management_policy.py", self.clone / "management_policy.py")
+        self.package_source = self.clone / "src" / "agent_captain"
+        for relative in ("integrations/mcp_bridge.py", "core/management_policy.py"):
+            target = self.package_source / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / "src" / "agent_captain" / relative, target)
         self.output = self.base / "retained local marketplace"
 
     def tearDown(self):
@@ -63,8 +66,10 @@ class PluginPackagingTests(unittest.TestCase):
         self.assertEqual(server["command"], str(Path(sys.executable).resolve()))
         self.assertEqual(server["args"], ["-u", str(plugin / "mcp_bridge.py")])
         self.assertEqual(server["env"], {"AGENTCAPTAIN_CONNECTION_FILE": str(self.clone / ".runtime" / "service.json")})
-        self.assertEqual((plugin / "mcp_bridge.py").read_bytes(), (self.clone / "mcp_bridge.py").read_bytes())
-        self.assertEqual((plugin / "management_policy.py").read_bytes(), (self.clone / "management_policy.py").read_bytes())
+        self.assertEqual((plugin / "mcp_bridge.py").read_bytes(),
+                         (self.package_source / "integrations" / "mcp_bridge.py").read_bytes())
+        self.assertEqual((plugin / "management_policy.py").read_bytes(),
+                         (self.package_source / "core" / "management_policy.py").read_bytes())
         self.assertEqual(result["plugin"], "agent-captain@agent-captain-local")
         self.assertTrue(result["retain_generated_directory"])
         self.assertEqual(result["commands"][1], "codex plugin add agent-captain@agent-captain-local")
@@ -77,6 +82,20 @@ class PluginPackagingTests(unittest.TestCase):
     def test_default_output_is_checkout_runtime(self):
         result = configure.configure_plugin(repo_root=self.clone)
         self.assertEqual(Path(result["marketplace_root"]), self.clone / ".runtime" / "plugin-marketplace")
+
+    def test_ignored_legacy_launchers_are_not_plugin_source(self):
+        # Old installations can keep local compatibility entries at these
+        # paths. A plugin must contain the canonical standalone implementation,
+        # never a checkout bootstrap or any unrelated local additions.
+        for name in ("mcp_bridge.py", "management_policy.py"):
+            (self.clone / name).write_text("legacy-bootstrap-not-for-bundling", encoding="utf-8")
+        result = self.generate()
+        plugin = Path(result["plugin_root"])
+        for name, relative in (("mcp_bridge.py", "integrations/mcp_bridge.py"),
+                               ("management_policy.py", "core/management_policy.py")):
+            self.assertEqual((plugin / name).read_bytes(),
+                             (self.package_source / relative).read_bytes())
+            self.assertNotIn(b"legacy-bootstrap-not-for-bundling", (plugin / name).read_bytes())
 
     def test_generated_readme_links_to_repository_documentation(self):
         result = self.generate()
@@ -286,13 +305,13 @@ class PluginPackagingTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
 
     def test_missing_bridge_refused_before_output(self):
-        (self.clone / "mcp_bridge.py").unlink()
+        (self.package_source / "integrations" / "mcp_bridge.py").unlink()
         with self.assertRaises(configure.ConfigurationError):
             self.generate()
         self.assertFalse(self.output.exists())
 
     def test_missing_management_policy_refused_before_output(self):
-        (self.clone / "management_policy.py").unlink()
+        (self.package_source / "core" / "management_policy.py").unlink()
         with self.assertRaises(configure.ConfigurationError):
             self.generate()
         self.assertFalse(self.output.exists())

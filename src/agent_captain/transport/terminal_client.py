@@ -16,11 +16,22 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse, quote
 import uuid
-from process_identity import broker_owner_state, observe_process, valid_owner_identity
-from background_process import BackgroundLaunchUnknown, background_environment, launch_background
+from agent_captain.infrastructure.process_identity import broker_owner_state, observe_process, valid_owner_identity
+from agent_captain.infrastructure.background_process import BackgroundLaunchUnknown, background_environment, launch_background
 
-ROOT = Path(__file__).resolve().parent
+from agent_captain.paths import ROOT
 BROKER_WIRE_VERSION = "0.3.0"
+
+
+def broker_script(identity=None):
+    """Allow only this checkout's canonical and migrated legacy entrypoints."""
+    canonical = ROOT / "terminal" / "terminal_broker.cjs"
+    if identity is not None:
+        for script in (canonical, ROOT / "terminal_broker.cjs"):
+            if valid_owner_identity(identity, script):
+                return script
+        raise ValueError("Invalid terminal broker owner identity")
+    return canonical
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -108,8 +119,9 @@ class TerminalClient:
         if generation is not None and (not isinstance(generation, str) or len(generation) != 32
                                        or any(char not in "0123456789abcdef" for char in generation)):
             raise ValueError("Invalid terminal broker recovery generation")
-        if "owner_identity" in data and not valid_owner_identity(data["owner_identity"], ROOT / "terminal_broker.cjs"):
-            raise ValueError("Invalid terminal broker process birth identity")
+        if "owner_identity" in data:
+            if not valid_owner_identity(data["owner_identity"], broker_script(data["owner_identity"])):
+                raise ValueError("Invalid terminal broker process birth identity")
         return data
 
     def descriptor(self):
@@ -215,7 +227,7 @@ class TerminalClient:
         state = self._pid_state(data["pid"])
         if state != "alive":
             return state
-        return broker_owner_state(data["pid"], data.get("owner_identity"), ROOT / "terminal_broker.cjs",
+        return broker_owner_state(data["pid"], data.get("owner_identity"), broker_script(data.get("owner_identity")),
                                   observation=observe_process(data["pid"]))
 
     @staticmethod
@@ -229,7 +241,7 @@ class TerminalClient:
         value = json.loads(raw)
         if (not isinstance(value, dict) or set(value) != {"pid", "owner_identity"}
                 or type(value["pid"]) is not int or not 0 < value["pid"] <= 2147483647
-                or not valid_owner_identity(value["owner_identity"], ROOT / "terminal_broker.cjs")):
+                or not valid_owner_identity(value["owner_identity"], broker_script(value["owner_identity"]))):
             raise ValueError("Invalid broker lease owner")
         return value
 
@@ -428,7 +440,7 @@ class TerminalClient:
                 # exception is not proof that no broker child was started.
                 launch_attempted = True
                 preserve_maintenance = True
-                process = launch_background([node, str(ROOT / "terminal_broker.cjs")], cwd=ROOT,
+                process = launch_background([node, str(broker_script())], cwd=ROOT,
                     stdout_path=self.runtime / "terminal.out.log", stderr_path=self.runtime / "terminal.err.log",
                     env_overrides=background_environment(environment))
                 deadline = time.monotonic() + 10
@@ -508,7 +520,7 @@ class TerminalClient:
             environment = os.environ.copy() if inherited is None else dict(inherited)
             environment["CEO_HUB_TERMINAL_FILE"] = str(chosen)
             environment["CEO_HUB_IDENTITY_PYTHON"] = sys.executable
-            process = launch_background([node, str(ROOT / "terminal_broker.cjs")], cwd=ROOT,
+            process = launch_background([node, str(broker_script())], cwd=ROOT,
                 stdout_path=logs / "terminal.out.log", stderr_path=logs / "terminal.err.log",
                 env_overrides=background_environment(environment))
             deadline = time.monotonic() + 10

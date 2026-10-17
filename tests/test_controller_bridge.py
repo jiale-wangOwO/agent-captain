@@ -8,8 +8,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch, Mock
 
-import mcp_bridge
-from terminal_client import TerminalClient
+from agent_captain.integrations import mcp_bridge
+from agent_captain.transport.terminal_client import TerminalClient
 
 
 class ControllerBridgeTests(unittest.TestCase):
@@ -118,8 +118,8 @@ class ControllerBridgeTests(unittest.TestCase):
             client = TerminalClient(descriptor_file=custom, runtime=runtime)
             process = Mock()
             process.poll.return_value = None
-            with patch.object(client, "running", side_effect=[False, True]), patch("terminal_client.shutil.which", return_value="fake-node"), \
-                 patch("terminal_client.launch_background", return_value=process) as launch:
+            with patch.object(client, "running", side_effect=[False, True]), patch("agent_captain.transport.terminal_client.shutil.which", return_value="fake-node"), \
+                 patch("agent_captain.transport.terminal_client.launch_background", return_value=process) as launch:
                 client.ensure_started()
             self.assertEqual(os.environ["CEO_HUB_TERMINAL_FILE"], "unchanged-worker.json")
             self.assertEqual(launch.call_args.kwargs["env_overrides"]["CEO_HUB_TERMINAL_FILE"], str(custom.resolve()))

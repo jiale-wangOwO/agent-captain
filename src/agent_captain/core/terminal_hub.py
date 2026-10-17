@@ -12,15 +12,14 @@ import time
 import uuid
 from pathlib import Path
 
-import catalog
-from directory_browser import DirectoryBrowser
-from store import Store
-from terminal_client import BrokerError, TerminalClient
-from controllers import ControllerService, default_workspace_root
-from management_policy import public_management_policy
-import remote_terminal_history
-
-ROOT = Path(__file__).resolve().parent
+from agent_captain.sessions import catalog
+from agent_captain.transport.directory_browser import DirectoryBrowser
+from agent_captain.infrastructure.store import Store
+from agent_captain.transport.terminal_client import BrokerError, TerminalClient
+from agent_captain.core.controllers import ControllerService, default_workspace_root
+from agent_captain.core.management_policy import public_management_policy
+from agent_captain.transport import remote_terminal_history
+from agent_captain.paths import ROOT, source_path
 VERSION = "0.7.0"
 RETRYABLE = ("queued", "waiting_for_agent", "human_busy", "awaiting_connection", "blocked")
 MANAGEMENT_EVENTS = ("host_configured", "host_connected", "host_unavailable", "agent_attached",
@@ -158,9 +157,9 @@ class Hub:
         modules = ("session_binding", "conversation_output") if request["op"] in ("bind_output", "resolve_output", "read_output") else ()
         source = "import sys,types\n"
         for name in modules:
-            code = (ROOT / (name + ".py")).read_text(encoding="utf-8")
+            code = source_path("sessions", name + ".py").read_text(encoding="utf-8")
             source += f"_module=types.ModuleType({name!r});sys.modules[{name!r}]=_module;exec(compile({code!r},{name!r},'exec'),_module.__dict__)\n"
-        source += (ROOT / "catalog.py").read_text(encoding="utf-8").replace("from __future__ import annotations\n", "", 1)
+        source += source_path("sessions", "catalog.py").read_text(encoding="utf-8").replace("from __future__ import annotations\n", "", 1)
         try:
             reply = subprocess.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPersist=no",
                 "-o", "ConnectTimeout=30", target, "python3 - " + payload],
@@ -827,7 +826,7 @@ class Hub:
             return {"ok": False, "exists": False, "reason": "invalid_ssh_target"}
         # Send the same source the old 0.3 broker loads per attachment. Probe mode
         # only reads the chosen tmux/pane identity, never input or model config.
-        source = (ROOT / "remote_pty_bridge.py").read_text(encoding="utf-8")
+        source = source_path("transport", "remote_pty_bridge.py").read_text(encoding="utf-8")
         try:
             reply = subprocess.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPersist=no", "-o", "ConnectTimeout=30",
                 target, "python3 - probe --session " + shlex.quote(terminal_id)], input=source,
@@ -1373,7 +1372,7 @@ class Hub:
             if (not isinstance(target, str) or not target or target.startswith("-")
                     or any(char.isspace() or ord(char) < 32 for char in target)):
                 raise ValueError("SSH 目标无效，未读取终端历史。")
-        source = (ROOT / "remote_terminal_history.py").read_text(encoding="utf-8")
+        source = source_path("transport", "remote_terminal_history.py").read_text(encoding="utf-8")
         try:
             reply = subprocess.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPersist=no", "-o", "ConnectTimeout=30",
                 target, "python3 - --session " + shlex.quote(terminal_id) + " --lines " + str(lines)],

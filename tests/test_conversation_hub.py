@@ -6,8 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from terminal_hub import Hub
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from agent_captain.core.terminal_hub import Hub
 from test_terminal_hub import FakeTerminals
 
 SESSION = "11111111-1111-4111-8111-111111111111"

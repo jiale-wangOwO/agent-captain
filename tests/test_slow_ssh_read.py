@@ -1,12 +1,13 @@
 """Bounded slow-SSH reads and explicit pre-attachment retry, without live SSH."""
 import importlib.util
+import sys
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-import mcp_bridge
-from terminal_hub import Hub
+from agent_captain.integrations import mcp_bridge
+from agent_captain.core.terminal_hub import Hub
 from tests.test_terminal_hub import FakeTerminals
 from tests.test_agent_management import TERMINAL, IDENTITY
 
@@ -158,7 +159,10 @@ class SlowSSHMCPBudgetTests(unittest.TestCase):
             self.skipTest("Machine-local generated plugin source is not present in a clean checkout")
         spec = importlib.util.spec_from_file_location("slow_ssh_retained_plugin_fixture", filename)
         retained = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(retained)
+        # Script execution normally adds its own directory to sys.path. Do not
+        # accidentally import a policy from the old flat checkout layout.
+        with patch.dict(sys.modules), patch.object(sys, "path", [str(filename.parent), *sys.path]):
+            spec.loader.exec_module(retained)
         for name in ("read_agent", "reconnect_agent", "send_message", "send_terminal_input", "update_agent", "poll_events"):
             with self.subTest(tool=name):
                 self.assertEqual(self.service_timeout(name, bridge=retained), self.service_timeout(name))

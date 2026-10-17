@@ -24,8 +24,8 @@ import uuid
 # Isolated Python excludes even the script directory from sys.path. Restore
 # only this trusted source directory to load our shared native identity reader.
 if __name__ == "__main__":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-from process_identity import observe_process
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from agent_captain.infrastructure.process_identity import observe_process
 
 MAX_PLAN = 65536
 ENVIRONMENT_KEYS = frozenset({

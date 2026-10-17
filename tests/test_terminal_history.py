@@ -12,9 +12,9 @@ from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
-import remote_terminal_history as history
-from app import create_server
-from terminal_hub import Hub
+from agent_captain.transport import remote_terminal_history as history
+from agent_captain.server.app import create_server
+from agent_captain.core.terminal_hub import Hub
 from tests.test_terminal_hub import FakeTerminals
 
 TERMINAL = "ceohub-0123456789abcdef01234567"
@@ -176,7 +176,7 @@ class HubTerminalHistoryTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_selected_inactive_worker_history_is_one_readonly_ssh_not_global_scan(self):
-        with patch("terminal_hub.subprocess.run", return_value=ssh_reply()) as run:
+        with patch("agent_captain.core.terminal_hub.subprocess.run", return_value=ssh_reply()) as run:
             result = self.hub.terminal_history("remote", "worker")
         self.assertEqual(result["text"], "older row\nrecent row")
         self.assertEqual(result["terminal_id"], TERMINAL)
@@ -195,7 +195,7 @@ class HubTerminalHistoryTests(unittest.TestCase):
     def test_local_unknown_history_only_closed_or_invalid_scope_never_runs_ssh(self):
         self.terminals.add(OTHER_TERMINAL, "local")
         self.hub.store.remember("local", "local-worker", "Local", mode="terminal", terminal_id=OTHER_TERMINAL)
-        with patch("terminal_hub.subprocess.run") as run:
+        with patch("agent_captain.core.terminal_hub.subprocess.run") as run:
             for host, thread in (("remote", "missing"), ("local", "local-worker"), ("missing", "worker")):
                 with self.assertRaises((ValueError, PermissionError)):
                     self.hub.terminal_history(host, thread)
@@ -207,7 +207,7 @@ class HubTerminalHistoryTests(unittest.TestCase):
         self.assertFalse(self.terminals.writes)
 
     def test_bounds_and_ssh_alias_validation_happen_before_remote_io(self):
-        with patch("terminal_hub.subprocess.run") as run:
+        with patch("agent_captain.core.terminal_hub.subprocess.run") as run:
             for lines in (True, 0, 5001, "100"):
                 with self.assertRaises(ValueError):
                     self.hub.terminal_history("remote", "worker", lines)
@@ -234,19 +234,19 @@ class HubTerminalHistoryTests(unittest.TestCase):
                      types.SimpleNamespace(returncode=0, stdout=ssh_reply().stdout * 2, stderr=""),
                      types.SimpleNamespace(returncode=0, stdout=history.RESULT_MARKER + "{bad PRIVATE_SECRET", stderr="")]
         for reply in variants:
-            with self.subTest(reply=str(reply)[:50]), patch("terminal_hub.subprocess.run", return_value=reply), \
+            with self.subTest(reply=str(reply)[:50]), patch("agent_captain.core.terminal_hub.subprocess.run", return_value=reply), \
                  self.assertRaises(ValueError) as error:
                 self.hub.terminal_history("remote", "worker")
             self.assertNotIn("PRIVATE_", str(error.exception))
         self.assertFalse(self.terminals.writes)
 
     def test_timeout_and_identity_change_are_explicit_safe_failures(self):
-        with patch("terminal_hub.subprocess.run", side_effect=subprocess.TimeoutExpired("PRIVATE_COMMAND", 25)), \
+        with patch("agent_captain.core.terminal_hub.subprocess.run", side_effect=subprocess.TimeoutExpired("PRIVATE_COMMAND", 25)), \
              self.assertRaisesRegex(ValueError, "只读终端历史暂不可用"):
             self.hub.terminal_history("remote", "worker")
         reply = types.SimpleNamespace(returncode=1, stderr="", stdout=history.RESULT_MARKER + json.dumps(
             {"ok": False, "reason": "identity_changed"}))
-        with patch("terminal_hub.subprocess.run", return_value=reply), self.assertRaisesRegex(ValueError, "身份或显示状态已变化"):
+        with patch("agent_captain.core.terminal_hub.subprocess.run", return_value=reply), self.assertRaisesRegex(ValueError, "身份或显示状态已变化"):
             self.hub.terminal_history("remote", "worker")
 
     def test_registration_transport_or_closed_state_changed_during_io_rejects_text(self):
@@ -261,19 +261,19 @@ class HubTerminalHistoryTests(unittest.TestCase):
                 else:
                     self.hub.store.remember("remote", "worker", "Worker", mode="closed")
                 return ssh_reply()
-            with self.subTest(change=change), patch("terminal_hub.subprocess.run", side_effect=reply), self.assertRaises(ValueError):
+            with self.subTest(change=change), patch("agent_captain.core.terminal_hub.subprocess.run", side_effect=reply), self.assertRaises(ValueError):
                 self.hub.terminal_history("remote", "worker")
         self.assertFalse(self.terminals.writes)
 
     def test_controller_reference_is_not_worker_history_even_with_valid_registration(self):
         with patch.object(self.hub.controllers, "is_controller_reference", return_value=True), \
-             patch("terminal_hub.subprocess.run") as run, self.assertRaises(PermissionError):
+             patch("agent_captain.core.terminal_hub.subprocess.run") as run, self.assertRaises(PermissionError):
             self.hub.terminal_history("remote", "worker")
         run.assert_not_called()
 
     def test_disconnected_display_history_read_never_revives_attachment(self):
         self.terminals.records[TERMINAL].update(connected=False, state="exited")
-        with patch("terminal_hub.subprocess.run", return_value=ssh_reply()):
+        with patch("agent_captain.core.terminal_hub.subprocess.run", return_value=ssh_reply()):
             result = self.hub.terminal_history("remote", "worker")
         self.assertEqual(result["source"], "tmux_pane_history")
         self.assertFalse(self.terminals.records[TERMINAL]["connected"])
@@ -287,7 +287,7 @@ class HubTerminalHistoryTests(unittest.TestCase):
         opener = build_opener(ProxyHandler({}))
         url = f"http://127.0.0.1:{server.server_port}/api/terminals/history?host=remote&thread_id=worker&lines=50"
         try:
-            with patch("terminal_hub.subprocess.run", return_value=ssh_reply(captured(lines=50))) as run:
+            with patch("agent_captain.core.terminal_hub.subprocess.run", return_value=ssh_reply(captured(lines=50))) as run:
                 for headers in ({}, {"Authorization": "Bearer fixture-user-cookie-token"}):
                     with self.assertRaises(HTTPError) as error:
                         opener.open(Request(url, headers=headers))

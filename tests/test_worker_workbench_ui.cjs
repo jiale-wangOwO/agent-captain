@@ -374,7 +374,7 @@ test('legacy backend 404 offers manual explicit helper and never POSTs a missing
   const h = await harness({agents: [worker('remote', 'two', '316', {connected: false, recovery: localDisplayBlocked})], handle: async call => call.url === '/api/terminal-service/status' ? {ok: false, status: 404, json: async () => ({error: 'missing endpoint'})} : null});
   await h.context.selectAgent(h.agents[0]); await h.context.openDisplayServiceRecovery(); assert.equal(h.get('#terminal-service-recovery-legacy').hidden, false); assert.equal(h.get('#terminal-service-recovery-submit').hidden, true);
   await h.context.recoverDisplayService(); assert.equal(h.calls.some(c => c.options.method === 'POST'), false);
-  const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8'); assert.match(html, /python terminal_service\.py recover --confirm/); assert.match(html, /本机 PTY 不会重建/);
+  const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8'); assert.match(html, /python scripts\/captain\.py terminal recover --confirm/); assert.match(html, /本机 PTY 不会重建/);
 });
 
 for (const freshProof of [true, false]) test(`legacy unknown recovery ${freshProof ? 'uses real proof and same key after explicit reconcile' : 'keeps unknown without fabricating proof on already-running service'}`, async () => {

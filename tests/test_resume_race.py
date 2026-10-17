@@ -1,6 +1,6 @@
 import tempfile
 import unittest
-from legacy_appserver_hub import LegacyAppServerHub as Hub
+from agent_captain.legacy.legacy_appserver_hub import LegacyAppServerHub as Hub
 
 
 class SnapshotRaceTests(unittest.TestCase):

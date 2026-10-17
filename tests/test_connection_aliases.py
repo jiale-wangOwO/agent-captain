@@ -4,9 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-import app
-
-
+from agent_captain.server import app
 class ConnectionAliasTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

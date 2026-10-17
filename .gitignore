@@ -51,3 +51,14 @@ dist/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Generated only for previously deployed absolute entrypoint paths. Canonical
+# source is under src/ and terminal/; fresh checkouts need none of these files.
+/app.py
+/service.py
+/mcp_bridge.py
+/terminal_service.py
+/process_identity.py
+/terminal_broker.cjs
+/remote_pty_bridge.py
+/remote_foreground_probe.py

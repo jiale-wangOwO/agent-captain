@@ -9,8 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from terminal_hub import Hub, HistoryReadError
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from agent_captain.core.terminal_hub import Hub, HistoryReadError
 from test_terminal_hub import FakeTerminals
 
 SESSION = "11111111-1111-4111-8111-111111111111"
@@ -44,7 +44,7 @@ class HistoryTransportTests(unittest.TestCase):
         return self.hub.history("remote", {"op": "probe"})
 
     def test_normal_read_only_history_disables_connection_multiplexing(self):
-        with patch("terminal_hub.subprocess.run", return_value=reply()) as run:
+        with patch("agent_captain.core.terminal_hub.subprocess.run", return_value=reply()) as run:
             self.assertEqual(self.history(), {"home": "/home/worker"})
         args = run.call_args.args[0]
         self.assertIn("BatchMode=yes", args)
@@ -58,7 +58,7 @@ class HistoryTransportTests(unittest.TestCase):
     def test_original_pane_probe_has_bounded_slow_ssh_budget(self):
         probe = {"ok": True, "exists": False, "reason": "session_missing"}
         response = reply(stdout="CEO_HUB_PTY_RESULT=" + json.dumps(probe))
-        with patch("terminal_hub.subprocess.run", return_value=response) as run:
+        with patch("agent_captain.core.terminal_hub.subprocess.run", return_value=response) as run:
             self.assertEqual(self.hub._probe_remote_terminal("remote", TERMINAL), probe)
         self.assertIn("ConnectTimeout=30", run.call_args.args[0])
         self.assertEqual(run.call_args.kwargs["timeout"], 45)
@@ -79,7 +79,7 @@ class HistoryTransportTests(unittest.TestCase):
             ("ssh: connect to host example port 22: Connection refused", "ssh_transport_unavailable"),
         )
         for diagnostic, code in cases:
-            with self.subTest(code=code, diagnostic=diagnostic), patch("terminal_hub.subprocess.run",
+            with self.subTest(code=code, diagnostic=diagnostic), patch("agent_captain.core.terminal_hub.subprocess.run",
                     return_value=reply(returncode=255, stdout=SECRET, stderr=diagnostic + "\n" + SECRET)):
                 with self.assertRaises(HistoryReadError) as caught:
                     self.history()
@@ -94,14 +94,14 @@ class HistoryTransportTests(unittest.TestCase):
             (subprocess.TimeoutExpired(SECRET, 30, output=SECRET, stderr=SECRET), "ssh_timeout"),
         )
         for failure, code in failures:
-            with self.subTest(code=code), patch("terminal_hub.subprocess.run", side_effect=failure):
+            with self.subTest(code=code), patch("agent_captain.core.terminal_hub.subprocess.run", side_effect=failure):
                 with self.assertRaises(HistoryReadError) as caught:
                     self.history()
             self.assertEqual(caught.exception.reason_code, code)
             self.assertNotIn(SECRET, str(caught.exception))
 
     def test_nontransport_remote_exit_has_separate_safe_classification(self):
-        with patch("terminal_hub.subprocess.run", return_value=reply(returncode=127, stdout=SECRET,
+        with patch("agent_captain.core.terminal_hub.subprocess.run", return_value=reply(returncode=127, stdout=SECRET,
                 stderr="python3: command not found " + SECRET)):
             with self.assertRaises(HistoryReadError) as caught:
                 self.history()
@@ -115,19 +115,19 @@ class HistoryTransportTests(unittest.TestCase):
             json.dumps({"ok": True, "result": SECRET}),
         )
         for stdout in invalid:
-            with self.subTest(stdout=stdout), patch("terminal_hub.subprocess.run", return_value=reply(stdout=stdout)):
+            with self.subTest(stdout=stdout), patch("agent_captain.core.terminal_hub.subprocess.run", return_value=reply(stdout=stdout)):
                 with self.assertRaises(HistoryReadError) as caught:
                     self.history()
             self.assertEqual(caught.exception.reason_code, "protocol_invalid")
             self.assertNotIn(SECRET, str(caught.exception))
-        with patch("terminal_hub.subprocess.run", return_value=reply(stdout=json.dumps({"ok": False, "error": SECRET}))):
+        with patch("agent_captain.core.terminal_hub.subprocess.run", return_value=reply(stdout=json.dumps({"ok": False, "error": SECRET}))):
             with self.assertRaises(HistoryReadError) as caught:
                 self.history()
         self.assertEqual(caught.exception.reason_code, "remote_read_failed")
         self.assertNotIn(SECRET, str(caught.exception))
 
     def test_display_can_remain_connected_when_independent_history_handshake_fails(self):
-        with patch("terminal_hub.subprocess.run", return_value=reply(returncode=255,
+        with patch("agent_captain.core.terminal_hub.subprocess.run", return_value=reply(returncode=255,
                 stdout=SECRET, stderr="kex_exchange_identification: Connection reset\n" + SECRET)):
             result = self.hub.read_agent("remote", "worker")
         self.assertTrue(result["connected"])
@@ -146,7 +146,7 @@ class HistoryTransportTests(unittest.TestCase):
         output = {"source": "codex_rollout", "messages": [{"role": "assistant", "text": "REAL BODY"}],
                   "content_complete": True, "history_complete": True}
         failure = reply(returncode=255, stdout=SECRET, stderr="banner exchange failed " + SECRET)
-        with patch("terminal_hub.subprocess.run", side_effect=[reply(self.binding), reply(output), failure]) as run:
+        with patch("agent_captain.core.terminal_hub.subprocess.run", side_effect=[reply(self.binding), reply(output), failure]) as run:
             result = self.hub.read_agent("remote", "worker")
         self.assertEqual(run.call_count, 3)
         self.assertTrue(result["connected"])
@@ -160,7 +160,7 @@ class HistoryTransportTests(unittest.TestCase):
     def test_normal_exact_session_read_keeps_original_verification_flow(self):
         output = {"source": "codex_rollout", "messages": [{"role": "assistant", "text": "BEGIN\nFULL BODY\nEND"}],
                   "content_complete": True, "history_complete": True, "status": "completed_in_history"}
-        with patch("terminal_hub.subprocess.run", side_effect=[reply(self.binding), reply(output), reply(self.binding)]) as run:
+        with patch("agent_captain.core.terminal_hub.subprocess.run", side_effect=[reply(self.binding), reply(output), reply(self.binding)]) as run:
             result = self.hub.read_agent("remote", "worker")
         self.assertEqual(run.call_count, 3)
         self.assertEqual(sum(call.kwargs["timeout"] for call in run.call_args_list), 135,
@@ -176,7 +176,7 @@ class HistoryTransportTests(unittest.TestCase):
 
     def test_pagination_failure_is_safe_error_not_screen_output(self):
         for field in ("cursor", "after_cursor"):
-            with self.subTest(field=field), patch("terminal_hub.subprocess.run", return_value=reply(returncode=255,
+            with self.subTest(field=field), patch("agent_captain.core.terminal_hub.subprocess.run", return_value=reply(returncode=255,
                     stdout=SECRET, stderr="Host key verification failed. " + SECRET)):
                 with self.assertRaises(ValueError) as caught:
                     self.hub.read_agent("remote", "worker", **{field: "same-session-page"})

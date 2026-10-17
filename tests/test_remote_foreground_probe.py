@@ -8,10 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import remote_foreground_probe as probe
-
-
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from agent_captain.transport import remote_foreground_probe as probe
 UID = 1003
 TTY = 34831
 PANE = 100

@@ -16,6 +16,16 @@ const { Terminal } = require('@xterm/headless');
 const { SerializeAddon } = require('@xterm/addon-serialize');
 const { updateHumanInput, reserveHumanInput, humanInputState } = require(path.join(__dirname, 'input_activity.cjs'));
 const execFileAsync = promisify(execFile);
+const ROOT = path.resolve(__dirname, '..');
+const PYTHON_SOURCE = path.join(ROOT, 'src', 'agent_captain');
+// Existing descriptors name the original launcher. Accept only these two exact
+// checkout-owned paths so upgrades preserve leases without trusting basenames.
+const BROKER_SCRIPTS = [path.resolve(__filename), path.join(ROOT, 'terminal_broker.cjs')];
+const normalizedPath = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+const brokerScript = value => typeof value === 'string' && path.isAbsolute(value)
+  && BROKER_SCRIPTS.some(script => normalizedPath(script) === normalizedPath(value));
+const ENTRY_SCRIPT = process.argv[1] && brokerScript(path.resolve(process.argv[1]))
+  ? path.resolve(process.argv[1]) : path.resolve(__filename);
 
 const VERSION = '0.3.0';
 const SESSION_ID = /^ceohub-[a-f0-9]{16,48}$/;
@@ -103,7 +113,7 @@ function remoteBridgeCommand(mode, { sessionId, bridgeId, cols, rows, cwd = '' }
   if (typeof cwd !== 'string' || cwd.length > 4096 || /[\x00-\x1f\x7f-\x9f]/.test(cwd)) throw new ApiError(400, 'invalid_directory', 'Invalid terminal directory');
   // Inline the local standalone helper; no remote installation/configuration or
   // auth files. Compression keeps even quoted long paths below Windows argv limits.
-  const body = zlib.deflateSync(fs.readFileSync(path.join(__dirname, 'remote_pty_bridge.py'))).toString('base64');
+  const body = zlib.deflateSync(fs.readFileSync(path.join(PYTHON_SOURCE, 'transport', 'remote_pty_bridge.py'))).toString('base64');
   const bootstrap = `import base64,zlib;exec(compile(zlib.decompress(base64.b64decode('${body}')),'ceo-hub-pty-bridge','exec'))`;
   const args = ['python3', '-c', bootstrap, mode, '--session', sessionId, '--bridge-id', bridgeId,
     '--cols', String(cols), '--rows', String(rows)];
@@ -113,7 +123,7 @@ function remoteBridgeCommand(mode, { sessionId, bridgeId, cols, rows, cwd = '' }
 
 function remoteForegroundCommand(sessionId) {
   if (!SESSION_ID.test(sessionId)) throw new ApiError(400, 'invalid_session_id', 'Invalid owned terminal session ID');
-  const body = zlib.deflateSync(fs.readFileSync(path.join(__dirname, 'remote_foreground_probe.py'))).toString('base64');
+  const body = zlib.deflateSync(fs.readFileSync(path.join(PYTHON_SOURCE, 'transport', 'remote_foreground_probe.py'))).toString('base64');
   const bootstrap = `import base64,zlib;exec(compile(zlib.decompress(base64.b64decode('${body}')),'ceo-hub-foreground-probe','exec'))`;
   return ['python3', '-c', bootstrap, '--session', sessionId].map(shellQuote).join(' ');
 }
@@ -745,25 +755,24 @@ function recoveryPidState(pid) {
 function identityQuery(args) {
   try {
     const python = process.env.CEO_HUB_IDENTITY_PYTHON || process.env.CEO_HUB_PYTHON || 'python';
-    const result = execFileSync(python, ['-I', path.join(__dirname, 'process_identity.py'), ...args],
+    const result = execFileSync(python, ['-I', path.join(PYTHON_SOURCE, 'infrastructure', 'process_identity.py'), ...args],
       { encoding: 'utf8', windowsHide: true, timeout: 5000, maxBuffer: 32768 });
     return JSON.parse(result);
   } catch { return { state: 'unknown' }; }
 }
 
 function validOwnerIdentity(identity) {
-  const normalized = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
   return identity && Object.keys(identity).sort().join(',') === 'birth,executable,script'
     && typeof identity.birth === 'string' && /^(win-filetime:[0-9]{1,24}|linux-start:[a-f0-9-]{36}:[0-9]{1,24})$/.test(identity.birth)
     && ['executable', 'script'].every(key => typeof identity[key] === 'string' && identity[key].length > 0
       && identity[key].length <= 4096 && !/[\x00-\x1f]/.test(identity[key]) && path.isAbsolute(identity[key]))
     && ['node', 'node.exe'].includes(path.basename(identity.executable).toLowerCase())
-    && normalized(identity.script) === normalized(__filename);
+    && brokerScript(identity.script);
 }
 
 function ownBrokerIdentity() {
   const current = identityQuery(['observe', String(process.pid)]);
-  const identity = { birth: current.birth, executable: current.executable, script: path.resolve(__filename) };
+  const identity = { birth: current.birth, executable: current.executable, script: ENTRY_SCRIPT };
   if (current.state !== 'alive' || !validOwnerIdentity(identity)) throw new Error('Cannot establish terminal broker process birth identity');
   return identity;
 }
@@ -773,7 +782,7 @@ function recoveryOwnerState(owner, { pidState = recoveryPidState, query = identi
       || (owner.owner_identity !== undefined && !validOwnerIdentity(owner.owner_identity))) return 'unknown';
   const state = pidState(owner.pid);
   if (state !== 'alive') return state;
-  const observation = query(['owner', String(owner.pid), JSON.stringify(owner.owner_identity ?? null), path.resolve(__filename)]);
+  const observation = query(['owner', String(owner.pid), JSON.stringify(owner.owner_identity ?? null), owner.owner_identity?.script || ENTRY_SCRIPT]);
   return ['alive', 'dead'].includes(observation.state) ? observation.state : 'unknown';
 }
 
@@ -787,7 +796,7 @@ function parseOwnerLock(raw) {
   return owner;
 }
 
-function recoveryGuard(filename, raw = process.env.CEO_HUB_RECOVERY_GUARD, referenceFile = path.resolve(__dirname, '.runtime', 'worker-terminal-reference.json')) {
+function recoveryGuard(filename, raw = process.env.CEO_HUB_RECOVERY_GUARD, referenceFile = path.join(ROOT, '.runtime', 'worker-terminal-reference.json')) {
   if (!raw) return null;
   try {
     if (raw.length > 8192) throw new Error();
@@ -957,5 +966,5 @@ async function main() {
   });
 }
 
-module.exports = { TerminalBroker, ApiError, createServer, descriptorPath, shellQuote, classifyCommand, updateHumanInput, blockedScreen, spawnSshPipe, remoteBridgeCommand, directRootIdentity, nativeRootKind, recoveryGuard, verifyRecoveryInputs, requireRefusedRecoveryPort, initializeOwnedDisplay, recoveryOwnerState, validOwnerIdentity, ownBrokerIdentity, parseOwnerLock };
+module.exports = { main, TerminalBroker, ApiError, createServer, descriptorPath, shellQuote, classifyCommand, updateHumanInput, blockedScreen, spawnSshPipe, remoteBridgeCommand, directRootIdentity, nativeRootKind, recoveryGuard, verifyRecoveryInputs, requireRefusedRecoveryPort, initializeOwnedDisplay, recoveryOwnerState, validOwnerIdentity, ownBrokerIdentity, parseOwnerLock };
 if (require.main === module) main().catch(error => { process.stderr.write(`Terminal broker failed: ${error.message}\n`); process.exitCode = 1; });

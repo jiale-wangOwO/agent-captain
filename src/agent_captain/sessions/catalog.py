@@ -168,13 +168,22 @@ def read(thread_id, limit=18):
 
 def main(request):
     if request["op"] == "bind_output":
-        import session_binding
+        if __package__:
+            from . import session_binding
+        else:
+            import session_binding
         return session_binding.main(request)
     if request["op"] == "resolve_output":
-        import session_binding
+        if __package__:
+            from . import session_binding
+        else:
+            import session_binding
         return session_binding.resolve_session(request["session_id"], request["codex_home"])
     if request["op"] == "read_output":
-        import conversation_output
+        if __package__:
+            from . import conversation_output
+        else:
+            import conversation_output
         return conversation_output.main(request)
     if request["op"] == "find":
         return find(request.get("query", ""), request.get("cwd", ""), request.get("limit", 20))

@@ -14,10 +14,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import session_binding as binding
-
-
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from agent_captain.sessions import session_binding as binding
 SESSION = "ceohub-0123456789abcdef01234567"
 THREAD = "11111111-1111-4111-8111-111111111111"
 OTHER = "22222222-2222-4222-8222-222222222222"

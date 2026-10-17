@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from hub import Hub, ROOT, VERSION
+from agent_captain.core.hub import Hub, ROOT, VERSION
 
 
 def legacy_connection_file():
@@ -316,7 +316,7 @@ def serve(port=8766):
         hub.close()
 
 
-def main():
+def main(argv=None):
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="AgentCaptain · 队长 — 一个主控，统筹本机与远程 Agent。")
@@ -333,7 +333,7 @@ def main():
         elif command == "read":
             child.add_argument("thread_id")
             child.add_argument("--limit", type=int, default=12)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.command == "serve":
         serve(args.port)
         return

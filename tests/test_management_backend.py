@@ -10,9 +10,9 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import catalog
-from legacy_appserver_hub import LegacyAppServerHub as Hub
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from agent_captain.sessions import catalog
+from agent_captain.legacy.legacy_appserver_hub import LegacyAppServerHub as Hub
 
 
 class FakeRpc:
@@ -68,9 +68,9 @@ class ManagementBackendTests(unittest.TestCase):
 
     def test_startup_does_not_discover_resume_or_launch_a_model(self):
         self.hub.close()
-        with patch("legacy_appserver_hub.Rpc", side_effect=AssertionError("no model process")), \
-             patch("legacy_appserver_hub.subprocess.run", side_effect=AssertionError("no SSH scan")), \
-             patch("legacy_appserver_hub.catalog.main", side_effect=AssertionError("no history scan")):
+        with patch("agent_captain.legacy.legacy_appserver_hub.Rpc", side_effect=AssertionError("no model process")), \
+             patch("agent_captain.legacy.legacy_appserver_hub.subprocess.run", side_effect=AssertionError("no SSH scan")), \
+             patch("agent_captain.legacy.legacy_appserver_hub.catalog.main", side_effect=AssertionError("no history scan")):
             self.hub = Hub(self.temp.name)
             self.assertEqual(self.hub.servers, {})
             self.assertEqual(self.hub.live_servers, {})

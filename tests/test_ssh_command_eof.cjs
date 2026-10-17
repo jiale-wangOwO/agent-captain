@@ -11,7 +11,7 @@ const { PassThrough } = require('node:stream');
 const childProcess = require('node:child_process');
 const { promisify } = require('node:util');
 
-const brokerPath = path.resolve(__dirname, '..', 'terminal_broker.cjs');
+const brokerPath = path.resolve(__dirname, '..', 'terminal', 'terminal_broker.cjs');
 const source = fs.readFileSync(brokerPath, 'utf8');
 const actualExecFileAsync = promisify(childProcess.execFile);
 const foreground = { command: 'node', state: 'agent', reason: 'verified_foreground_codex',

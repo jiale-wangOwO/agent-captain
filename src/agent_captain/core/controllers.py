@@ -23,10 +23,10 @@ import uuid
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import urlparse
 
-from terminal_client import BrokerError, TerminalClient
-from management_policy import MANAGEMENT_POLICY, MANAGER_ROLE, POLICY_VERSION
+from agent_captain.transport.terminal_client import BrokerError, TerminalClient
+from agent_captain.core.management_policy import MANAGEMENT_POLICY, MANAGER_ROLE, POLICY_VERSION
 
-ROOT = Path(__file__).resolve().parent
+from agent_captain.paths import ROOT
 INITIALIZATION = (
     "Initialize this personal management session. Call only the AgentCaptain "
     "get_controller_context tool to verify this management identity and automatic worker access. "
@@ -661,7 +661,7 @@ class ControllerService:
 
     @staticmethod
     def _mcp_settings(descriptor, cid):
-        return {"command": sys.executable, "args": [str(ROOT / "mcp_bridge.py")], "env": {
+        return {"command": sys.executable, "args": [str(ROOT / "scripts" / "captain.py"), "mcp"], "env": {
             "AGENTCAPTAIN_CONNECTION_FILE": str(descriptor), "AGENTCAPTAIN_CONTROLLER_ID": cid}}
 
     def _overrides(self, row):

@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-python service.py start
+python scripts\captain.py service start
 if errorlevel 1 (
   pause
   exit /b 1

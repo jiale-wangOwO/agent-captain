@@ -10,10 +10,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import mcp_bridge
-
-
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from agent_captain.integrations import mcp_bridge
 class FakeService:
     def __init__(self, token="private-secret", result=None, status=200, redirect=None):
         self.token = token
@@ -114,7 +112,7 @@ class McpBridgeTests(unittest.TestCase):
                     {"jsonrpc": "2.0", "method": "notifications/initialized"},
                     {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
                     {"jsonrpc": "2.0", "id": 3, "method": "ping"}]
-        process = subprocess.run([sys.executable, "-u", str(Path(mcp_bridge.__file__))],
+        process = subprocess.run([sys.executable, "-u", str(Path(__file__).resolve().parents[1] / "scripts/captain.py"), "mcp"],
                                  input="".join(json.dumps(m) + "\n" for m in messages),
                                  capture_output=True, encoding="utf-8", timeout=10)
         self.assertEqual(process.returncode, 0)

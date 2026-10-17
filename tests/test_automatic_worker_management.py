@@ -5,9 +5,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from store import Store
-from terminal_client import BrokerError
-from terminal_hub import Hub, RETRYABLE
+from agent_captain.infrastructure.store import Store
+from agent_captain.transport.terminal_client import BrokerError
+from agent_captain.core.terminal_hub import Hub, RETRYABLE
 from tests.test_terminal_hub import FakeTerminals
 
 
@@ -149,7 +149,7 @@ class AutomaticWorkerManagementTests(unittest.TestCase):
         store.close()
         with patch.object(self.terminals, "create", side_effect=AssertionError("Migration must not start")), \
              patch.object(self.terminals, "write", side_effect=AssertionError("Migration must not replay")), \
-             patch("terminal_hub.subprocess.run", side_effect=AssertionError("Migration must not SSH")):
+             patch("agent_captain.core.terminal_hub.subprocess.run", side_effect=AssertionError("Migration must not SSH")):
             self.hub = Hub(self.temp.name, terminals=self.terminals)
         self.assertEqual(self.hub.store.agent("local", "old"), original)
         for request, key in requests:

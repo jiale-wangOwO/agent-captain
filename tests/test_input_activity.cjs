@@ -2,8 +2,8 @@
 // Inert bookkeeping/fake PTY tests only. No machine or user input is touched.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { updateHumanInput, humanInputState } = require('../input_activity.cjs');
-const { TerminalBroker } = require('../terminal_broker.cjs');
+const { updateHumanInput, humanInputState } = require('../terminal/input_activity.cjs');
+const { TerminalBroker } = require('../terminal/terminal_broker.cjs');
 const fresh = () => ({ humanLineLength: 0, humanLeaseUntil: 0, humanPaste: false, inputEscape: '' });
 const state = session => humanInputState(session, 5000).state;
 

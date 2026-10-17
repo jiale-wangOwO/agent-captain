@@ -1,5 +1,5 @@
 """Public connection-service entrypoint. No legacy App Server code is imported."""
-from terminal_hub import Hub, ROOT
+from agent_captain.core.terminal_hub import Hub, ROOT
 
 VERSION = "0.7.0"
 

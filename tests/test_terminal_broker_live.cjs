@@ -4,7 +4,7 @@
 // sessions, only echo/stty/sleep, and closes them on completion.
 const fs = require('node:fs');
 const assert = require('node:assert/strict');
-const { descriptorPath } = require('../terminal_broker.cjs');
+const { descriptorPath } = require('../terminal/terminal_broker.cjs');
 const descriptor = JSON.parse(fs.readFileSync(descriptorPath(), 'utf8'));
 const sessions = [];
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));

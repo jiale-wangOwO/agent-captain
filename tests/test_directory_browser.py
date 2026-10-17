@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
-from directory_browser import DirectoryBrowser, list_local, _bounded_ssh
+from agent_captain.transport.directory_browser import DirectoryBrowser, list_local, _bounded_ssh
 
 
 class DirectoryBrowserTests(unittest.TestCase):
@@ -30,7 +30,7 @@ class DirectoryBrowserTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_empty_path_defaults_to_actual_home_not_codex_home(self):
-        with patch("directory_browser.Path.home", return_value=self.root):
+        with patch("agent_captain.transport.directory_browser.Path.home", return_value=self.root):
             result = list_local("")
         self.assertEqual((result["home"], result["path"]), (str(self.root), str(self.root)))
         self.assertEqual([entry["name"] for entry in result["directories"]], ["a-project", "B-project"])
@@ -50,11 +50,11 @@ class DirectoryBrowserTests(unittest.TestCase):
             list_local(str(directory) + "\n")
 
     def test_listing_is_bounded_and_home_lookup_never_scans(self):
-        with patch("directory_browser.MAX_DIRECTORIES", 1):
+        with patch("agent_captain.transport.directory_browser.MAX_DIRECTORIES", 1):
             result = list_local(str(self.root))
         self.assertEqual(len(result["directories"]), 1)
         self.assertTrue(result["truncated"])
-        with patch("directory_browser.os.scandir", side_effect=AssertionError("home only does not scan")):
+        with patch("agent_captain.transport.directory_browser.os.scandir", side_effect=AssertionError("home only does not scan")):
             self.assertEqual(DirectoryBrowser().home({"transport": "local"}), str(Path.home().resolve()))
 
     def test_remote_payload_is_base64_argv_not_interpolated_path_or_shell_command(self):
@@ -74,7 +74,7 @@ class DirectoryBrowserTests(unittest.TestCase):
                 self.killed = True
         process = Process()
         path = "/tmp/$(touch unsafe);'quoted'"
-        with patch("directory_browser.subprocess.Popen", return_value=process) as spawn:
+        with patch("agent_captain.transport.directory_browser.subprocess.Popen", return_value=process) as spawn:
             result = _bounded_ssh("unit-test-host", {"path": path})
         self.assertEqual(result["home"], "/home/test")
         argv = spawn.call_args.args[0]
@@ -96,7 +96,7 @@ class DirectoryBrowserTests(unittest.TestCase):
                 self.waits.append(timeout)
                 return self.returncode
         process = Process()
-        with patch("directory_browser.subprocess.Popen", return_value=process), self.assertRaises(RuntimeError) as error:
+        with patch("agent_captain.transport.directory_browser.subprocess.Popen", return_value=process), self.assertRaises(RuntimeError) as error:
             _bounded_ssh("unit-test-host", {"op": "home"})
         self.assertNotIn("sensitive", str(error.exception))
         self.assertIn("SSH", str(error.exception))
@@ -104,7 +104,7 @@ class DirectoryBrowserTests(unittest.TestCase):
         self.assertTrue(all(stream.closed for stream in (process.stdin, process.stdout, process.stderr)))
 
     def test_ssh_spawn_error_is_safe_and_does_not_retry(self):
-        with patch("directory_browser.subprocess.Popen", side_effect=OSError("PRIVATE_STARTUP_CONTENT")) as spawn, self.assertRaises(RuntimeError) as error:
+        with patch("agent_captain.transport.directory_browser.subprocess.Popen", side_effect=OSError("PRIVATE_STARTUP_CONTENT")) as spawn, self.assertRaises(RuntimeError) as error:
             _bounded_ssh("unit-test-host", {"op": "home"})
         self.assertIn("SSH", str(error.exception))
         self.assertNotIn("PRIVATE", str(error.exception))
@@ -141,7 +141,7 @@ class DirectoryBrowserTests(unittest.TestCase):
                             return self.returncode
                         def kill(self): self.killed = True
                     process = Process()
-                    with patch("directory_browser.subprocess.Popen", return_value=process) as spawn, self.assertRaises(RuntimeError) as error:
+                    with patch("agent_captain.transport.directory_browser.subprocess.Popen", return_value=process) as spawn, self.assertRaises(RuntimeError) as error:
                         _bounded_ssh("unit-test-host", {"op": "home"})
                     self.assertIn("远端目录", str(error.exception))
                     self.assertIn("SSH", str(error.exception))
@@ -169,7 +169,7 @@ class DirectoryBrowserTests(unittest.TestCase):
                         raise cleanup_error
                     def kill(self): raise OSError("PRIVATE_KILL_CONTENT")
                 process = Process()
-                with patch("directory_browser.subprocess.Popen", return_value=process), self.assertRaises(RuntimeError) as error:
+                with patch("agent_captain.transport.directory_browser.subprocess.Popen", return_value=process), self.assertRaises(RuntimeError) as error:
                     _bounded_ssh("unit-test-host", {"op": "home"})
                 self.assertIn("SSH", str(error.exception))
                 self.assertNotIn("PRIVATE", str(error.exception))
@@ -196,7 +196,7 @@ class DirectoryBrowserTests(unittest.TestCase):
             def wait(self, timeout=None): raise subprocess.TimeoutExpired("PRIVATE_COMMAND", timeout)
             def kill(self): raise OSError("PRIVATE_KILL_CONTENT")
         process = Process()
-        with patch("directory_browser.subprocess.Popen", return_value=process), self.assertRaisesRegex(RuntimeError, "SSH") as error:
+        with patch("agent_captain.transport.directory_browser.subprocess.Popen", return_value=process), self.assertRaisesRegex(RuntimeError, "SSH") as error:
             _bounded_ssh("unit-test-host", {"op": "home"})
         self.assertNotIn("PRIVATE", str(error.exception))
         self.assertTrue(all(stream.closed for stream in (process.stdin, process.stdout, process.stderr)))
@@ -240,7 +240,7 @@ class DirectoryBrowserTests(unittest.TestCase):
         query_thread = real_thread(target=query, daemon=True)
         started = time.monotonic()
         try:
-            with patch("directory_browser.subprocess.Popen", return_value=process), patch("directory_browser.threading.Thread", side_effect=reader):
+            with patch("agent_captain.transport.directory_browser.subprocess.Popen", return_value=process), patch("agent_captain.transport.directory_browser.threading.Thread", side_effect=reader):
                 query_thread.start()
                 finished_before_eof = completed.wait(timeout=4)
             elapsed = time.monotonic() - started
@@ -280,7 +280,7 @@ class DirectoryBrowserTests(unittest.TestCase):
             def wait(self, timeout=None): return self.returncode
             def kill(self): self.killed = True
         process = Process()
-        with patch("directory_browser.subprocess.Popen", return_value=process), self.assertRaises(RuntimeError) as error:
+        with patch("agent_captain.transport.directory_browser.subprocess.Popen", return_value=process), self.assertRaises(RuntimeError) as error:
             _bounded_ssh("unit-test-host", {"op": "home"})
         self.assertNotIn("PRIVATE", str(error.exception))
         self.assertTrue(process.killed)
@@ -297,7 +297,7 @@ class DirectoryBrowserTests(unittest.TestCase):
             def wait(self, timeout=None): return 0
             def kill(self): self.killed = True
         process = Process()
-        with patch("directory_browser.subprocess.Popen", return_value=process), self.assertRaisesRegex(RuntimeError, "超过限制"):
+        with patch("agent_captain.transport.directory_browser.subprocess.Popen", return_value=process), self.assertRaisesRegex(RuntimeError, "超过限制"):
             _bounded_ssh("unit-test-host", {"path": "/tmp"})
         self.assertTrue(process.killed)
 
@@ -317,7 +317,7 @@ class DirectoryBrowserTests(unittest.TestCase):
                 return self.returncode
             def kill(self): self.killed = True
         process = Process()
-        with patch("directory_browser.subprocess.Popen", return_value=process), self.assertRaisesRegex(RuntimeError, "超过限制") as error:
+        with patch("agent_captain.transport.directory_browser.subprocess.Popen", return_value=process), self.assertRaisesRegex(RuntimeError, "超过限制") as error:
             _bounded_ssh("unit-test-host", {"path": "/tmp"})
         self.assertTrue(process.killed)
         self.assertEqual(process.waits, [5])
@@ -340,7 +340,7 @@ class DirectoryBrowserTests(unittest.TestCase):
             thread = real_thread(*args, **kwargs)
             readers.append(thread)
             return thread
-        with patch("directory_browser.subprocess.Popen", side_effect=spawn) as substituted, patch("directory_browser.threading.Thread", side_effect=reader):
+        with patch("agent_captain.transport.directory_browser.subprocess.Popen", side_effect=spawn) as substituted, patch("agent_captain.transport.directory_browser.threading.Thread", side_effect=reader):
             for _ in range(4):
                 with self.assertRaisesRegex(RuntimeError, "SSH") as error:
                     _bounded_ssh("unit-test-host", {"op": "home"})
@@ -366,7 +366,7 @@ class DirectoryBrowserTests(unittest.TestCase):
                 return self.returncode
             def kill(self): self.killed = True
         process = Process()
-        with patch("directory_browser.subprocess.Popen", return_value=process), self.assertRaisesRegex(RuntimeError, "超时") as error:
+        with patch("agent_captain.transport.directory_browser.subprocess.Popen", return_value=process), self.assertRaisesRegex(RuntimeError, "超时") as error:
             _bounded_ssh("unit-test-host", {"path": "/tmp"})
         self.assertTrue(process.killed)
         self.assertEqual(process.waits, [20, 5])
@@ -387,7 +387,7 @@ class DirectoryBrowserTests(unittest.TestCase):
                 raise subprocess.TimeoutExpired("PRIVATE_COMMAND", timeout)
             def kill(self): self.killed = True
         process = Process()
-        with patch("directory_browser.subprocess.Popen", return_value=process), self.assertRaisesRegex(RuntimeError, "超时") as error:
+        with patch("agent_captain.transport.directory_browser.subprocess.Popen", return_value=process), self.assertRaisesRegex(RuntimeError, "超时") as error:
             _bounded_ssh("unit-test-host", {"path": "/tmp"})
         self.assertTrue(process.killed)
         self.assertEqual(process.waits, [20, 5])

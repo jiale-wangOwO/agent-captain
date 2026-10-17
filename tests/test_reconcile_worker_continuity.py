@@ -9,10 +9,10 @@ from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 from unittest.mock import Mock, patch
 
-from app import create_server
-import mcp_bridge
-from terminal_client import BrokerError
-from terminal_hub import Hub
+from agent_captain.server.app import create_server
+from agent_captain.integrations import mcp_bridge
+from agent_captain.transport.terminal_client import BrokerError
+from agent_captain.core.terminal_hub import Hub
 from tests.test_terminal_hub import FakeTerminals
 
 

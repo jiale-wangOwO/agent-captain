@@ -46,7 +46,7 @@ Python 服务仅用标准库。通过 npm 安装终端依赖，浏览器资源�
 git clone https://github.com/jiale-wangOwO/agent-captain.git agent-captain
 cd agent-captain
 npm ci
-python app.py serve
+python scripts/captain.py serve
 ```
 
 打开 [http://127.0.0.1:8766/](http://127.0.0.1:8766/)。仓库为 private，克隆需要 GitHub 访问权限。
@@ -54,9 +54,15 @@ python app.py serve
 Windows 可双击 `run_agentcaptain.cmd`：在当前用户后台启动服务并打开 UI。也可显式运行：
 
 ```sh
-python service.py start
-python service.py status
+python scripts/captain.py service start
+python scripts/captain.py service status
 ```
+
+希望使用安装后的简短命令，可在仓库中执行 `python -m pip install -e .`，
+再使用 `agent-captain serve`、`agent-captain service start` 或
+`python -m agent_captain service status`。它们与源码启动器使用同一套实现；
+仍需保留仓库、网页资源和 npm 依赖，不是独立桌面安装。
+原安装保存过旧脚本绝对路径时，先读[源码迁移说明](../repository-layout.md#existing-installation-migration)。
 
 Windows 后台启动器通过隐藏的、当前用户身份的 WMI 进程工厂启动服务，避免网页后台和终端服务随临时启动工具一起退出。一次性私有启动计划、真实进程身份回执和退出日志保存在 `.runtime/background-launches/`。启动结果未知时明确报告，不自动重试，也不退回依赖工具宿主生命周期的启动方式。这不代表服务可以跨 Windows 关机、休眠或网络中断保持连接。诊断和恢复边界见[后台服务生命周期](../background-service.md)。
 
@@ -164,7 +170,7 @@ python scripts/configure_plugin.py --output .runtime/plugin-marketplace-v2
 
 **终端支持安全滚动翻页。** 工作/管理终端可用滚轮、PageUp / PageDown 和「上一页 / 下一页 / 回到最新」，阅读历史时新输出不会把你拉回底部。SSH/tmux 的全屏外层没有网页本地历史时，「终端历史」只读展示原 pane 实际保留的文本快照；完整 Codex 回复仍从准确关联的「会话输出」读取。所有滚动和翻页均不发送远端按键、方向键或任务。详见 [终端阅读说明](../agent-workbench.md)。
 
-**0.6.1 新增本机显示服务恢复入口。** 网页在线但工作终端连不上时，先看工作台的显示服务状态；服务确实已退出时点击「恢复显示服务」并确认，再接回所选原终端。也可在项目目录运行 `python terminal_service.py status` 或 `python terminal_service.py recover --confirm`。不会删除原绑定、重启远端 Codex、批量恢复其他会话或重发任务；旧进程仍在、端口状态不明或所有权变化时拒绝替换。详细边界见 [安全恢复说明](../agent-workbench.md)。
+**0.6.1 新增本机显示服务恢复入口。** 网页在线但工作终端连不上时，先看工作台的显示服务状态；服务确实已退出时点击「恢复显示服务」并确认，再接回所选原终端。也可在项目目录运行 `python scripts/captain.py terminal status` 或 `python scripts/captain.py terminal recover --confirm`。不会删除原绑定、重启远端 Codex、批量恢复其他会话或重发任务；旧进程仍在、端口状态不明或所有权变化时拒绝替换。详细边界见 [安全恢复说明](../agent-workbench.md)。
 
 普通任务经 bracketed paste 和 Enter 发到同一个前台 Codex，不当作 shell 命令；shell、登录、审批和可识别的启动菜单会阻止任务输入。原始按键只用于用户明确授权的终端操作。
 
@@ -234,6 +240,7 @@ python3 scripts/codex_sync_daemon.py --sync --timeout 60
 安装依赖后，在仓库根目录运行下面的命令。提交预检只扫描 Git 已跟踪的内容；新增源文件应先按明确清单暂存，再运行检查，不要把私有运行数据加入 Git。
 
 ```sh
+python -m pip install -e .
 python -m unittest discover -s tests -v
 node --check web/ui.js
 node --check web/controller.js

@@ -2,7 +2,8 @@
 
 The adapter has no model, discovers no machines, and starts no conversations on
 its own. The Hub UI determines which machines and agents the caller may use.
-Run with ``python -u mcp_bridge.py`` from a Codex MCP/plugin configuration.
+Run from the checkout CLI (``python scripts/captain.py mcp``), or as the
+standalone ``mcp_bridge.py`` emitted by the plugin configurator.
 """
 
 from __future__ import annotations
@@ -18,14 +19,20 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from management_policy import MCP_INSTRUCTIONS, public_management_policy
+# The configured plugin deliberately contains only this file and the policy;
+# it must remain runnable without installing the web-service package.
+if __package__:
+    from agent_captain.core.management_policy import MCP_INSTRUCTIONS, public_management_policy
+    from agent_captain.paths import ROOT
+else:
+    from management_policy import MCP_INSTRUCTIONS, public_management_policy
+    ROOT = Path(__file__).resolve().parent
 
 
 VERSION = "0.7.0"
 PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")
 MAX_MESSAGE_BYTES = 2 * 1024 * 1024
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
-ROOT = Path(__file__).resolve().parent
 
 
 def schema(properties: dict[str, Any], required: tuple[str, ...] = ()) -> dict[str, Any]:
@@ -104,7 +111,7 @@ def read_descriptor() -> dict[str, Any]:
             raise ValueError("oversized descriptor")
         descriptor = json.loads(raw)
     except FileNotFoundError:
-        raise BridgeError("AgentCaptain service is not running or its connection descriptor is missing. Start AgentCaptain with run_agentcaptain.cmd (or python app.py serve), then retry.") from None
+        raise BridgeError("AgentCaptain service is not running or its connection descriptor is missing. Start AgentCaptain with run_agentcaptain.cmd (or python scripts/captain.py serve), then retry.") from None
     except (OSError, ValueError, UnicodeError):
         raise BridgeError("Cannot read the AgentCaptain service descriptor. Restart AgentCaptain or verify AGENTCAPTAIN_CONNECTION_FILE; no credentials were displayed.") from None
     if not isinstance(descriptor, dict):
@@ -204,7 +211,7 @@ def call_service(name: str, arguments: dict[str, Any]) -> Any:
             raise BridgeError("AgentCaptain connection failed or timed out. The action's delivery is unknown. Restore the local service, then retry using the SAME request_key or inspect its delivery in the Hub UI; do not submit a new key.") from None
         if name in ("update_agent", "reconnect_agent"):
             raise BridgeError("AgentCaptain connection failed or timed out. The management action's outcome is unknown. Inspect the selected worker in the Hub UI, then retry using the SAME request_key; do not submit a new key or replace the original worker.") from None
-        raise BridgeError("AgentCaptain service is unreachable. Start or restart run_agentcaptain.cmd (or python app.py serve), verify the loopback service is running, then retry.") from None
+        raise BridgeError("AgentCaptain service is unreachable. Start or restart run_agentcaptain.cmd (or python scripts/captain.py serve), verify the loopback service is running, then retry.") from None
     except (ValueError, UnicodeError):
         raise BridgeError("AgentCaptain returned invalid JSON. Restart or update the local service; no response body or credential was displayed.") from None
 
@@ -377,7 +384,7 @@ def serve(stdin: TextIO | None = None, stdout: TextIO | None = None) -> None:
                 respond(message)
 
 
-if __name__ == "__main__":
+def main():
     # Newline-delimited UTF-8 JSON is the MCP stdio transport, including on Windows.
     for stream in (sys.stdin, sys.stdout):
         if hasattr(stream, "reconfigure"):
@@ -386,3 +393,7 @@ if __name__ == "__main__":
         serve()
     except (BrokenPipeError, KeyboardInterrupt):
         pass
+
+
+if __name__ == "__main__":
+    main()

@@ -27,10 +27,20 @@ and Python 3.11 or newer, then run from the repository root:
 
 ```sh
 npm ci
-python -m unittest discover -s tests -v
+python -m pip install -e .
+python -m unittest discover -s tests -t . -v
 npm run test:terminal
 npm run test:ui
 ```
+
+Application code lives under `src/agent_captain/`, the Node PTY service under
+`terminal/`, and the browser interface under `web/`. Import Python code through
+`agent_captain`, not a bare filename or a checkout-specific `sys.path` patch.
+The editable install makes package imports available from unrelated working
+directories. For a source-checkout launch without installation, use
+`python scripts/captain.py serve`; both entry points call the same application.
+See [component boundaries and migration](docs/repository-layout.md) before
+changing subprocess paths, helper delivery, or installed plugin references.
 
 `node-pty` may require the platform's native build tools when a compatible
 prebuilt binary is unavailable. CI covers Windows and Linux with Python 3.11 and

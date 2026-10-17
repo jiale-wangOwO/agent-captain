@@ -49,12 +49,14 @@ You need **Python 3.11+**, **Node.js 22+**, npm, and a configured local **Codex 
 git clone https://github.com/jiale-wangOwO/agent-captain.git agent-captain
 cd agent-captain
 npm ci
-python app.py serve
+python scripts/captain.py serve
 ```
 
 Open **[localhost:8766](http://127.0.0.1:8766/)**. The repository currently remains **private**; cloning requires access. A fresh installation contains only your local machine.
 
-On Windows, `run_agentcaptain.cmd` starts the per-user background service and opens the workbench. For explicit background operation, use `python service.py start` and `python service.py status`. No administrator service or automatic startup is installed.
+On Windows, `run_agentcaptain.cmd` starts the per-user background service and opens the workbench. For explicit background operation, use `python scripts/captain.py service start` and `python scripts/captain.py service status`. No administrator service or automatic startup is installed.
+
+Prefer an installed command? Run `python -m pip install -e .` in this checkout, then use `agent-captain serve` or `agent-captain service start`. Keep the checkout and its npm dependencies available; this is not a self-contained desktop installer.
 
 1. **Connect work.** Add an SSH alias if needed, choose a project folder, and open a terminal. Start `codex`, `codex-switch`, or your usual launcher yourself.
 2. **Start your Captain.** Choose **Start management session**. The Hub prepares a dedicated local Codex conversation with its role, identity, and tools. Complete any sign-in, trust, or permission prompts yourself; no manual plugin installation is required for this path.
@@ -87,6 +89,7 @@ Hub-created Captains have independent tool identities and explicit machine/proje
 | Delegation, acceptance, permissions, and manager lifecycle | [Management contract](docs/management-session-product.md) |
 | Service failure, SSH routes, and Codex background packages | [Recovery and maintenance](docs/index.md#recover-and-maintain) |
 | Tests, publication hygiene, and contribution workflow | [Contributing](CONTRIBUTING.md) |
+| Source packages, component boundaries, and existing-installation migration | [Repository layout](docs/repository-layout.md) |
 
 ## Contribute
 

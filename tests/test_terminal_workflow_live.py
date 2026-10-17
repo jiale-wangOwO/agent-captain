@@ -12,8 +12,8 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
-from app import create_server
-from hub import Hub
+from agent_captain.server.app import create_server
+from agent_captain.core.hub import Hub
 
 
 @unittest.skipUnless(os.environ.get("CEO_HUB_LIVE_TESTS") == "1", "opt-in disposable local PTYs")

@@ -7,8 +7,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from terminal_client import BrokerError, TerminalClient
-from terminal_hub import Hub
+from agent_captain.transport.terminal_client import BrokerError, TerminalClient
+from agent_captain.core.terminal_hub import Hub
 from tests.test_terminal_hub import FakeTerminals
 
 

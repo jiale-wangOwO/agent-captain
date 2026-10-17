@@ -6,8 +6,8 @@ from urllib.error import HTTPError
 from urllib.request import Request, build_opener, ProxyHandler
 from unittest.mock import Mock
 
-from app import create_server
-from hub import Hub
+from agent_captain.server.app import create_server
+from agent_captain.core.hub import Hub
 
 
 class HttpServiceTests(unittest.TestCase):

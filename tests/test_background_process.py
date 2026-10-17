@@ -9,10 +9,8 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-import background_process as background
-import service
-
-
+from agent_captain.infrastructure import background_process as background
+from agent_captain.server import service
 class BackgroundProcessTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

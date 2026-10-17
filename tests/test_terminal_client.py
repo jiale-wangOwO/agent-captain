@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch, Mock
 from urllib.error import HTTPError
 
-from terminal_client import BrokerError, TerminalClient
+from agent_captain.transport.terminal_client import BrokerError, TerminalClient
 
 
 class TerminalClientTests(unittest.TestCase):
@@ -79,8 +79,8 @@ class TerminalClientTests(unittest.TestCase):
         callback.assert_not_called()
         process = Mock()
         process.poll.return_value = None
-        with patch.object(client, "running", side_effect=[False, True]), patch("terminal_client.shutil.which", return_value="fake-node"), \
-                patch("terminal_client.Path.exists", return_value=True), patch("terminal_client.launch_background", return_value=process) as spawn:
+        with patch.object(client, "running", side_effect=[False, True]), patch("agent_captain.transport.terminal_client.shutil.which", return_value="fake-node"), \
+                patch("agent_captain.transport.terminal_client.Path.exists", return_value=True), patch("agent_captain.transport.terminal_client.launch_background", return_value=process) as spawn:
             client.ensure_started()
         callback.assert_called_once_with()
         child_env = spawn.call_args.kwargs["env_overrides"]
@@ -100,8 +100,8 @@ class TerminalClientTests(unittest.TestCase):
         process.poll.return_value = None
         supplied = {"CEO_HUB_TERMINAL_FILE": str(self.path), "KEEP": "yes", "HTTP_PROXY": "http://existing-user-setting:1234"}
         with patch.dict(os.environ, supplied, clear=True), patch.object(worker, "running", side_effect=[False, True]), \
-                patch("terminal_client.shutil.which", return_value="fake-node"), patch("terminal_client.Path.exists", return_value=True), \
-                patch("terminal_client.launch_background", return_value=process) as spawn:
+                patch("agent_captain.transport.terminal_client.shutil.which", return_value="fake-node"), patch("agent_captain.transport.terminal_client.Path.exists", return_value=True), \
+                patch("agent_captain.transport.terminal_client.launch_background", return_value=process) as spawn:
             worker.ensure_started()
             self.assertEqual(dict(os.environ), supplied)
         self.assertEqual(spawn.call_args.kwargs["env_overrides"]["HTTP_PROXY"], supplied["HTTP_PROXY"])

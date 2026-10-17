@@ -15,13 +15,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-import app
-import hub
-import mcp_bridge
-import terminal_hub
-from store import Store
+from agent_captain.server import app
+from agent_captain.core import hub
+from agent_captain.integrations import mcp_bridge
+from agent_captain.core import terminal_hub
+from agent_captain.infrastructure.store import Store
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,7 +50,7 @@ class BrandingTests(unittest.TestCase):
                           package["version"], lock["version"], lock["packages"][""]["version"]}, {"0.7.0"})
         self.assertEqual(lock["name"], package["name"])
         self.assertEqual(lock["packages"][""]["name"], package["name"])
-        broker = (ROOT / "terminal_broker.cjs").read_text(encoding="utf-8")
+        broker = (ROOT / "terminal" / "terminal_broker.cjs").read_text(encoding="utf-8")
         self.assertRegex(broker, r"const VERSION = ['\"]0\.3\.0['\"]")
 
     def test_public_configuration_and_ui_do_not_ship_personal_ssh_hosts(self):
@@ -156,12 +156,12 @@ class BrandingTests(unittest.TestCase):
             self.assertIn("CEO_HUB_CONNECTION_FILE", source)
             self.assertIn("CEOHub", source)
             self.assertIn("ceo-hub", source)
-        source = (ROOT / "terminal_hub.py").read_text(encoding="utf-8")
+        source = Path(terminal_hub.__file__).read_text(encoding="utf-8")
         self.assertIn('"ceohub-" +', source)
         self.assertIn('"ceo-hub:" + request_key', source)
 
     def test_cli_help_uses_new_brand_without_starting_service(self):
-        result = subprocess.run([sys.executable, str(ROOT / "app.py"), "--help"],
+        result = subprocess.run([sys.executable, str(ROOT / "scripts" / "captain.py"), "--help"],
                                 capture_output=True, encoding="utf-8", timeout=10)
         self.assertEqual(result.returncode, 0)
         self.assertIn("AgentCaptain", result.stdout)

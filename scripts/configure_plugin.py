@@ -78,11 +78,14 @@ def configure_plugin(output: Path | str | None = None, *,
         if marketplace_source.is_symlink() or not marketplace_source.is_file():
             raise ConfigurationError("The source marketplace is missing or is a symlink.")
         marketplace = json.loads(marketplace_source.read_bytes())
-        bridge_source = root / "mcp_bridge.py"
+        # Bundle the reviewed implementation, not the checkout compatibility
+        # launcher. Generated plugins remain standalone after cache copying.
+        package_source = root / "src" / "agent_captain"
+        bridge_source = package_source / "integrations" / "mcp_bridge.py"
         if bridge_source.is_symlink() or not bridge_source.is_file():
             raise ConfigurationError("The standalone MCP bridge source is missing or is a symlink.")
         bridge_bytes = bridge_source.read_bytes()
-        policy_source = root / "management_policy.py"
+        policy_source = package_source / "core" / "management_policy.py"
         if policy_source.is_symlink() or not policy_source.is_file():
             raise ConfigurationError("The standalone management policy source is missing or is a symlink.")
         policy_bytes = policy_source.read_bytes()

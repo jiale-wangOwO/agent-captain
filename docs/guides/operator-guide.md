@@ -47,7 +47,7 @@ The Python service uses the standard library. Terminal dependencies are installe
 git clone https://github.com/jiale-wangOwO/agent-captain.git agent-captain
 cd agent-captain
 npm ci
-python app.py serve
+python scripts/captain.py serve
 ```
 
 Open [http://127.0.0.1:8766/](http://127.0.0.1:8766/). The repository is private, so cloning requires GitHub access.
@@ -55,9 +55,17 @@ Open [http://127.0.0.1:8766/](http://127.0.0.1:8766/). The repository is private
 On Windows, `run_agentcaptain.cmd` starts the per-user service in the background and opens the UI. For explicit background operation:
 
 ```sh
-python service.py start
-python service.py status
+python scripts/captain.py service start
+python scripts/captain.py service status
 ```
+
+For an installed command, run `python -m pip install -e .` in the checkout, then
+use `agent-captain serve`, `agent-captain service start`, or
+`python -m agent_captain service status`. These use the same implementation as
+the checkout launcher. Retain the checkout, web assets, and npm dependencies;
+this does not create a standalone desktop installation. Existing deployments
+with saved old script paths should follow the
+[source-layout migration notes](../repository-layout.md#existing-installation-migration).
 
 On Windows, the background launcher uses a hidden, current-user WMI process factory so the web service and terminal broker outlive a temporary launching tool. Private, one-shot launch plans, actual-process identity receipts, and exit logs are stored under `.runtime/background-launches/`. Launch uncertainty is reported explicitly, with no automatic retry or fallback into the launching tool's process lifetime. This does not make the services immune to Windows shutdown, sleep, or network loss. See [background service lifecycle](../background-service.md) for diagnostics and recovery boundaries.
 
@@ -165,7 +173,7 @@ Long messages are chunked rather than silently clipped. Incomplete or malformed 
 
 **Terminals support safe scrollback and paging.** Use the wheel, PageUp / PageDown, and Previous page / Next page / Back to latest in worker and management displays. Incoming output preserves the reading position. If an SSH/tmux outer alternate screen has no browser-local history, Terminal history opens a read-only snapshot of the exact pane's retained text. Complete Codex responses remain available through the precisely associated Conversation output. Scrolling never sends remote keys, mouse reports, or tasks. See the [terminal reading boundaries](../agent-workbench.md).
 
-**0.6.1 adds explicit local display-service recovery.** If the web page is online but worker displays are disconnected, check the workbench's separate service status. When the bound owner is affirmatively offline, confirm **Restore display service**, then reattach only the selected original terminal. The equivalent maintenance commands are `python terminal_service.py status` and `python terminal_service.py recover --confirm`. Recovery never deletes the binding, restarts remote Codex, batch-restores other sessions, or replays tasks; a live PID, ambiguous endpoint, or changed ownership blocks replacement. See the [recovery boundaries](../agent-workbench.md).
+**0.6.1 adds explicit local display-service recovery.** If the web page is online but worker displays are disconnected, check the workbench's separate service status. When the bound owner is affirmatively offline, confirm **Restore display service**, then reattach only the selected original terminal. The equivalent maintenance commands are `python scripts/captain.py terminal status` and `python scripts/captain.py terminal recover --confirm`. Recovery never deletes the binding, restarts remote Codex, batch-restores other sessions, or replays tasks; a live PID, ambiguous endpoint, or changed ownership blocks replacement. See the [recovery boundaries](../agent-workbench.md).
 
 Ordinary task messages use bracketed paste and Enter in the same foreground Codex terminal. They are not shell commands and are blocked at a shell, login prompt, approval screen, or recognized startup menu. Raw keys are reserved for terminal actions explicitly authorized by the human.
 
@@ -235,6 +243,7 @@ Run it **on the worker machine**, using the current user's trusted CLI installat
 Run the following commands from the repository root after installing dependencies. The tracked-file publication check must follow staging of the intended source changes; it does not inspect untracked files.
 
 ```sh
+python -m pip install -e .
 python -m unittest discover -s tests -v
 node --check web/ui.js
 node --check web/controller.js

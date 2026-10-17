@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { TerminalBroker, createServer, directRootIdentity } = require('../terminal_broker.cjs');
+const { TerminalBroker, createServer, directRootIdentity } = require('../terminal/terminal_broker.cjs');
 
 function fixture() {
   const calls = [], writes = [], kills = []; let output;

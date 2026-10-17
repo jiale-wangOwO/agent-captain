@@ -15,11 +15,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from controllers import ControllerService, INITIALIZATION, LEGACY_ROLE, ROLE, resolve_codex_command, default_workspace_root, legacy_workspace_root, manager_launch_environment, ROOT
-from management_policy import MANAGEMENT_POLICY, MANAGER_ROLE, POLICY_VERSION
-from terminal_client import BrokerError
-from store import Store
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from agent_captain.core.controllers import ControllerService, INITIALIZATION, LEGACY_ROLE, ROLE, resolve_codex_command, default_workspace_root, legacy_workspace_root, manager_launch_environment, ROOT
+from agent_captain.core.management_policy import MANAGEMENT_POLICY, MANAGER_ROLE, POLICY_VERSION
+from agent_captain.transport.terminal_client import BrokerError
+from agent_captain.infrastructure.store import Store
 
 SID = "11111111-1111-4111-8111-111111111111"
 OTHER = "22222222-2222-4222-8222-222222222222"
@@ -299,7 +299,7 @@ class ControllerTests(unittest.TestCase):
         workspace.mkdir()
         sentinel = workspace / "AGENTS.md"
         sentinel.write_text("user-owned guidance", encoding="utf-8")
-        with patch("controllers.uuid.uuid4", return_value=cid):
+        with patch("agent_captain.core.controllers.uuid.uuid4", return_value=cid):
             with self.assertRaises(FileExistsError):
                 self.prepare()
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "user-owned guidance")
@@ -363,8 +363,8 @@ class ControllerTests(unittest.TestCase):
         (workspace / "AGENTS.md").write_text(LEGACY_ROLE, encoding="utf-8")
         with self.hub.store.lock, self.hub.store.db:
             self.hub.store.db.execute("update controllers set workspace=? where id=?", (str(workspace), c["id"]))
-        with patch("controllers.default_workspace_root", return_value=canonical), \
-             patch("controllers.legacy_workspace_root", return_value=legacy):
+        with patch("agent_captain.core.controllers.default_workspace_root", return_value=canonical), \
+             patch("agent_captain.core.controllers.legacy_workspace_root", return_value=legacy):
             service = ControllerService(self.hub, terminals=self.terminals, launcher=self.launch, workspace_root=canonical)
             result = service.prepare({})
         self.assertEqual(result["id"], c["id"])
@@ -390,8 +390,8 @@ class ControllerTests(unittest.TestCase):
             "version": "owned-old-policy", "sha256": hashlib.sha256(before).hexdigest()})
         with self.hub.store.lock, self.hub.store.db:
             self.hub.store.db.execute("update controllers set workspace=? where id=?", (str(workspace), c["id"]))
-        with patch("controllers.default_workspace_root", return_value=canonical), \
-             patch("controllers.legacy_workspace_root", return_value=legacy):
+        with patch("agent_captain.core.controllers.default_workspace_root", return_value=canonical), \
+             patch("agent_captain.core.controllers.legacy_workspace_root", return_value=legacy):
             custom = Path(self.temp.name) / "explicit-custom-manager-base"
             service = ControllerService(self.hub, terminals=self.terminals, launcher=self.launch, workspace_root=custom)
             result = service.prepare({})
@@ -896,7 +896,7 @@ class ControllerTests(unittest.TestCase):
         def linked_owned_directory(candidate):
             return candidate == workspace or original_is_symlink(candidate)
         before = path.read_bytes()
-        with patch("controllers.Path.is_symlink", linked_owned_directory):
+        with patch("agent_captain.core.controllers.Path.is_symlink", linked_owned_directory):
             self.assertEqual(self.prepare()["policy_sync"]["status"], "unsafe_path")
         self.assertEqual(path.read_bytes(), before)
         self.assertEqual(self.launches, [])
@@ -941,12 +941,12 @@ class ControllerTests(unittest.TestCase):
     def test_policy_sync_rechecks_human_edits_before_atomic_replace(self):
         c = self.prepare()
         path = self.legacy_policy(c)
-        from controllers import _private_write
+        from agent_captain.core.controllers import _private_write
         custom = LEGACY_ROLE + "\nHuman edited during policy sync.\n"
         def changed_while_writing(temporary, text):
             _private_write(temporary, text)
             path.write_text(custom, encoding="utf-8")
-        with patch("controllers._private_write", side_effect=changed_while_writing):
+        with patch("agent_captain.core.controllers._private_write", side_effect=changed_while_writing):
             result = self.prepare()
         self.assertEqual(result["policy_sync"]["status"], "custom_preserved")
         self.assertEqual(result["policy_sync"]["reason"], "changed_during_sync")
@@ -1076,7 +1076,7 @@ class ControllerTests(unittest.TestCase):
                 self.service.set_origin(url)
 
     def test_resolver_missing_never_uses_shell_or_unknown_cmd(self):
-        with patch("controllers.shutil.which", return_value=None):
+        with patch("agent_captain.core.controllers.shutil.which", return_value=None):
             with self.assertRaises(RuntimeError):
                 resolve_codex_command()
 

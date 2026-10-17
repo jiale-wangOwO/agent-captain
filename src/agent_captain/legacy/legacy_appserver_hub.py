@@ -12,11 +12,11 @@ import time
 import uuid
 from pathlib import Path
 
-import catalog
-from rpc import Rpc, server_command
-from store import Store
+from agent_captain.sessions import catalog
+from agent_captain.legacy.rpc import Rpc, server_command
+from agent_captain.infrastructure.store import Store
 
-ROOT = Path(__file__).resolve().parent
+from agent_captain.paths import ROOT, source_path
 VERSION = "0.2.0"
 MANAGEMENT_EVENTS = ("host_configured", "host_connected", "host_unavailable", "agent_attached", "agent_activated", "agent_deactivated",
                      "agent_created", "message_submitted", "worker_completed", "approval_needed", "approval_resolved")
@@ -102,7 +102,7 @@ class LegacyAppServerHub:
         payload = base64.urlsafe_b64encode(json.dumps(request, ensure_ascii=False).encode()).decode()
         result = subprocess.run(
             ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", target, "python3 - " + payload],
-            input=(ROOT / "catalog.py").read_text(encoding="utf-8"), text=True, encoding="utf-8",
+            input=source_path("sessions", "catalog.py").read_text(encoding="utf-8"), text=True, encoding="utf-8",
             errors="replace", capture_output=True, timeout=30,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )

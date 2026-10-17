@@ -7,9 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import conversation_output as output
-
-
+from agent_captain.sessions import conversation_output as output
 def event(kind, payload):
     return {"type": kind, "timestamp": "2026-10-07T10:00:00Z", "payload": payload}
 

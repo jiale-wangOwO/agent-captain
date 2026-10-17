@@ -39,8 +39,8 @@ Codex 可以对这些登记对象改名、置顶、读取准确输出、按用�
 也可在用户自己的终端中执行：
 
 ```sh
-python terminal_service.py status
-python terminal_service.py recover --confirm
+python scripts/captain.py terminal status
+python scripts/captain.py terminal recover --confirm
 ```
 
 第一条只读，第二条明确恢复显示服务。之后对需要的远程工作点击「重连原终端」。本机已经结束的 PTY 不会被这条恢复命令重新创建。

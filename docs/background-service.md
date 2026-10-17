@@ -4,7 +4,7 @@ AgentCaptain has two independent local services: the Python web/MCP service and 
 
 ## Windows background launch
 
-Use `python service.py start` or `run_agentcaptain.cmd`. Foreground development with `python app.py serve` remains attached to its launching console.
+Use `python scripts/captain.py service start` or `run_agentcaptain.cmd`. Foreground development with `python scripts/captain.py serve` remains attached to its launching console. After an editable install, the equivalent commands are `agent-captain service start` and `agent-captain serve`.
 
 The background path uses Windows WMI only as a hidden, current-user process factory. An external monitor launches the actual service with independent standard streams, verifies its creation identity and executable, publishes an exclusive receipt, and records its eventual exit. It does not require another account, elevation, a scheduled task, or stored credentials. It does not automatically restart services, models, tunnels, or worker connections.
 
@@ -32,7 +32,7 @@ Recovering a broker starts an empty local display service. It does not automatic
 ## Diagnostics and acceptance
 
 ```sh
-python service.py status
+python scripts/captain.py service status
 python -m unittest tests.test_background_process tests.test_terminal_recovery -v
 ```
 
@@ -47,6 +47,6 @@ It closes a private nested killing Job containing a temporary launch parent and 
 
 ## 中文使用提示
 
-后台恢复和远端模型恢复是两回事。网页打不开时，先执行 `python service.py status`；服务未运行才执行 `python service.py start`。后台恢复后，使用原工作会话的「重连」接回显示，不需要另建会话，也不应盲目重发任务。
+后台恢复和远端模型恢复是两回事。网页打不开时，先执行 `python scripts/captain.py service status`；服务未运行才执行 `python scripts/captain.py service start`。后台恢复后，使用原工作会话的「重连」接回显示，不需要另建会话，也不应盲目重发任务。
 
 若显示「结果未知」「原会话不存在」或身份核验失败，保留原请求与日志再核对，不要强删锁、杀同 PID 的陌生程序、另建替代 shell，或反复换请求键。Windows 关机/休眠、VPN/Tailscale/SSH 路由故障仍需独立处理。本实现没有安装开机自启、系统服务或自动唤醒模型。

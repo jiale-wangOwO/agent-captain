@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const zlib = require('node:zlib');
-const { TerminalBroker, createServer, shellQuote, classifyCommand, remoteBridgeCommand } = require('../terminal_broker.cjs');
+const { TerminalBroker, createServer, shellQuote, classifyCommand, remoteBridgeCommand } = require('../terminal/terminal_broker.cjs');
 
 function fakeBroker(options = {}) {
   const writes = [];

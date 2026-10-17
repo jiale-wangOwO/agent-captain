@@ -7,7 +7,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const net = require('node:net');
 const { EventEmitter } = require('node:events');
-const { recoveryGuard, verifyRecoveryInputs, createServer, TerminalBroker, initializeOwnedDisplay, requireRefusedRecoveryPort, ownBrokerIdentity, recoveryOwnerState, parseOwnerLock } = require('../terminal_broker.cjs');
+const { execFileSync } = require('node:child_process');
+const { recoveryGuard, verifyRecoveryInputs, createServer, TerminalBroker, initializeOwnedDisplay, requireRefusedRecoveryPort, ownBrokerIdentity, recoveryOwnerState, validOwnerIdentity, parseOwnerLock } = require('../terminal/terminal_broker.cjs');
 
 function fixture(t, withLock = true) {
   const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pron-recovery-test-')));
@@ -96,10 +97,44 @@ test('shared OS helper records the real current Node birth as a decimal string a
   const identity = ownBrokerIdentity();
   assert.equal(typeof identity.birth, 'string');
   assert.equal(identity.executable.toLowerCase(), process.execPath.toLowerCase());
-  assert.equal(identity.script, path.resolve(__dirname, '../terminal_broker.cjs'));
+  assert.equal(identity.script, path.resolve(__dirname, '../terminal/terminal_broker.cjs'));
   assert.equal(recoveryOwnerState({ pid: process.pid, owner_identity: identity }), 'alive');
   assert.equal(recoveryOwnerState({ pid: process.pid, owner_identity: { ...identity, birth: 'win-filetime:1' } }), 'dead');
   assert.equal(recoveryOwnerState({ pid: process.pid }), 'unknown');
+});
+
+test('layout migration accepts only exact canonical or legacy checkout broker identities', () => {
+  const canonical = ownBrokerIdentity();
+  const legacy = { ...canonical, script: path.resolve(__dirname, '../terminal_broker.cjs') };
+  assert.equal(validOwnerIdentity(canonical), true);
+  assert.equal(validOwnerIdentity(legacy), true);
+  assert.equal(recoveryOwnerState({ pid: process.pid, owner_identity: legacy }), 'alive');
+  for (const script of [path.join(os.tmpdir(), 'terminal_broker.cjs'), path.resolve(__dirname, 'terminal_broker.cjs'), 'terminal_broker.cjs']) {
+    assert.equal(validOwnerIdentity({ ...canonical, script }), false);
+    let queried = false;
+    assert.equal(recoveryOwnerState({ pid: process.pid, owner_identity: { ...canonical, script } }, {
+      query() { queried = true; return { state: 'alive' }; },
+    }), 'unknown');
+    assert.equal(queried, false);
+  }
+  const queries = [];
+  assert.equal(recoveryOwnerState({ pid: process.pid, owner_identity: legacy }, {
+    query(args) { queries.push(args); return { state: 'alive' }; },
+  }), 'alive');
+  assert.equal(queries[0].at(-1), legacy.script);
+});
+
+test('legacy launcher records its exact invoked path without starting a broker on require', () => {
+  const canonical = path.resolve(__dirname, '../terminal/terminal_broker.cjs');
+  const legacy = path.resolve(__dirname, '../terminal_broker.cjs');
+  const script = `const broker=require(${JSON.stringify(canonical)});process.stdout.write(JSON.stringify(broker.ownBrokerIdentity()));`;
+  // Inert local child only: no main(), descriptor publication, session or SSH.
+  const identity = JSON.parse(execFileSync(process.execPath, ['-e', script, legacy], {
+    encoding: 'utf8', windowsHide: true, timeout: 10000,
+  }));
+  assert.equal(identity.script, legacy);
+  assert.equal(identity.executable.toLowerCase(), process.execPath.toLowerCase());
+  assert.equal(validOwnerIdentity(identity), true);
 });
 
 test('birth-bearing descriptor and private lease must prove the same dead owner, not merely an equal PID', t => {

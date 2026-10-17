@@ -1,55 +1,119 @@
 # Repository layout
 
-AgentCaptain keeps the UI, local service, management tools, and SSH terminal
-boundary in one small repository. Start with the area relevant to your change;
-there is no need to reorganize running installations to work on one component.
+AgentCaptain separates application policy, native-session evidence, process
+ownership, and user interfaces. Python implementation belongs to the
+`agent_captain` package; the repository root contains project metadata and
+user-facing entry points, not a flat collection of implementation modules.
 
-| Area | Entry points | Responsibility |
+```text
+agent-captain/
+├── src/agent_captain/       Python application package and command entry point
+│   ├── core/               Worker lifecycle, management and creation policy
+│   ├── server/             Loopback HTTP API and web-service lifecycle
+│   ├── sessions/           Native-session binding, catalog and saved output
+│   ├── transport/          Terminal client, SSH probes and remote helpers
+│   ├── infrastructure/     Persistence, background launch and process identity
+│   ├── integrations/       Stdio MCP bridge
+│   └── legacy/             Older app-server/RPC compatibility implementation
+├── terminal/               Node PTY broker and input-activity tracking
+├── web/                    Browser workbench and shared-terminal interface
+├── plugins/agent-captain/   Unconfigured existing-chat plugin template
+├── scripts/                Checkout entry point and explicit developer tools
+├── tests/                  Isolated Python and Node regression suites
+├── docs/                   Product contracts, operation guides and demo images
+├── assets/                 Canonical brand artwork and provenance
+├── .github/                CI and contribution templates
+├── pyproject.toml          Python package metadata and installed CLI
+└── package.json            Node dependencies and verification commands
+```
+
+The hidden `.agents/plugins/marketplace.json` is a source-only plugin catalog,
+not an authenticated live connection. Private `.runtime/`, local configuration,
+and dependency directories are not part of this source tree.
+
+## Boundaries and entry points
+
+| Component | Responsibility | Important boundary |
 | --- | --- | --- |
-| Web interface | `web/`, `app.py` | Workbench presentation, HTTP routes, same-origin and loopback checks |
-| Application and state | `hub.py`, `terminal_hub.py`, `store.py`, `catalog.py` | Registered workers, operations, persistence, and lifecycle state |
-| Captain integration | `controllers.py`, `management_policy.py`, `mcp_bridge.py` | Management identity, tool access, creation boundaries, and dispatch |
-| Terminal boundary | `terminal_client.py`, `terminal_service.py`, `terminal_broker.cjs`, `input_activity.cjs` | Owned terminal services, safe input, sizing, and display attachment |
-| Remote transport helpers | `remote_*.py`, `directory_browser.py` | SSH-side probes, terminal history, and explicit directory selection |
-| Conversation output | `conversation_output.py`, `session_binding.py` | Exact native-session association and persisted output, distinct from terminal screenshots |
-| Local service lifecycle | `service.py`, `background_process.py`, `process_identity.py` | Background launch, identity checks, and safe status/stop behavior |
-| Plugin source | `plugins/agent-captain/`, `.agents/plugins/marketplace.json` | Machine-independent plugin template and catalog; not a configured live connection |
-| Developer tools | `scripts/` | Explicit plugin configuration, maintenance helpers, and publication checks |
-| Verification | `tests/`, `.github/workflows/ci.yml` | Isolated regression tests and the Windows/Linux CI matrix |
-| Documentation and visuals | `docs/`, `assets/` | Product guidance, operation contracts, and reusable brand assets |
+| `core/` | Registered workers, management identities, dispatch, delivery and creation policy | Policy is separate from shell transport; submitted input is not verified completion. |
+| `server/` | HTTP routes, loopback/same-origin checks and web-process startup | Restarting the web service must not end independently owned terminals. |
+| `sessions/` | Exact native-session association and paginated persisted output | Screen text is not complete saved conversation output; never select a newest file as identity. |
+| `transport/` | Owned terminal client, SSH-side probes, history and directory selection | Reconnect the original persistent terminal; do not silently create a replacement or resume a model. |
+| `infrastructure/` | State storage, durable background launch and process-birth checks | A PID alone is not a trustworthy process identity. |
+| `integrations/` | MCP schemas, authentication and tool dispatch | The bridge uses the same management contract; it does not host a second model. |
+| `terminal/` | Node PTY ownership, rendering state, geometry and safe input | Preserve delivery IDs and human drafts across uncertain connections. |
+| `web/` | Workbench presentation and direct terminal interaction | UI changes should be testable without real SSH or model access. |
+| `legacy/` | Previous app-server/RPC implementation retained for compatibility | Not a second recommended application entry point. |
 
-For task-oriented reading, start at the [documentation index](index.md).
-The [offline visual demo](guides/visual-demo.md) reproduces showcase views using
-the shipped UI and synthetic fixtures; it does not contact running workers.
-Canonical artwork and its usage rules live in [brand assets](../assets/brand/README.md).
+Use the source-checkout command from the repository root:
 
-## What stays outside source control
+```sh
+python scripts/captain.py serve
+python scripts/captain.py service start
+python scripts/captain.py service status
+python scripts/captain.py terminal status
+```
+
+The first runs in the foreground; the next two start or inspect the web service.
+`terminal status` inspects the separate display service. It does not reconnect
+workers or resume models. `run_agentcaptain.cmd` is the Windows convenience
+launcher.
+
+For development, run `python -m pip install -e .`. The installed
+`agent-captain` command and `python -m agent_captain` expose the same command
+groups. This remains a checkout-based application: keep `web/`, `assets/`,
+`terminal/`, and npm dependencies available beside the package source. An
+editable install is not a standalone binary or a bundled desktop installer.
+
+## Existing-installation migration
+
+Source movement does not rename or relocate installation state. `.runtime/`
+stays under the same checkout. Registered machines, exact terminals, native
+Session IDs, delivery keys, management workspaces, environment-variable
+overrides and wire identifiers retain their existing meanings.
+
+An older deployment may still have saved absolute references to root-level
+scripts such as `app.py`, `mcp_bridge.py`, or `terminal_broker.cjs`. Before
+removing those old entry paths in a running installation, use the explicit
+local compatibility preparation:
+
+```sh
+python scripts/prepare_legacy_entrypoints.py
+# Review the dry-run list, then explicitly materialize the entries:
+python scripts/prepare_legacy_entrypoints.py --apply
+```
+
+The first command only reports a dry run. With `--apply` it creates ignored,
+installation-local compatibility entries; these are not
+the canonical implementation and are not committed back into the root. Review
+its reported result before replacing a service. It is not an instruction to
+restart a broker, close terminals, restore Codex, or replay tasks. Fresh clones
+do not need this compatibility layer. Use the new command for future launches;
+retain required old paths until the clients that reference them have been
+deliberately migrated.
+
+New existing-chat plugin packages copy the canonical MCP bridge and its pure
+management policy into a retained standalone directory. Cached plugin startup
+does not depend on the source package being importable or the current working
+directory. Existing plugin outputs are not rewritten in place; generate a new
+output, register it explicitly, and verify the client loaded the tools. See the
+[operator guide](guides/operator-guide.md#optional-connect-an-existing-codex-chat-with-the-legacy-plugin)
+and [rename compatibility](rebranding.md).
+
+## Private state and verification
 
 `.runtime/` and ignored machine-local configuration belong to an installation,
 not the reusable project. They may contain capabilities, worker references,
-personal paths, transcripts, or delivery records. Do not copy them into fixtures,
-issue reports, screenshots, or an example configuration.
+personal paths, transcripts, or delivery records. Never copy them into fixtures,
+issue reports, screenshots, or example configuration. Generated plugin output
+also stays private; creating a marketplace does not prove a chat loaded it.
 
-Repository screenshots must come from the isolated demo, not a real Hub at
-port 8766. See the [screenshot-update instructions](guides/visual-demo.md#repository-screenshots).
+Repository screenshots come from the isolated synthetic demo, not a real Hub
+at port 8766. See the [screenshot-update guide](guides/visual-demo.md#repository-screenshots).
+Canonical artwork and its usage rules live in [brand assets](../assets/brand/README.md).
 
-Generated plugin output also belongs in private local state. The committed
-plugin source is intentionally unconfigured; a successful configuration command
-does not prove a running chat has loaded that plugin.
-
-## Change by boundary, not by file count
-
-- A UI-only change should not require a real SSH connection or a model restart.
-- A reconnect change must preserve the exact original terminal and distinguish a
-  missing remote tmux from a failed display connection.
-- A conversation reader must not treat visible screen text as complete saved
-  history or guess a native Session ID.
-- A rename must preserve working protocol identifiers and existing runtime paths;
-  see [rename compatibility](rebranding.md).
-- A publication check inspects the reviewed Git index with `--tracked`; it is not
-  a complete audit of Git history, artwork, or deployment state.
-
-Flat Python modules and compatibility launchers are retained deliberately.
-Moving them merely to make the tree look shorter can break imports, installed
-plugin paths, or existing service launch references. Prefer a focused change and
-the checks in [CONTRIBUTING.md](../CONTRIBUTING.md).
+Run the [contribution checks](../CONTRIBUTING.md#development-checks) for changes
+to imports, subprocess entry points and helper delivery. Publication checks use
+the reviewed Git index with `--tracked`; they are not a complete audit of Git
+history, artwork or deployment state. Start at the [documentation index](index.md)
+for task-oriented product guidance.

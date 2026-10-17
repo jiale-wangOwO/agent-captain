@@ -21,7 +21,7 @@ if os.name == "nt":
     modules = {"fcntl": fake_fcntl, "termios": fake_termios, "signal": fake_signal}
 else:
     modules = {}
-spec = importlib.util.spec_from_file_location("test_owned_pty_bridge", Path(__file__).resolve().parents[1] / "remote_pty_bridge.py")
+spec = importlib.util.spec_from_file_location("test_owned_pty_bridge", Path(__file__).resolve().parents[1] / "src/agent_captain/transport/remote_pty_bridge.py")
 bridge = importlib.util.module_from_spec(spec)
 with patch.dict(sys.modules, modules):
     spec.loader.exec_module(bridge)

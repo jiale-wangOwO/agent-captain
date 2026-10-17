@@ -15,7 +15,7 @@ import time
 import unittest
 import uuid
 
-from process_identity import observe_process
+from agent_captain.infrastructure.process_identity import observe_process
 
 ROOT = Path(__file__).resolve().parents[1]
 PARENT = r'''
@@ -23,8 +23,8 @@ import ctypes, json, os, subprocess, sys, time
 from ctypes import wintypes
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from background_process import launch_background
-from process_identity import observe_process
+from agent_captain.infrastructure.background_process import launch_background
+from agent_captain.infrastructure.process_identity import observe_process
 folder = Path(sys.argv[3])
 kernel = ctypes.WinDLL('kernel32', use_last_error=True)
 kernel.OpenJobObjectW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
@@ -119,7 +119,7 @@ class BackgroundJobSurvivalTests(unittest.TestCase):
             try:
                 with (folder / 'parent.out.log').open('wb') as output, (folder / 'parent.err.log').open('wb') as error:
                     parent = subprocess.Popen([sys.executable, '-I', '-u', '-c', PARENT,
-                                               str(ROOT), job_name, str(folder)],
+                                               str(ROOT / "src"), job_name, str(folder)],
                                               stdin=subprocess.DEVNULL, stdout=output, stderr=error,
                                               creationflags=subprocess.CREATE_NO_WINDOW)
 

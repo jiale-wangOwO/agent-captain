@@ -8,9 +8,9 @@ from urllib.error import HTTPError
 from urllib.request import Request, ProxyHandler, build_opener
 from unittest.mock import patch
 
-from app import create_server
-from terminal_client import BrokerError
-from terminal_hub import Hub
+from agent_captain.server.app import create_server
+from agent_captain.transport.terminal_client import BrokerError
+from agent_captain.core.terminal_hub import Hub
 
 
 class Terminals:

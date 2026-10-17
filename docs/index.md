@@ -32,6 +32,7 @@ Start with what you want to do. The guides describe real behavior and its bounda
 | Terminal screen works, but independent session reads fail | [SSH transport and concurrent channel requirements](ssh-transport.md) |
 | CLI updated, but its shared daemon or features differ | [Codex maintenance](codex-maintenance.md) |
 | Upgrading an existing deployment after the product rename | [Brand and compatibility notes](rebranding.md) |
+| Upgrading from the old flat source tree | [Source layout and local compatibility entries](repository-layout.md#existing-installation-migration) |
 
 An SSH banner or a single successful command is not proof that persistent display and concurrent history reads both work. External tunnel adapters own their endpoint recovery. A lost original terminal requires an explicit choice, not silent replacement.
 
@@ -44,4 +45,4 @@ An SSH banner or a single successful command is not proof that persistent displa
 - [Brand assets and usage](../assets/brand/README.md) — canonical logo, typography, palette, and generation provenance.
 - [MIT license](../LICENSE) and [third-party notices](../THIRD_PARTY_NOTICES.md).
 
-The source keeps its current flat Python module layout to avoid deployment and import churn. Runtime state, connection descriptors, model authentication, and real session records belong outside version control—not in the documentation or showcase.
+Python implementation lives in the layered `src/agent_captain/` package; the PTY broker and browser interface have separate `terminal/` and `web/` directories. Runtime state, connection descriptors, model authentication, and real session records belong outside version control—not in the documentation or showcase.

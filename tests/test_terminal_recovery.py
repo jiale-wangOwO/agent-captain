@@ -11,12 +11,10 @@ from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 from urllib.error import URLError
 
-from terminal_client import BrokerError, TerminalClient
-from process_identity import broker_owner_state, observe_process
-from background_process import BackgroundLaunchUnknown
-import terminal_service
-
-
+from agent_captain.transport.terminal_client import BrokerError, TerminalClient
+from agent_captain.infrastructure.process_identity import broker_owner_state, observe_process
+from agent_captain.infrastructure.background_process import BackgroundLaunchUnknown
+from agent_captain.transport import terminal_service
 class BoundTerminalRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -27,7 +25,7 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
         self.maintenance = Path(str(self.descriptor) + ".recovery.lock")
         self.env = patch.dict(os.environ, {"CEO_HUB_TERMINAL_FILE": ""})
         self.env.start()
-        self.ref_patch = patch("terminal_client.worker_reference_path", return_value=self.reference)
+        self.ref_patch = patch("agent_captain.transport.terminal_client.worker_reference_path", return_value=self.reference)
         self.ref_patch.start()
         self.write_descriptor()
         self.reference.write_text(json.dumps({"descriptor_file": str(self.descriptor)}), encoding="utf-8")
@@ -56,7 +54,7 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
     def test_status_is_read_only_and_public_metadata_has_no_private_data(self):
         previous = (self.descriptor.read_bytes(), self.reference.read_bytes())
         request, pid, port = self.offline()
-        with request, pid, port, patch("terminal_client.launch_background", side_effect=AssertionError("read only")):
+        with request, pid, port, patch("agent_captain.transport.terminal_client.launch_background", side_effect=AssertionError("read only")):
             status = self.client.bound_owner_status()
         self.assertEqual((status["state"], status["code"]), ("offline", "bound_owner_offline"))
         self.assertTrue(status["recoverable"])
@@ -73,7 +71,7 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
 
     def test_authenticated_healthy_bound_owner_is_a_noop_without_recovery_receipt(self):
         with patch.object(self.client, "request", return_value={"ok": True, "pid": 123, "version": "0.3.0"}) as request, \
-                patch("terminal_client.launch_background", side_effect=AssertionError("healthy owner must stay")):
+                patch("agent_captain.transport.terminal_client.launch_background", side_effect=AssertionError("healthy owner must stay")):
             status = self.client.recover_bound_owner(confirm=True)
         request.assert_called_once_with("/health", timeout=4)
         self.assertEqual(status["state"], "ready")
@@ -85,7 +83,7 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
     def test_socket_refusal_observation_waits_four_seconds_without_broadening_classification(self):
         for result, expected in ((0, "open"), (errno.ECONNREFUSED, "refused"), (10061, "refused"),
                                  (10035, "unknown"), (errno.EINPROGRESS, "unknown"), (errno.ETIMEDOUT, "unknown")):
-            with self.subTest(result=result), patch("terminal_client.socket.socket", return_value=MagicMock()) as factory:
+            with self.subTest(result=result), patch("agent_captain.transport.terminal_client.socket.socket", return_value=MagicMock()) as factory:
                 probe = factory.return_value.__enter__.return_value
                 probe.connect_ex.return_value = result
                 self.assertEqual(self.client._port_state("http://127.0.0.1:39001"), expected)
@@ -94,7 +92,7 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
 
     def test_socket_timeout_or_os_error_is_never_treated_as_refusal(self):
         for error in (TimeoutError("fixture timeout"), OSError("fixture unknown socket failure")):
-            with self.subTest(error=type(error).__name__), patch("terminal_client.socket.socket", return_value=MagicMock()) as factory:
+            with self.subTest(error=type(error).__name__), patch("agent_captain.transport.terminal_client.socket.socket", return_value=MagicMock()) as factory:
                 probe = factory.return_value.__enter__.return_value
                 probe.connect_ex.side_effect = error
                 self.assertEqual(self.client._port_state("http://127.0.0.1:39001"), "unknown")
@@ -104,7 +102,7 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
         with patch.object(self.client, "request", side_effect=self.refused) as request, \
                 patch.object(self.client, "_pid_state", return_value="dead"), \
                 patch.object(self.client, "_port_state", return_value="refused"), \
-                patch("terminal_client.launch_background", side_effect=AssertionError("status does not start recovery")):
+                patch("agent_captain.transport.terminal_client.launch_background", side_effect=AssertionError("status does not start recovery")):
             status = self.client.bound_owner_status()
         self.assertEqual(status["code"], "bound_owner_offline")
         request.assert_called_once_with("/health", timeout=4)
@@ -113,7 +111,7 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
         for state in ("alive", "unknown"):
             with self.subTest(state=state), patch.object(self.client, "request", side_effect=self.refused), \
                     patch.object(self.client, "_owner_state", return_value=state), \
-                    patch("terminal_client.launch_background", side_effect=AssertionError("no kill or replacement")):
+                    patch("agent_captain.transport.terminal_client.launch_background", side_effect=AssertionError("no kill or replacement")):
                 result = self.client.recover_bound_owner(confirm=True)
             self.assertFalse(result["can_recover"])
             self.assertEqual(result["code"], "bound_owner_alive" if state == "alive" else "bound_owner_pid_unknown")
@@ -124,7 +122,7 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
                     return_value={"ok": True, "pid": 999, "version": "0.3.0"}), \
                     patch.object(self.client, "_pid_state", return_value="dead"), \
                     patch.object(self.client, "_port_state", return_value="refused"), \
-                    patch("terminal_client.launch_background", side_effect=AssertionError("not proof of offline")):
+                    patch("agent_captain.transport.terminal_client.launch_background", side_effect=AssertionError("not proof of offline")):
                 result = self.client.recover_bound_owner(confirm=True)
             self.assertEqual(result["code"], "bound_owner_health_unknown")
 
@@ -133,7 +131,7 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
             with self.subTest(port_state=port_state), patch.object(self.client, "request", side_effect=self.refused), \
                     patch.object(self.client, "_pid_state", return_value="dead"), \
                     patch.object(self.client, "_port_state", return_value=port_state), \
-                    patch("terminal_client.launch_background", side_effect=AssertionError("port not refused")):
+                    patch("agent_captain.transport.terminal_client.launch_background", side_effect=AssertionError("port not refused")):
                 result = self.client.recover_bound_owner(confirm=True)
             self.assertEqual(result["code"], "bound_owner_health_unknown")
 
@@ -142,7 +140,7 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
             self.lockfile.write_bytes(content)
             request, pid, port = self.offline()
             with self.subTest(content=content[:10]), request, pid, port, \
-                    patch("terminal_client.launch_background", side_effect=AssertionError("lock remains")):
+                    patch("agent_captain.transport.terminal_client.launch_background", side_effect=AssertionError("lock remains")):
                 result = self.client.recover_bound_owner(confirm=True)
             self.assertEqual(result["code"], "bound_owner_lock_unknown")
             self.assertEqual(self.lockfile.read_bytes(), content)
@@ -150,7 +148,7 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
     def test_unknown_existing_maintenance_lock_is_never_reclaimed(self):
         self.maintenance.write_text("other unfinished recovery", encoding="ascii")
         request, pid, port = self.offline()
-        with request, pid, port, patch("terminal_client.launch_background", side_effect=AssertionError("busy")):
+        with request, pid, port, patch("agent_captain.transport.terminal_client.launch_background", side_effect=AssertionError("busy")):
             result = self.client.recover_bound_owner(confirm=True)
         self.assertEqual(result["code"], "bound_owner_recovery_busy")
         self.assertEqual(self.maintenance.read_text(), "other unfinished recovery")
@@ -158,7 +156,7 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
     def test_changed_or_invalid_reference_wire_version_and_manager_override_fail_closed(self):
         for changes in ({"version": "0.2.0"}, {"url": "http://localhost:3"}, {"pid": -1}):
             self.write_descriptor(**changes)
-            with self.subTest(changes=changes), patch("terminal_client.launch_background", side_effect=AssertionError("invalid")):
+            with self.subTest(changes=changes), patch("agent_captain.transport.terminal_client.launch_background", side_effect=AssertionError("invalid")):
                 self.assertEqual(self.client.recover_bound_owner(confirm=True)["code"], "bound_owner_reference_invalid")
         self.write_descriptor()
         self.reference.write_text('{"descriptor_file":"relative.json"}')
@@ -170,7 +168,7 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
 
     def test_stale_expected_owner_rejects_before_starting(self):
         for owner in ({"pid": 999}, {"pid": 123, "version": "0.1.0"}, {"pid": 123, "token": "not allowed"}):
-            with self.subTest(owner=owner), patch("terminal_client.launch_background", side_effect=AssertionError("stale action")):
+            with self.subTest(owner=owner), patch("agent_captain.transport.terminal_client.launch_background", side_effect=AssertionError("stale action")):
                 self.assertEqual(self.client.recover_bound_owner(confirm=True, expected_owner=owner)["code"], "bound_owner_changed")
 
     def test_reference_change_during_offline_proof_prevents_spawn(self):
@@ -179,7 +177,7 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
             return "refused"
         with patch.object(self.client, "request", side_effect=self.refused), patch.object(self.client, "_pid_state", return_value="dead"), \
                 patch.object(self.client, "_port_state", side_effect=changed_port), \
-                patch("terminal_client.launch_background", side_effect=AssertionError("changed pin")):
+                patch("agent_captain.transport.terminal_client.launch_background", side_effect=AssertionError("changed pin")):
             result = self.client.recover_bound_owner(confirm=True)
         self.assertEqual(result["code"], "bound_owner_changed")
 
@@ -201,8 +199,8 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
             self.write_descriptor(pid=456, recovery_id=guard["recovery_id"])
             return process
         with patch.object(self.client, "request", side_effect=health), patch.object(self.client, "_pid_state", return_value="dead"), \
-                patch.object(self.client, "_port_state", return_value="refused"), patch("terminal_client.shutil.which", return_value="fake-node"), \
-                patch("terminal_client.launch_background", side_effect=publish) as spawn:
+                patch.object(self.client, "_port_state", return_value="refused"), patch("agent_captain.transport.terminal_client.shutil.which", return_value="fake-node"), \
+                patch("agent_captain.transport.terminal_client.launch_background", side_effect=publish) as spawn:
             result = self.client.recover_bound_owner(confirm=True, expected_owner={"pid": 123, "version": "0.3.0"})
         self.assertEqual((result["state"], result["code"]), ("ready", "bound_owner_recovered"))
         self.assertTrue(result["recovered"])
@@ -230,9 +228,9 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
             process = Mock(pid=456)
             process.poll.return_value = 1 if exited else None
             request, pid, port = self.offline()
-            clock = None if exited else patch("terminal_client.time.monotonic", side_effect=[0, 11])
-            with request, pid, port, patch("terminal_client.shutil.which", return_value="fake-node"), \
-                    patch("terminal_client.launch_background", return_value=process):
+            clock = None if exited else patch("agent_captain.transport.terminal_client.time.monotonic", side_effect=[0, 11])
+            with request, pid, port, patch("agent_captain.transport.terminal_client.shutil.which", return_value="fake-node"), \
+                    patch("agent_captain.transport.terminal_client.launch_background", return_value=process):
                 if clock:
                     with clock:
                         result = self.client.recover_bound_owner(confirm=True)
@@ -251,8 +249,8 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
             with self.subTest(error=type(error).__name__):
                 request, pid, port = self.offline()
                 descriptor_before, reference_before = self.descriptor.read_bytes(), self.reference.read_bytes()
-                with request, pid, port, patch("terminal_client.shutil.which", return_value="fake-node"), \
-                        patch("terminal_client.launch_background", side_effect=error) as launch:
+                with request, pid, port, patch("agent_captain.transport.terminal_client.shutil.which", return_value="fake-node"), \
+                        patch("agent_captain.transport.terminal_client.launch_background", side_effect=error) as launch:
                     result = self.client.recover_bound_owner(confirm=True)
                     self.assertEqual(result["state"], "unknown")
                     self.assertEqual(result["code"], "bound_owner_readiness_unknown")
@@ -275,8 +273,8 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
             self.reference.write_text(json.dumps({"descriptor_file": str(self.descriptor)}) + "\n")
             return process
         request, pid, port = self.offline()
-        with request, pid, port, patch("terminal_client.shutil.which", return_value="fake-node"), \
-                patch("terminal_client.launch_background", side_effect=publish):
+        with request, pid, port, patch("agent_captain.transport.terminal_client.shutil.which", return_value="fake-node"), \
+                patch("agent_captain.transport.terminal_client.launch_background", side_effect=publish):
             result = self.client.recover_bound_owner(confirm=True)
         self.assertEqual(result["code"], "bound_owner_changed_after_launch")
         self.assertFalse(result["recovered"])
@@ -286,7 +284,7 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
         stub = Mock()
         stub.bound_owner_status.return_value = {"state": "offline", "code": "bound_owner_offline"}
         stub.recover_bound_owner.return_value = {"state": "blocked", "code": "confirmation_required"}
-        with patch("terminal_service.TerminalClient", return_value=stub), patch("sys.stdout", new_callable=io.StringIO) as output:
+        with patch("agent_captain.transport.terminal_service.TerminalClient", return_value=stub), patch("sys.stdout", new_callable=io.StringIO) as output:
             self.assertEqual(terminal_service.main(["status"]), 0)
             self.assertEqual(terminal_service.main(["recover"]), 1)
             terminal_service.main(["recover", "--confirm"])
@@ -321,8 +319,8 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
                 return {"sessions": [{"id": "existing-after-launch"}]}
             return {"ok": True, "pid": 456, "version": "0.3.0", "recovery_id": self.client.descriptor()["recovery_id"]}
         with patch.object(self.client, "request", side_effect=reply), patch.object(self.client, "_pid_state", return_value="dead"), \
-                patch.object(self.client, "_port_state", return_value="refused"), patch("terminal_client.shutil.which", return_value="fake-node"), \
-                patch("terminal_client.launch_background", side_effect=publish):
+                patch.object(self.client, "_port_state", return_value="refused"), patch("agent_captain.transport.terminal_client.shutil.which", return_value="fake-node"), \
+                patch("agent_captain.transport.terminal_client.launch_background", side_effect=publish):
             result = self.client.recover_bound_owner(confirm=True)
         self.assertEqual(result["code"], "bound_owner_not_empty_after_launch")
         self.assertFalse(result["recovered"])
@@ -341,7 +339,7 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
             return self.refused()
         with patch.object(self.client, "request", side_effect=probe), patch.object(self.client, "_pid_state", return_value="dead"), \
                 patch.object(self.client, "_port_state", return_value="refused"), \
-                patch("terminal_client.launch_background", side_effect=AssertionError("changed lease")):
+                patch("agent_captain.transport.terminal_client.launch_background", side_effect=AssertionError("changed lease")):
             result = self.client.recover_bound_owner(confirm=True)
         self.assertEqual(result["code"], "bound_owner_changed")
         self.assertEqual(self.lockfile.read_text(), "123")
@@ -358,9 +356,9 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
                                 ("win-filetime:133700000000000002", "bound_owner_offline")):
             with self.subTest(birth=birth), patch.object(self.client, "request", side_effect=self.refused), \
                     patch.object(self.client, "_pid_state", return_value="alive"), \
-                    patch("terminal_client.observe_process", return_value={"state": "alive", "birth": birth, "executable": identity["executable"]}), \
+                    patch("agent_captain.transport.terminal_client.observe_process", return_value={"state": "alive", "birth": birth, "executable": identity["executable"]}), \
                     patch.object(self.client, "_port_state", return_value="refused"), \
-                    patch("terminal_client.launch_background", side_effect=AssertionError("status never replaces or kills a PID")):
+                    patch("agent_captain.transport.terminal_client.launch_background", side_effect=AssertionError("status never replaces or kills a PID")):
                 self.assertEqual(self.client.bound_owner_status()["code"], expected)
 
     def test_birth_identity_failure_and_same_birth_conflicting_image_fail_closed(self):
@@ -369,16 +367,16 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
         for observation in ({"state": "unknown"}, {"state": "alive", "birth": identity["birth"], "executable": os.path.abspath("other.exe")}):
             with self.subTest(observation=observation), patch.object(self.client, "request", side_effect=self.refused), \
                     patch.object(self.client, "_pid_state", return_value="alive"), \
-                    patch("terminal_client.observe_process", return_value=observation):
+                    patch("agent_captain.transport.terminal_client.observe_process", return_value=observation):
                 self.assertEqual(self.client.bound_owner_status()["code"], "bound_owner_pid_unknown")
 
     def test_legacy_reused_cmd_pid_can_be_proved_not_to_be_the_node_owner(self):
         self.lockfile.write_text("123")
         with patch.object(self.client, "request", side_effect=self.refused), \
                 patch.object(self.client, "_pid_state", return_value="alive"), \
-                patch("terminal_client.observe_process", return_value={"state": "alive", "birth": "win-filetime:133700000000000001", "executable": os.path.abspath("cmd.exe")}), \
+                patch("agent_captain.transport.terminal_client.observe_process", return_value={"state": "alive", "birth": "win-filetime:133700000000000001", "executable": os.path.abspath("cmd.exe")}), \
                 patch.object(self.client, "_port_state", return_value="refused"), \
-                patch("terminal_client.launch_background", side_effect=AssertionError("status only")):
+                patch("agent_captain.transport.terminal_client.launch_background", side_effect=AssertionError("status only")):
             self.assertEqual(self.client.bound_owner_status()["code"], "bound_owner_offline")
         self.assertEqual(self.lockfile.read_text(), "123")
 
@@ -386,7 +384,7 @@ class BoundTerminalRecoveryTests(unittest.TestCase):
         identity = self.owner_identity()
         with patch.object(self.client, "request", side_effect=self.refused), \
                 patch.object(self.client, "_pid_state", return_value="alive"), \
-                patch("terminal_client.observe_process", return_value={"state": "alive", "birth": identity["birth"], "executable": identity["executable"]}):
+                patch("agent_captain.transport.terminal_client.observe_process", return_value={"state": "alive", "birth": identity["birth"], "executable": identity["executable"]}):
             self.assertEqual(self.client.bound_owner_status()["code"], "bound_owner_pid_unknown")
 
     def test_new_lock_birth_must_match_original_descriptor_not_just_pid(self):
