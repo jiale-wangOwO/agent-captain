@@ -42,7 +42,7 @@ This preview proves how the interface renders and navigates with these fixtures.
 | [workspace-demo.jpg](../images/workspace-demo.jpg) | Cross-machine workbench and a selected synthetic worker. |
 | [captain-demo.jpg](../images/captain-demo.jpg) | The synthetic Captain management display. |
 
-Both screenshots are captures of the actual web UI served by this preview, **not AI-generated screens**. They retain the browser capture's native JPEG bytes and use the matching `.jpg` extension, without pixel edits or format conversion. The logo is separately generated artwork; see its [generation brief](../../assets/brand/generation.md).
+Both screenshots are captures of the actual web UI served by this preview, **not AI-generated screens**. They retain the browser capture's native JPEG bytes and use the matching `.jpg` extension, without pixel edits or format conversion. All displayed machines, tasks and messages remain synthetic fixtures; the logo change does not change those fixtures or imply a new live integration result. The current identity uses the selected open-ring compass; see the [brand assets and usage](../../assets/brand/README.md) and its [generation brief](../../assets/brand/generation.md).
 
 To update the showcase:
 

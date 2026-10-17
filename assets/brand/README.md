@@ -1,6 +1,6 @@
 # AgentCaptain identity
 
-<img src="agentcaptain-mark.png" width="112" height="112" alt="AgentCaptain: a mint A-shaped navigation mark on deep ink green">
+<img src="agentcaptain-mark.png" width="112" height="112" alt="AgentCaptain: an open-ring mint-and-teal compass">
 
 **AgentCaptain · 队长**
 
@@ -8,25 +8,31 @@ One captain for agents across your machines.
 
 一个主控，统筹本机与远程 Agent。
 
-The mark combines an **A** with a forward navigation pointer: direction and
-coordination, without a literal captain's hat or a diagram of every machine.
+The open-ring compass is the user-selected **B** concept: a restrained circular
+arc and a two-tone northeast-pointing needle. It keeps the original compass
+direction while using a newly generated design, not a copy of the earlier mark.
 The wordmark and tagline remain native text, so they stay readable and accessible.
+
+采用用户选定的 **B · 开放圆环**：克制的圆弧与指向东北的双色指针，以方向感表达队长的协调角色。
+这是一幅新生成的设计，延续原来的简约指南针方向，而不是复制旧图。名称与标语保留为原生文字，不嵌入图形。
 
 ## Assets and usage
 
-- [`agentcaptain-mark.png`](agentcaptain-mark.png) is the canonical generated
-  raster artwork, used by the repository, web header and favicon.
-- Use a square frame, preserve its proportions and allow clear space around it.
-  The intentional ink background works on both light and dark surfaces.
-- Keep the mint-on-ink treatment; do not stretch, recolor or add effects.
+- [`agentcaptain-mark.png`](agentcaptain-mark.png) is the single canonical mark,
+  used by the repository, web header and favicon. It is the selected generated
+  PNG, with a deep ink background and clear space already included in the image.
+  It is not a transparent or infinitely scalable SVG asset.
+- Use a square frame and preserve the complete image and its proportions.
+  Prefer a matching dark ink surface; keep the built-in clear space rather than
+  cropping tightly around the arc or needle.
+- Keep the selected artwork unchanged; do not stretch, recolor or add effects.
 - In text, write **AgentCaptain** as one word. The Chinese companion name is **队长**.
-- Suggested UI companion colors are ink `#102623` and mint `#9CE3CD`.
-  These are design targets, not a claim that every generated pixel is identical.
+- The generation brief uses deep ink (approximately `#101B21`), pale mint
+  (`#A7EAD1`) and restrained teal (`#5BAEBE`). These are design references, not
+  a claim that every generated pixel exactly matches a hex value.
+- See the [generation brief](generation.md) for the exact prompt and provenance.
 
-The selected artwork was generated using the built-in image generation tool,
-then copied into this repository without manual pixel edits. See the
-[generation brief and prompts](generation.md). It has an opaque background;
-it is not a transparent vector asset. AI generation does not establish a
-trademark registration or guarantee uniqueness against all existing marks.
+This identity does not imply a trademark registration or guarantee uniqueness
+against all existing marks.
 
 Artwork is included under the repository's [MIT license](../../LICENSE).

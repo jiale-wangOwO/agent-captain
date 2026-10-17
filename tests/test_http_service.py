@@ -66,7 +66,7 @@ class HttpServiceTests(unittest.TestCase):
         self.assertTrue(payload.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertEqual(payload, expected.read_bytes())
         for path in ("/assets/agent-captain-logo.svg", "/assets/pron-hub-logo.png", "/agent-captain-mark.svg",
-                     "/assets/brand/agentcaptain-mark.png", "/assets/brand/generation.md",
+                     "/assets/brand/agentcaptain-mark.svg", "/assets/brand/agentcaptain-mark.png", "/assets/brand/generation.md",
                      "/../assets/agent-captain-logo.svg", "/%2e%2e/assets/agent-captain-logo.svg",
                      "/agent-captain-mark.png/../config.json"):
             with self.subTest(path=path), self.assertRaises(HTTPError) as error:

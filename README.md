@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/brand/agentcaptain-mark.png" alt="AgentCaptain logo" width="120">
+  <img src="assets/brand/agentcaptain-mark.png" alt="AgentCaptain open-ring compass logo" width="120">
 </p>
 
 # AgentCaptain · 队长

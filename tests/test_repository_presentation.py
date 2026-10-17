@@ -40,8 +40,8 @@ PUBLIC_ROOT_FILES = {
 MARK = "assets/brand/agentcaptain-mark.png"
 WORKSPACE = "docs/images/workspace-demo.jpg"
 CAPTAIN = "docs/images/captain-demo.jpg"
-PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 MAX_ASSET_BYTES = 2 * 1024 * 1024
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
 def without_fences(text: str) -> str:
@@ -197,7 +197,8 @@ class RepositoryPresentationTests(unittest.TestCase):
                 self.assertIn("docs/guides/visual-demo.md", links)
 
     def test_superseded_logo_files_are_not_shipped_or_referenced(self):
-        old_assets = ("assets/agent-captain-logo.svg", "web/agent-captain-mark.svg")
+        old_assets = ("assets/agent-captain-logo.svg", "web/agent-captain-mark.svg",
+                      "assets/brand/agentcaptain-mark.svg")
         for old in old_assets:
             self.assertFalse((ROOT / old).exists(), old)
         for relative in DOCUMENTS:
@@ -243,6 +244,17 @@ class RepositoryPresentationTests(unittest.TestCase):
         for invalid in (b"not a PNG", original[:-1], bytes(damaged), original + b"trailing"):
             with self.subTest(bytes=len(invalid)), self.assertRaises(ValueError):
                 png_dimensions(invalid)
+
+    def test_png_validator_accepts_ancillary_metadata_without_stripping_it(self):
+        original = (ROOT / MARK).read_bytes()
+        # This checks framing tolerance only, not validity of C2PA assertions.
+        kind, payload = b"caBX", b"synthetic ancillary metadata regression fixture"
+        chunk = (struct.pack(">I", len(payload)) + kind + payload
+                 + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF))
+        with_ancillary = original[:-12] + chunk + original[-12:]
+        before = bytes(with_ancillary)
+        self.assertEqual(png_dimensions(with_ancillary), png_dimensions(original))
+        self.assertEqual(with_ancillary, before)
 
     def test_jpeg_validator_rejects_wrong_format_and_incomplete_files(self):
         original = (ROOT / WORKSPACE).read_bytes()

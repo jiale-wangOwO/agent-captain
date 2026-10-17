@@ -238,13 +238,15 @@ test('AgentCaptain branding explains one lead across machines without the previo
   assert.match(css, /@media\(max-width:420px\)/);
 });
 
-test('brand mark and favicon use the same canonical generated PNG asset', () => {
+test('brand mark and favicon use the same canonical generated compass PNG asset', () => {
   const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
   const mark = fs.readFileSync(path.join(__dirname, '../assets/brand/agentcaptain-mark.png'));
-  assert.match(html, /rel="icon" href="\/agent-captain-mark\.png"/);
+  assert.match(html, /rel="icon" href="\/agent-captain-mark\.png" type="image\/png"/);
   assert.match(html, /class="brand-mark" src="\/agent-captain-mark\.png"/);
-  assert.deepEqual(mark.subarray(0, 8), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
-  assert.ok(mark.length < 2 * 1024 * 1024, 'keep the source artwork bounded');
+  assert.deepEqual([...mark.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
+  assert.ok(mark.length < 2 * 1024 * 1024, 'keep the original artwork bounded without stripping provenance');
+  assert.ok(fs.existsSync(path.join(__dirname, '../assets/brand/generation.md')));
+  assert.ok(!fs.existsSync(path.join(__dirname, '../assets/brand/agentcaptain-mark.svg')));
   assert.ok(!fs.existsSync(path.join(__dirname, '../assets/agent-captain-logo.svg')));
   assert.ok(!fs.existsSync(path.join(__dirname, '../web/agent-captain-mark.svg')));
 });

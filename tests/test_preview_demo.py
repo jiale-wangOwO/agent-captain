@@ -62,6 +62,16 @@ class PreviewDemoTests(unittest.TestCase):
             self.assertEqual(headers.get("X-Content-Type-Options"), "nosniff")
             self.assertIn("connect-src 'self'", headers.get("Content-Security-Policy"))
 
+    def test_compass_is_served_only_through_its_explicit_png_route(self):
+        with preview() as (_, base):
+            code, headers, body = request(base, "/agent-captain-mark.png")
+            self.assertEqual(code, 200)
+            self.assertEqual(headers.get("Content-Type"), "image/png")
+            self.assertEqual(headers.get("X-Content-Type-Options"), "nosniff")
+            self.assertIsNone(headers.get("Set-Cookie"))
+            canonical = Path(demo.__file__).resolve().parents[1] / "assets/brand/agentcaptain-mark.png"
+            self.assertEqual(body, canonical.read_bytes())
+
     def test_read_endpoints_use_only_fixed_fixture_identities(self):
         with preview() as (_, base):
             code, _, body = request(base, "/api/state")
@@ -98,7 +108,7 @@ class PreviewDemoTests(unittest.TestCase):
 
     def test_unknown_files_foreign_origins_and_nonlocal_hosts_are_denied(self):
         with preview() as (_, base):
-            for path in ["/.runtime/config.json", "/config.json", "/../service.py", "/assets/brand/../../config.json", "/.git/config", "/%2e%2e/config.json", "/agent-captain-mark.svg"]:
+            for path in ["/.runtime/config.json", "/config.json", "/../service.py", "/assets/brand/../../config.json", "/.git/config", "/%2e%2e/config.json", "/agent-captain-mark.svg", "/assets/brand/agentcaptain-mark.png"]:
                 self.assertEqual(request(base, path)[0], 404)
             self.assertEqual(request(base, "/api/state", headers={"Host": "untrusted.example"})[0], 403)
             self.assertEqual(request(base, "/api/agents/read", {}, headers={"Origin": "https://untrusted.example"})[0], 403)
