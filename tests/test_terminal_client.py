@@ -78,7 +78,7 @@ class TerminalClientTests(unittest.TestCase):
             (lambda: self.client.snapshot(terminal, 1), 45),
             (lambda: self.client.output(terminal, after=1), 45),
             (lambda: self.client.write(terminal, "input", {"data": "fixture"}), 45),
-            (lambda: self.client.write(terminal, "prompt", {"text": "fixture"}), 90),
+            (lambda: self.client.write(terminal, "prompt", {"text": "fixture"}), 180),
         )
         for call, checks_budget in cases:
             with self.subTest(checks_budget=checks_budget), patch.object(self.client.opener, "open") as opened:
@@ -86,7 +86,8 @@ class TerminalClientTests(unittest.TestCase):
                 call()
                 timeout = opened.call_args.kwargs["timeout"]
                 self.assertGreaterEqual(timeout, checks_budget + 5)
-                self.assertLess(timeout, 120, "The MCP request must outlast broker delivery checks")
+                mcp_budget = 225 if checks_budget == 180 else 120
+                self.assertLess(timeout, mcp_budget, "The MCP request must outlast broker delivery checks")
         for operation in ("resize", "close"):
             with self.subTest(operation=operation), patch.object(self.client.opener, "open") as opened:
                 opened.return_value.__enter__.return_value.read.return_value = b"{}"

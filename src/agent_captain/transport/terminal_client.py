@@ -22,11 +22,12 @@ from agent_captain.infrastructure.background_process import BackgroundLaunchUnkn
 from agent_captain.paths import ROOT
 BROKER_WIRE_VERSION = "0.3.0"
 # An SSH foreground check can take 45 seconds on a relayed route. Snapshots,
-# output and raw input wait for one check; prompt delivery verifies twice.
+# output and raw input wait for one check. Each of a prompt's two fresh checks
+# can first join a passive check already in progress (up to four checks total).
 # Keep the loopback request alive long enough to receive the broker's result
 # instead of abandoning a still-running check or an uncertain input action.
 FOREGROUND_RPC_TIMEOUT = 55
-PROMPT_RPC_TIMEOUT = 105
+PROMPT_RPC_TIMEOUT = 200
 
 
 def broker_script(identity=None):

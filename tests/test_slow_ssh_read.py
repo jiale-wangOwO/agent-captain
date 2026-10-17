@@ -164,15 +164,20 @@ class SlowSSHMCPBudgetTests(unittest.TestCase):
             generated = importlib.util.module_from_spec(spec)
             with patch.dict(sys.modules), patch.object(sys, "path", [str(filename.parent), *sys.path]):
                 spec.loader.exec_module(generated)
-            for name in ("read_agent", "reconnect_agent", "send_message", "send_terminal_input", "update_agent", "poll_events"):
+            for name in ("read_agent", "reconnect_agent", "send_agent_message", "send_terminal_input", "update_agent", "poll_events"):
                 with self.subTest(tool=name):
                     self.assertEqual(self.service_timeout(name, bridge=generated), self.service_timeout(name))
 
     def test_read_budget_covers_snapshot_and_three_independent_identity_reads(self):
         self.assertLess(55 + 3 * 45, self.service_timeout("read_agent"))
 
+    def test_prompt_budget_covers_in_flight_probes_and_both_fresh_identity_checks(self):
+        from agent_captain.transport.terminal_client import PROMPT_RPC_TIMEOUT
+        self.assertGreater(PROMPT_RPC_TIMEOUT, 4 * 45)
+        self.assertGreater(self.service_timeout("send_agent_message"), PROMPT_RPC_TIMEOUT)
+
     def test_deliveries_input_and_other_tools_keep_original_120_second_budget(self):
-        for name in ("send_message", "send_terminal_input", "update_agent", "get_agent", "list_active_agents",
+        for name in ("send_terminal_input", "update_agent", "get_agent", "list_active_agents",
                      "create_terminal", "read_terminal_history", "get_delivery"):
             with self.subTest(tool=name):
                 self.assertEqual(self.service_timeout(name), 120)

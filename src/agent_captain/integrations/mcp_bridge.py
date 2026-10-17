@@ -178,6 +178,11 @@ def call_service(name: str, arguments: dict[str, Any]) -> Any:
         # RPCs that wait for a fresh foreground proof on relayed routes.
         # Keep this allowance separate from delivery.
         timeout = 330
+    elif name == "send_agent_message":
+        # Each fresh prompt check may first join an in-flight passive check
+        # (up to four checks). The broker client allows 200 seconds for delivery;
+        # a queued or timed-out action still retains its original request key.
+        timeout = 225
     elif name == "read_agent":
         # A display snapshot can wait up to 55 seconds; verified output then
         # uses three independent 45-second SSH reads. Leave time for both.
