@@ -145,7 +145,6 @@ def create_server(hub, port=8766, token=None):
             assets = {"/": ("index.html", "text/html; charset=utf-8"),
                       "/ui.js": ("ui.js", "text/javascript; charset=utf-8"),
                       "/controller.js": ("controller.js", "text/javascript; charset=utf-8"),
-                      "/agent-captain-mark.svg": ("agent-captain-mark.svg", "image/svg+xml"),
                       "/terminal_history.js": ("terminal_history.js", "text/javascript; charset=utf-8"),
                       "/style.css": ("style.css", "text/css; charset=utf-8"),
                       "/prose.css": ("prose.css", "text/css; charset=utf-8")}
@@ -155,6 +154,10 @@ def create_server(hub, port=8766, token=None):
             if parsed.path in assets:
                 file, mime = assets[parsed.path]
                 self.respond(200, (ROOT / "web" / file).read_bytes(), mime, cookie=parsed.path == "/")
+            elif parsed.path == "/agent-captain-mark.png":
+                # One reviewed, canonical brand asset; never expose the asset
+                # directory or resolve a request-supplied filesystem path.
+                self.respond(200, (ROOT / "assets" / "brand" / "agentcaptain-mark.png").read_bytes(), "image/png")
             elif parsed.path in vendors:
                 file, mime = vendors[parsed.path]
                 asset = ROOT / "node_modules" / file

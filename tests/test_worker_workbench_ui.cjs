@@ -238,16 +238,15 @@ test('AgentCaptain branding explains one lead across machines without the previo
   assert.match(css, /@media\(max-width:420px\)/);
 });
 
-test('new brand mark and favicon use a local self-contained compass asset', () => {
+test('brand mark and favicon use the same canonical generated PNG asset', () => {
   const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
-  const mark = fs.readFileSync(path.join(__dirname, '../web/agent-captain-mark.svg'), 'utf8');
-  const logo = fs.readFileSync(path.join(__dirname, '../assets/agent-captain-logo.svg'), 'utf8');
-  assert.match(html, /rel="icon" href="\/agent-captain-mark\.svg"/);
-  assert.match(html, /class="brand-mark" src="\/agent-captain-mark\.svg"/);
-  assert.match(mark, /<svg[^>]*viewBox="0 0 64 64"/);
-  assert.match(logo, /AgentCaptain/);
-  assert.match(logo, /One captain for agents across your machines\./);
-  assert.doesNotMatch(mark + logo, /<script|<image|<foreignObject|href=|PRON|porn/i);
+  const mark = fs.readFileSync(path.join(__dirname, '../assets/brand/agentcaptain-mark.png'));
+  assert.match(html, /rel="icon" href="\/agent-captain-mark\.png"/);
+  assert.match(html, /class="brand-mark" src="\/agent-captain-mark\.png"/);
+  assert.deepEqual(mark.subarray(0, 8), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  assert.ok(mark.length < 2 * 1024 * 1024, 'keep the source artwork bounded');
+  assert.ok(!fs.existsSync(path.join(__dirname, '../assets/agent-captain-logo.svg')));
+  assert.ok(!fs.existsSync(path.join(__dirname, '../web/agent-captain-mark.svg')));
 });
 
 test('empty registry and empty search have different helpful, non-scanning states', async () => {

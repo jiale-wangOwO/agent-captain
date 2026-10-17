@@ -1,0 +1,45 @@
+name: Feature request
+description: Explain a workflow, the friction, and a testable outcome.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the workflow before prescribing an implementation. English and Chinese
+        are welcome. Use synthetic machine names, paths, tasks, and screenshots; do not
+        include credentials, local configuration, Session IDs, or business conversations.
+  - type: textarea
+    id: workflow
+    attributes:
+      label: What are you trying to do?
+      description: Who is using AgentCaptain, what is the goal, and what is difficult today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed experience
+      description: Describe the simplest useful user flow. Distinguish human, Captain, and worker actions where relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: How would we know it works?
+      description: Give a few observable acceptance criteria, including failure or interrupted-connection behavior when relevant.
+      placeholder: |
+        - A user can ...
+        - When a connection fails, ...
+        - Existing sessions and unsent input remain ...
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and scope
+      description: What workaround have you tried? What is explicitly outside this request?
+  - type: textarea
+    id: authority
+    attributes:
+      label: Permissions or compatibility considerations
+      description: Does this touch terminal input, authentication, remote processes, retries, new workers, or existing sessions? Describe the expected human confirmation and any limits; do not attach real configuration.

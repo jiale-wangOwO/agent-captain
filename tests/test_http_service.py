@@ -54,24 +54,26 @@ class HttpServiceTests(unittest.TestCase):
             self.request("/health", Host="evil.example")
 
     def test_brand_mark_is_an_explicit_safe_local_static_route(self):
-        with self.opener.open(self.server.origin + "/agent-captain-mark.svg", timeout=10) as response:
+        with self.opener.open(self.server.origin + "/agent-captain-mark.png", timeout=10) as response:
             self.assertEqual(response.status, 200)
-            self.assertEqual(response.headers["Content-Type"], "image/svg+xml")
+            self.assertEqual(response.headers["Content-Type"], "image/png")
             self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
             self.assertIn("default-src 'self'", response.headers["Content-Security-Policy"])
             self.assertIsNone(response.headers.get("Set-Cookie"))
-            payload = response.read().decode("utf-8")
-        self.assertIn("<svg", payload)
-        self.assertIn("AgentCaptain", payload)
-        self.assertNotRegex(payload, r"<script|<image|<foreignObject|href=|test-private-token")
-        for path in ("/assets/agent-captain-logo.svg", "/assets/pron-hub-logo.png",
+            payload = response.read()
+        from pathlib import Path
+        expected = Path(__file__).resolve().parents[1] / "assets" / "brand" / "agentcaptain-mark.png"
+        self.assertTrue(payload.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual(payload, expected.read_bytes())
+        for path in ("/assets/agent-captain-logo.svg", "/assets/pron-hub-logo.png", "/agent-captain-mark.svg",
+                     "/assets/brand/agentcaptain-mark.png", "/assets/brand/generation.md",
                      "/../assets/agent-captain-logo.svg", "/%2e%2e/assets/agent-captain-logo.svg",
-                     "/agent-captain-mark.svg/../config.json"):
+                     "/agent-captain-mark.png/../config.json"):
             with self.subTest(path=path), self.assertRaises(HTTPError) as error:
                 self.opener.open(self.server.origin + path, timeout=10)
             self.assertEqual(error.exception.code, 404)
         with self.assertRaises(HTTPError) as error:
-            self.opener.open(Request(self.server.origin + "/agent-captain-mark.svg", headers={"Host": "evil.example"}), timeout=10)
+            self.opener.open(Request(self.server.origin + "/agent-captain-mark.png", headers={"Host": "evil.example"}), timeout=10)
         self.assertEqual(error.exception.code, 403)
 
     def test_web_cookie_requires_same_origin_for_mutation(self):

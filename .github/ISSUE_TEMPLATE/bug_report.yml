@@ -1,0 +1,83 @@
+name: Bug report
+description: Report a reproducible problem with a sanitized, minimal example.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve AgentCaptain. English and Chinese are welcome.
+
+        **Keep private data private.** Do not upload local configuration, connection
+        descriptors, authentication files, tokens, passwords, private keys, real
+        hostnames/IP addresses, Session IDs, business conversations, or raw logs.
+        Use synthetic examples. Review screenshots and command output before sharing.
+        For a vulnerability, follow [SECURITY.md](https://github.com/jiale-wangOwO/agent-captain/blob/main/SECURITY.md)
+        instead of opening a normal issue. Do not restart working agents to reproduce a bug.
+  - type: checkboxes
+    id: preparation
+    attributes:
+      label: Before submitting
+      options:
+        - label: I checked existing issues for this problem.
+          required: true
+        - label: I removed private data from this report and all attachments.
+          required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the failure and its impact in a few sentences.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Use disposable local fixtures where possible. Describe the steps and whether the problem repeats.
+      placeholder: |
+        1. Start an isolated Hub with no real workers.
+        2. ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      description: What should have happened? What actually happened instead?
+    validations:
+      required: true
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Where does it fail?
+      description: Pick the closest layer; it is fine not to know yet.
+      options:
+        - Not sure
+        - Web page or local Hub service
+        - Management conversation or tool connection
+        - Local worker terminal
+        - SSH authentication or remote connection
+        - Independent SSH tunnel / forwarding provider
+        - Existing remote tmux display attachment
+        - Persisted conversation output or session association
+        - Task delivery, input protection, or result verification
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Versions and platform
+      description: Include only relevant versions, not personal paths, account details, hosts, or Session IDs.
+      placeholder: |
+        AgentCaptain version or commit:
+        Local OS and browser:
+        Python / Node.js / Codex versions (if relevant):
+        Remote OS and SSH or tunnel tool version (if relevant):
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized evidence and recovery attempts
+      description: Exact error wording, small synthetic excerpts, and steps already tried are useful. Do not paste full logs or transcripts. Note whether any existing work might still be running.

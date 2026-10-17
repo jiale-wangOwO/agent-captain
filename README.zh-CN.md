@@ -1,56 +1,51 @@
-# AgentCaptain · 队长
-
 <p align="center">
-  <img src="assets/agent-captain-logo.svg" alt="AgentCaptain" width="640">
+  <img src="assets/brand/agentcaptain-mark.png" alt="AgentCaptain 标志" width="120">
 </p>
+
+# AgentCaptain · 队长
 
 **一个主控，统筹本机与远程 Agent。**
 
 *One captain for agents across your machines.*
 
-通过一个主控对话，连接多台机器上的工作 Agent，统一派发任务、跟进进度、协调协作和审查交付。你定目标，队长带队，最终决策仍由你掌握。
+通过一个主控对话，统一派发任务、跟进进度、协调协作和审查交付。你定目标，队长带队，最终决策仍由你掌握。
 
-[English](README.md) · [Agent 工作台](docs/agent-workbench.md) · [管理会话实现与边界](docs/management-session-product.md) · [SSH 传输接口约定](docs/ssh-transport.md) · [Codex 后台维护](docs/codex-maintenance.md) · [安全说明](SECURITY.md)
+[![CI](https://github.com/jiale-wangOwO/agent-captain/actions/workflows/ci.yml/badge.svg)](https://github.com/jiale-wangOwO/agent-captain/actions/workflows/ci.yml)
+[![MIT 许可证](https://img.shields.io/badge/license-MIT-64748b)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776ab)](docs/guides/operator-guide.zh-CN.md#环境要求)
+[![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-43853d)](docs/guides/operator-guide.zh-CN.md#环境要求)
 
-AgentCaptain 是单用户、本地优先的多机器 Agent 管理工作台。**0.7 版本让已连接的工作会话自动可管理**，在卡片和详情页直接命名，不需要激活开关或逐会话授权。工作台集中管理各机器上已登记的工作终端，继续支持搜索、筛选、置顶和安全重连。0.5 引入的管理会话 MVP 可从工作台创建一条真实的本机 Codex 对话，准备管理角色、工具和独立认证身份。管理会话仍属实验性，单元测试不等于实际 Codex 版本、供应商或桌面交接已获得认证。
+[English](README.md) · [快速开始](#快速开始) · [文档导航](docs/index.md) · [参与贡献](CONTRIBUTING.md) · [安全说明](SECURITY.md)
 
-**Captain（队长）就是这条原生 Codex 对话里的模型**，担当领域专家型管理者：不懂的细节向负责该项目的工作 agent 澄清，拆解和派发目标、跟进纠偏、审阅证据、汇总待决事项。实际工程工作由 worker 做，主控不默认绕过它们自己 SSH 改代码。用户保留最终决策权。AgentCaptain 不另建模型服务，不改变工作 agent 的角色，也不会自动唤醒空闲对话。每个工作 agent 仍使用真实终端，你可以像平常一样启动 Codex、直接参与对话。
+![AgentCaptain 工作台，使用虚构演示数据](docs/images/workspace-demo.jpg)
 
-## 带来的好处
+*截图中的机器、会话和工作动态均为演示数据，不是实际运行记录，也不代表真实项目已完成验证。*
 
-- **少切窗口，一个对话掌握进展。** 本机和远程机器上的工作统一汇总，重点关注成果、阻塞和待决事项。
-- **把管理工作交给队长。** 你交代目标，主控在授权范围内负责派发、跟进、协调和审查，不必亲自逐个追问。
-- **减少漏事和不确定的重复任务。** 读取真实会话记录，区分自报完成与证据验收；送达不明确时先核对，不盲目重发。
-- **随时直接参与。** 每个 worker 保留真实终端，需要时可以绕过汇总，直接和它对话。
-- **决定权始终在你。** 优先级和边界由你确定，登录、信任、审批与重要取舍仍交给你处理。
+[本机复现离线演示 →](docs/guides/visual-demo.md)
 
-## 能做什么
+## 少切窗口，把精力放回目标
 
-- 在 UI 配置本机或 SSH 机器，打开项目目录下的工作终端。
-- 创建并恢复一条默认管理会话，使用本次原生启动的准确 Session ID，不按最新文件猜测。
-- 准备专用管理工作区、持久角色指导和独立认证的 MCP 连接，管理会话不需要手动安装插件。
-- 人与主控共用同一个终端，直接对话和管理操作可以并存。
-- 已登记、未关闭的共享工作终端自动可管理，包括显示临时断开的原终端；Hub 创建的管理者新建工作时，需要明确设置机器与项目目录。启动时不扫描所有机器或历史。
-- 读取准确关联的 Codex 会话输出，长消息分页，工具调用与输出可选。
-- 记录幂等送达状态，保护人的输入草稿，不盲目重发不确定消息。
-- 让终端生命周期独立于网页和 Python UI 服务。
-- 沿用标准 SSH 别名，可由外部工具把 tunnel 转成 SSH。
+工作 Agent 分散在不同机器和项目里，逐个打开终端追问，很快就会成为另一份工作。AgentCaptain 为它们增加统一的管理层，同时保留你熟悉的真实终端。
 
-项目以 **Codex 工作流**为中心，不是适配任意 CLI 的通用自动化系统，也不是多用户控制平面或托管云服务。它不会无缝接管其他位置已经运行的任意终端。
-
-## 环境要求
-
-| 位置 | 要求 |
+| 你想要…… | AgentCaptain 帮你…… |
 |---|---|
-| 主控电脑 | Python 3.11+、Node.js 22+、npm、现代浏览器 |
-| 本机工作 agent | 已安装 Codex CLI，并完成自己的登录和供应商配置 |
-| 远程工作 agent | Linux、OpenSSH、Python 3、tmux，以及该用户的 Codex |
-| Hub 创建的管理者 | 已配置的本机 Codex CLI，支持 `exec --json`、精确 Session `resume` 和 stdio MCP |
-| 可选的旧对话插件 | 支持插件和 stdio MCP 的本地 Codex 客户端 |
+| 了解多台机器的进展 | 在一个主控对话里汇总相关工作、阻塞和待决事项。 |
+| 把目标落到协作执行 | 派发给负责的 worker，补充约束、跟进纠偏并审阅交付证据。 |
+| 深入某个项目 | 直接打开原共享终端，像平常一样与工作 Agent 对话。 |
 
-Python 服务仅用标准库。通过 npm 安装终端依赖，浏览器资源由本机提供，不依赖 CDN。若 `node-pty` 无可用预编译包，可能需要原生编译工具链。
+**Captain 就是本机原生 Codex 管理对话里的模型**，启动时准备好角色、工具和独立身份。实际工程工作由 worker 完成；主控不懂某个领域时先问负责的 worker，做好协调、跟进和汇总。**人类用户保留最终决定权。** 不需要额外运行一个托管模型服务。
+
+## 一个清楚的工作台
+
+- **本机 + SSH。** 在 UI 配置机器、选择项目目录、打开终端；外部 tunnel 工具也可以提供标准 SSH 接口。
+- **连接即纳入管理。** 已登记、未关闭的共享工作会话自动加入工作列表，支持命名、搜索、筛选和置顶，无需再逐个激活。
+- **读真实会话，不猜屏幕。** 准确关联 Codex Session，分页读取长回复；终端画面里的报告尾部不会被当成完整报告。
+- **人的输入优先。** 人与主控共用真实终端，保护未发送草稿；送达结果不明确时保留原操作身份核对，不盲目重发。
+- **恢复边界明确。** 重连只接回原持久终端，不静默新建替代终端、恢复模型或重放任务。
 
 ## 快速开始
+
+主控电脑需要 **Python 3.11+**、**Node.js 22+**、npm，以及配置好的本机 **Codex CLI**。远程工作机还需 Linux、OpenSSH、Python 3、tmux 和该用户的 Codex。见[完整环境要求](docs/guides/operator-guide.zh-CN.md#环境要求)。
 
 ```sh
 git clone https://github.com/jiale-wangOwO/agent-captain.git agent-captain
@@ -59,201 +54,44 @@ npm ci
 python app.py serve
 ```
 
-打开 [http://127.0.0.1:8766/](http://127.0.0.1:8766/)。仓库为 private，克隆需要 GitHub 访问权限。
+打开 **[localhost:8766](http://127.0.0.1:8766/)**。仓库目前仍为 **private**，克隆需要访问权限。全新配置只有本机，不会自行发现或连接你的服务器。
 
-Windows 可双击 `run_agentcaptain.cmd`：在当前用户后台启动服务并打开 UI。也可显式运行：
+Windows 可双击 `run_agentcaptain.cmd`，在当前用户后台启动服务并打开工作台；也可显式运行 `python service.py start`、`python service.py status`。不会安装管理员服务或开机自启。
 
-```sh
-python service.py start
-python service.py status
-```
+1. **接入工作。** 按需添加 SSH 别名，选择项目目录、打开终端，自行运行 `codex`、`codex-switch` 或常用启动器。
+2. **启动队长。** 点击 **「启动管理会话」**，Hub 为原生本机 Codex 对话准备角色、身份和工具。这条路径无需手动安装插件；登录、信任与权限提示仍由你确认。
+3. **交代目标。** 已连接工作会话自动加入。默认不允许主控新建工作；需要时，在设置中明确选择允许新建的机器和项目目录。
 
-Windows 后台启动器通过隐藏的、当前用户身份的 WMI 进程工厂启动服务，避免网页后台和终端服务随临时启动工具一起退出。一次性私有启动计划、真实进程身份回执和退出日志保存在 `.runtime/background-launches/`。启动结果未知时明确报告，不自动重试，也不退回依赖工具宿主生命周期的启动方式。这不代表服务可以跨 Windows 关机、休眠或网络中断保持连接。诊断和恢复边界见[后台服务生命周期](docs/background-service.md)。
+先试一次只读汇总：
 
-不会安装管理员服务或开机自启。**全新配置只有本机**；远程机器由你在 UI 中添加，例如 SSH 别名 `dev-workstation`，凭据仍由已有 SSH 配置管理。
+> 看一下已连接 worker 的最新真实会话输出，汇总进度、证据、阻塞和需要我决定的事。先不要发新任务。
 
-## 启动管理会话
+再派发一个明确目标：
 
-1. 按下一节配置和连接工作 agent。已登记、未关闭的共享工作终端自动可管理，临时显示断线不会丢失原工作对象；不自动发现历史，也允许先创建管理者、随后连接工作会话。
-2. 点击首页 **「启动管理会话」**。使用默认名称或自己命名，不需要勾选工作对象。默认不允许主控新建工作；需要时，在可选设置中浏览已连接机器，选择具体项目目录。这里仅限制新建位置，不限制管理已有会话。
-3. Hub 准备自己的管理工作区与 MCP 连接，执行一次**只读**的原生 Codex 初始化。从自己启动的原生 JSON 事件获得准确 Session ID，仅让模型调用 `get_controller_context` 核验管理身份与范围；首轮不读 worker 历史、不发送业务任务、不创建工作 agent。
-4. 在真实管理终端中交流。**「可对话」**需要准确身份、已认证工具握手和可用终端；PID、欢迎文字或 PTY 连通不够。登录、信任和权限确认仍由你完成，不改写既有模型供应商或认证配置。
-5. 此后使用 **「继续管理」**恢复原会话，通过 **「管理设置」**调整可选的新建工作目录。已有和之后连接的工作会话自动加入。重复点击、刷新或网络结果不确定时，保留原操作与原身份，不强行创建第二个主控。
+> 让负责 API 的 worker 调查这个回归失败，修复并给出测试命令、结果和剩余风险。证据不够时，继续向它追问。
 
-这条流程**不需要手动安装下方旧版插件**，管理会话已经配置了独立认证身份的工具。启动前先确认本机 Codex 和日常账号/供应商配置可用。初始化失败或结果未知时，查看明确的阶段、错误与原身份；Hub 不为隐藏问题删除锁、fork 会话或重启共享 Codex 后台。
+[完整安装与操作指南 →](docs/guides/operator-guide.zh-CN.md)
 
-新建管理工作区位于源码仓库外：Windows 使用 `%LOCALAPPDATA%/AgentCaptain/management-workspaces/<controller-id>`；Linux/macOS 使用 `$XDG_STATE_HOME/agent-captain/management-workspaces/<controller-id>`，缺省为 `~/.local/state/...`。已登记的工作区保留准确的原路径，不因品牌更新而搬迁。这样进入队长会话时不必连带信任整个源码仓库。Codex 仍可能要求你确认这个新目录的信任，AgentCaptain 不代替你批准。
+## 使用前要知道
 
-首次初始化沿用你的模型与 reasoning 设置，可能需要数分钟；页面会持续显示原启动阶段，不因耗时而换模型或重复新建。初始化最长等待 10 分钟，超时后保留已取得的准确身份，先核查/恢复原会话。
+AgentCaptain 是**单用户、本地优先、面向 Codex** 的工具。服务保持在 loopback，不是多租户云控制平面，也不是适配任意 CLI 的自动化框架。管理会话初始化和桌面交接仍属**实验性**，不代表所有 Codex 版本、供应商和客户端组合都已通过实测。
 
-恢复会保留初次核验过的 Codex 程序入口，不因换了启动后台的 PowerShell/PATH 而悄悄改用另一个旧 CLI。原安装入口被移除时，显示环境错误并停止恢复，不擅自降级或改变供应商设置。
+Hub 不会自动唤醒空闲模型、代替人工审批，也不保证跨休眠、关机和断网保持连接；不能无缝接管其他位置已运行的任意终端。**已提交**或 worker **自报完成**，都不等于已验证完成。
 
-未来在 Windows 启动管理子进程时，已有代理环境变量始终优先；完全未设置时，可以继承用户已明确启用、不带凭据的静态 loopback HTTP(S) 代理。PAC、自动检测和非本机代理不作猜测。不更改系统网络、供应商、认证、TLS 或已有工作进程，Hub/MCP/终端服务的 localhost 通信仍不走代理。这是启动环境兼容性增强，不保证模型服务不会发生重试或超时。
+Hub 创建的队长有独立工具身份，**新建工作终端**受明确的机器与项目目录限制。[已有对话插件接入](docs/guides/operator-guide.zh-CN.md#可选用旧版插件接入已有-codex-对话)使用独立的共享服务凭据兼容通道，**不执行**上述独立管理身份的新建目录限制。两者都不是操作系统沙箱；启用前请阅读[安全模型](SECURITY.md)。
 
-请通过 Hub 的入口恢复这条受管对话，不要在管理终端里用 `/new` 或 `/resume` 手动更换原生会话。本版不会自动跟踪这种对话切换；Session 字段是已核验的受管身份，不代表能追踪任意手动替换。
+## 按需深入
 
-可以对管理者说：
-
-> 查看已连接的 PPT 和服务器 agent，汇总实际进展、证据和需要我决定的事项。先不要下发任务。
-
-> 把这个修复任务传达给已连接的服务器 agent，之后汇总结果和验证情况。
-
-### 交代目标，不必逐条批准管理消息
-
-用户交代一个目标，就授权主控在该目标范围内调查、向负责的 worker 询问、拆解派发、补充约束、跟进纠偏和收集验收证据，不必每次普通管理对话再问“可以发吗”。“只看看”“不要发任务”等限制仍优先；扩大目标、新权限、无关的破坏性或外部操作仍交给用户决定。登录、秘密、信任与 worker 审批由用户处理；Hub 创建的管理者新建工作终端时，仍需要已设置的机器和项目目录。
-
-主控先看相关 worker 的最新真实会话输出与已有送达状态，不全盘扫描，也不重复派发正在做的工作。缺少领域背景时问该 worker 的权威依据、当前 revision、失败和下一步，再用普通用户文本给出目标与验收条件，不注入隐藏管理协议或改变 worker 角色。仓库调查、适配实现、测试、PR 状态核验由 worker 执行；主控审阅其结果，追问缺失证据或安排返工。只有用户明确让修复 Hub/连接工具时，当前执行者才切换成该平台的工程角色，不作为管理业务项目的默认替代路径。
-
-汇报区分 **已提交、进行中、结果待验收、已验证、阻塞**。输入写入或 worker 自报完成，不等于已验证完成：需要对应规范/版本、测试命令与结果、交付物和未完成项。指定“最新规范为权威”时，由 worker 核对当前上游 revision，不能默认某修复已合入。完整闭环与边界见 [管理会话产品约定](docs/management-session-product.md)。这里的跟进不代表 Hub 已自动唤醒模型或安排无人值守调度。
-
-### 在 Codex 桌面端继续（实验性）
-
-**「在 Codex 中继续」**要求你明确确认管理者空闲、没有未发送草稿。Hub 核对自己拥有的终端、释放这个输入入口，并提供 `codex://threads/<exact-session-id>` 链接打开同一条已保存对话，不新建同名对话，也不自动输入 `/app` 或其他命令。
-
-状态为 **`desktop_unverified`（桌面接管未核验）**，不是已经证明的无缝交接。打开链接不能证明桌面端取得会话，或重新加载了工具、项目信任、模型和供应商设置；需在桌面端核对。桌面入口使用期间，Hub 不继续写入。返回 Hub 前先关闭另一入口，再点击 **「继续管理」**，按准确原 Session 尝试恢复，不重新初始化或重发业务任务；占用或配置冲突会明确报出。
-
-## 连接工作 agent
-
-日常使用不需要先逐台机器找终端。**工作台默认跨机器展示未关闭的共享工作会话**，临时显示断线的原终端仍保留，已关闭记录默认收起；历史条目在「全部登记」找回。可按机器、状态、名称或项目路径筛选，把常用工作置顶。卡片和详情页直接提供 **「命名 / 重命名」**，保存的是与 Codex 工具一致的显示别名，不修改原生 Codex 标题、Session、terminal ID 或进程；命名草稿在轮询和目标切换时保留。新终端名称可选，留空使用「机器 · 项目目录末级名称」，卡片始终展示机器、路径和 ID 便于区分。卡片上可直接打开共享终端、读取真实会话输出或重新连接；筛选、置顶、改名和切换显示不会启动模型或发送业务输入。
-
-「重新连接」只重附着原来的远程持久终端，绝不自动新建 shell、执行 `codex resume` 或重发任务。原终端已经结束、本机进程不能恢复或 SSH 路由不可用时，会显示下一步；需要新工作时明确点击「新终端」。外部 tunnel 的恢复仍由提供 SSH 的工具处理，Hub 不替你重启模型或共享隧道服务。详细交互和 MCP 契约见 [Agent 工作台](docs/agent-workbench.md)。
-
-1. 选择或配置机器，点击「新终端」。可以浏览目录、输入该机器上的绝对路径，或留空进入用户主目录后自行 `cd`。
-2. 在真实终端中运行 `codex`、`codex-switch` 或自己的启动器。供应商选择、登录、密钥、OTP、审批均由用户处理。
-3. 继续旧对话时，按需查找历史并自行执行显示的 `codex resume <session-id>`。先退出原客户端；开一个新终端不等于转移原会话的控制权。
-4. 连接好后自动可管理，可在卡片或详情页命名，也可保留默认名称。不需要额外激活或逐管理者勾选；能否实际送达任务仍由前台是否就绪、用户草稿、登录与审批状态决定。
-
-管理者和工作 agent 使用分离的记录与终端服务，管理者不会登记成自己的 worker。服务端工具拒绝管理者到管理者的操作和递归创建管理者。这限制 AgentCaptain 的接口，不提供操作系统级沙箱隔离。
-
-## 可选：用旧版插件接入已有 Codex 对话
-
-这是已有主控对话的兼容方式，不是 Hub 创建管理会话的必备步骤。两种方式都能管理相同的已登记、未关闭共享工作终端，不再使用全局激活名单或逐管理者工作对象勾选。Hub 创建的管理者仍保留独立认证身份、生命周期、送达记录和明确的新建目录设置。`get_controller_context` 仅供独立管理身份使用，旧版凭据不可调用。已有对话插件使用共享服务凭据，保留兼容的新建通道，不执行独立管理身份的新建目录限制；需要明确目录限制时，优先使用 Hub 创建的管理会话。该兼容通道不代表授权无关任务或绕过人工审批，详见[安全边界](SECURITY.md#legacy-existing-chat-integration)。
-
-先在仓库根目录生成**本机配置后的**插件市场：
-
-```sh
-python scripts/configure_plugin.py
-```
-
-脚本会打印 `marketplace_root` 和安装命令。注册打印出来的根目录，不是源码仓库：
-
-```sh
-codex plugin marketplace add "<printed marketplace_root>"
-codex plugin add agent-captain@agent-captain-local
-```
-
-生成器只创建文件：不安装插件、不修改 Codex settings、不读取服务 token、不重启服务。MCP 启动命令使用运行生成器的 Python，以及生成目录中 bridge 的绝对路径。
-
-**安装后必须保留生成目录**，默认在 `.runtime/plugin-marketplace/`。更新、移动仓库或更换 Python 时，选择新目录生成并重新注册安装：
-
-```sh
-python scripts/configure_plugin.py --output .runtime/plugin-marketplace-v2
-```
-
-已有输出不会被覆盖。仓库的 `agent-captain-source` 市场是未配置的 **skill-only** 模板，直接安装不能完整连接服务；不要用它代替生成的 `agent-captain-local`。这是本地集成，不是官方公共插件目录上架，也不向云端客户端暴露服务。
-
-若已有对话没有新工具，在新对话中选择插件；只有必要时才重载 Codex 应用。安装不会替换已经运行的对话工具上下文。命令用法参见 [官方 CLI 说明](https://learn.chatgpt.com/docs/cli/reference)。
-
-## 会话输出不是终端截图
-
-终端画面用来核对前台程序，**看得到报告尾部不代表读到了完整报告**。「会话输出」面板独立读取准确关联的 Codex rollout。
-
-关联依据限定在所选终端的进程树、打开的日志或显式 resume ID；不按目录里的“最新会话”猜测。如果无法确认，可以在同一工作终端中自行运行 `/status`，把 Session ID 填入「关联会话」。建立关联不向工作 agent 输入内容。
-
-通过 MCP 读取时：
-
-- 跟随 `next_cursor` 读取旧记录或长消息剩余分片；`after_cursor` 读取新追加输出。
-- 检查 `content_complete`、`history_complete`、`has_more`、`read_issues`；部分分页不是全部历史。
-- 完整工具调用与输出需要 `include_tools`；默认最近信号只是有限摘要。
-- `live_session_verified=false` 仅表示明确选择或上次核验的关联，不证明它仍是 TUI 中当前会话。`/new`、`/resume` 后缺少直接证据时需要重新关联。
-- 已断连或关闭终端的记录是历史证据，不证明 agent 在线或任务完成。
-
-长正文分片而非静默截断。未写完或损坏的记录会明确标记；不会暴露隐藏 analysis/reasoning。
-
-## 输入保护与生命周期
-
-**终端支持安全滚动翻页。** 工作/管理终端可用滚轮、PageUp / PageDown 和「上一页 / 下一页 / 回到最新」，阅读历史时新输出不会把你拉回底部。SSH/tmux 的全屏外层没有网页本地历史时，「终端历史」只读展示原 pane 实际保留的文本快照；完整 Codex 回复仍从准确关联的「会话输出」读取。所有滚动和翻页均不发送远端按键、方向键或任务。详见 [终端阅读说明](docs/agent-workbench.md)。
-
-**0.6.1 新增本机显示服务恢复入口。** 网页在线但工作终端连不上时，先看工作台的显示服务状态；服务确实已退出时点击「恢复显示服务」并确认，再接回所选原终端。也可在项目目录运行 `python terminal_service.py status` 或 `python terminal_service.py recover --confirm`。不会删除原绑定、重启远端 Codex、批量恢复其他会话或重发任务；旧进程仍在、端口状态不明或所有权变化时拒绝替换。详细边界见 [安全恢复说明](docs/agent-workbench.md)。
-
-普通任务经 bracketed paste 和 Enter 发到同一个前台 Codex，不当作 shell 命令；shell、登录、审批和可识别的启动菜单会阻止任务输入。原始按键只用于用户明确授权的终端操作。
-
-人的草稿优先：`human_busy` 不允许主控覆盖。`submitted` 只证明字节写入，**不证明任务已被接受或完成**。保留原 `request_key`，用 `get_delivery` 核对不确定送达，不用新键盲重发。
-
-UI 支持复制粘贴、本地回滚、目录选择、刷新画面和明确确认的关闭。鼠标滚轮不会转成 agent 输入。粘贴不额外按 Enter，但剪贴板文本本身的换行仍可能由程序处理。
-
-关闭网页、切换终端或关闭 Python Hub，不停止独立终端 broker。broker 或主控电脑停止时，本机 PTY 会结束；远程 Hub 自有 tmux 可在 SSH 显示断线后重新连接。重新连接不自动 resume Codex、不重发任务。
-
-**「关闭终端」不同**：确认后结束该终端的 shell/agent，远程也结束对应自有 tmux。不关闭其他或外部会话；结果不确定时不会显示成成功。
-
-管理终端与工作终端分离。**「收起显示」**或关闭网页不发送草稿、不结束进程。**「结束管理会话」**经明确确认后结束管理终端进程并停用其工具凭据，不停止 worker；已保存的原生身份和历史保留，继续时明确恢复原会话。
-
-## MCP 工具
-
-| 工具 | 用途 |
+| 想了解什么 | 阅读入口 |
 |---|---|
-| `get_controller_context` | 核验独立认证管理身份与新建设置，仅供管理者 |
-| `list_active_agents` | 兼容工具名：列出所有已登记、未关闭共享工作终端，包括临时断线的原终端，不再按激活过滤 |
-| `update_agent` | 保存显示别名或置顶顺序，不修改原 Codex 或发送终端输入 |
-| `reconnect_agent` | 安全接回准确的原登记终端，不新建、不 resume、不重发任务 |
-| `get_agent` | 核对指定终端的连接与前台状态 |
-| `read_agent` | 分页读取该终端的准确会话输出 |
-| `send_agent_message` | 传达普通用户任务 |
-| `send_terminal_input` | 发送明确授权的原始终端输入 |
-| `create_agent` | 创建工作终端；Hub 创建的管理者受其明确设置的已连接机器与项目目录限制，结果自动加入工作列表 |
-| `get_delivery` | 核对持久化送达状态 |
-| `poll_events` | 增量读取已登记工作 agent 事件 |
+| 安装、日常操作、已有 Codex 对话接入 | [操作指南](docs/guides/operator-guide.zh-CN.md) |
+| 会话命名、真实终端、历史与重连 | [Agent 工作台](docs/agent-workbench.md) |
+| 管理、派发、验收、权限和生命周期 | [管理会话产品约定](docs/management-session-product.md) |
+| 服务掉线、SSH 路由、Codex 后台包 | [恢复与维护导航](docs/index.md#recover-and-maintain) |
+| 测试、提交安全检查、贡献流程 | [贡献说明](CONTRIBUTING.md) |
 
-读取、写入、送达查询和事件都认证调用者，并只作用于已登记、未关闭的共享工作终端，不操作任意外部会话或管理终端。工作对象自动加入，但连接与前台就绪检查、用户草稿优先、已关闭对象拒绝及独立生命周期检查仍保留。已有排队写入保留原操作身份；旧未知结果或已撤销操作不会因升级而重放。通过 Hub 创建的管理者新建终端时，必须位于该身份明确设置的机器与项目目录中；已有对话插件保留上面说明的独立兼容通道。服务不自动审批、不递归创建管理者，也不自动开启主控的新一轮推理。
+## 参与贡献
 
-## SSH 和 tunnel
+欢迎有仓库访问权限的协作者提交可复现的问题、测试和小范围 PR。请使用虚构测试数据，不要附上真实 token、连接文件、会话日志或个人配置。见 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [SECURITY.md](SECURITY.md)。
 
-远程接口始终是 OpenSSH。TunnelTerm 等外部工具可以提供 loopback SSH 端口或 `ProxyCommand`；Hub 不导入它的代码，也不管理它的登录和窗口生命周期。
-
-接入需要验证**常驻显示连接与短 SSH 查询可以并发**，不能只测一次 banner 或 `ssh host true`。保留主机密钥校验。详见 [SSH 传输接口约定](docs/ssh-transport.md)。
-
-## 本地数据与兼容
-
-服务仅绑定 loopback。浏览器修改要求匹配 Host/Origin 和 HttpOnly SameSite cookie。MCP 用私有本地连接文件认证，拒绝浏览器 Origin，不通过代理或重定向转出 token。
-
-机器、登记工作对象与别名、送达记录、管理身份、新建目录和操作键保存在 `.runtime/hub.sqlite`。旧激活与范围元数据为兼容保留，但不再限制普通登记工作对象的管理。工具连接文件位于私有运行目录，生产管理工作区使用上面说明的用户私有目录；显式指定开发/测试 runtime 时，工作区也保持在该命名空间。每位管理者使用独立凭据，原始 token 不进入提示词、URL 或命令行参数。`config.example.json` 与可选、被 Git 忽略的 `config.local.json` 用于初始化；已有保存配置优先。
-
-网页后台与 MCP 共用 `.runtime/service.json`，显式连接文件覆盖仍保留。私有 `.runtime/worker-terminal-reference.json` 只记录已有工作终端服务描述文件的物理路径，不复制 token；默认终端创建流程核验成功后独占登记，只读状态查询不生成它。这避免 Windows 打包应用与普通 PowerShell 的本地状态命名空间差异造成假断线。已绑定服务不可达、引用损坏或丢失时，明确阻止新建第二个终端服务，需人工核查修复；后台网页服务重启不会终止已有工作终端。
-
-已运行的旧桥接若仍读取旧位置，可以在私有 `.runtime/service-compatibility-references.json` 明确登记已有标准 Hub 描述文件。服务重启仅同步同一端点、结构合法的 Hub 文件，让原客户端继续使用轮换后的服务凭据；不自动发现目标、不复制账号认证，也不改动其他端口或非 Hub 文件。新安装使用统一描述文件。
-
-每个管理工作区拥有自己的 `AGENTS.md` 和 `.codex/config.toml`。Hub 启动/恢复时还明确提供该身份的工具连接，不修改用户全局配置。桌面客户端是否加载相同项目配置与信任，属于实验性交接的核验事项，不作默认保证。Hub 的接口认证和新建目录限制不约束 Codex 其他原生工具、其他插件或用户的 SSH/系统权限。
-
-品牌更新不会替换正在运行的 worker、改写终端或原生 Session ID，也不会重发任务。旧安装保留既有记录和兼容标识；变更部署前请读[改名与兼容说明](docs/rebranding.md)。
-
-UI 按键不写入送达数据库，但终端输出仍可能包含你主动打印的秘密。主控提交的任务和送达记录也是本机私有数据，不应提交 `.runtime/`、连接文件、认证文件或个人配置。项目不构成多租户安全边界，不要暴露到公网。
-
-## Codex 后台维护
-
-CLI 更新不保证独立托管共享后台同步更新。可选 Linux 助手默认只读：
-
-```sh
-python3 scripts/codex_sync_daemon.py --check
-python3 scripts/codex_sync_daemon.py --sync --timeout 60
-```
-
-在**工作机器本身**运行，使用当前用户原本信任的 CLI。任何已加载会话，包括空闲会话，都阻止同步。同步目标是当前 CLI，不另行选择最新版本。使用 `--sync` 前先读 [维护说明与验证边界](docs/codex-maintenance.md)。
-
-## 开发与测试
-
-```sh
-python -m unittest discover -s tests -v
-node --check web/ui.js
-node --check web/controller.js
-npm run test:terminal
-npm run test:ui
-python scripts/check_publication.py
-```
-
-真实 PTY/远程联调为 opt-in，普通单元测试不启用。只用可丢弃会话执行联调。测试覆盖登记对象自动可管理、别名持久化、明确的新建目录、原生初始化事件、稳定启动/恢复键、未知结果、管理者独立生命周期、桌面接管未核验 UI，以及精确会话读取、幂等送达、草稿保护、终端渲染和认证。它们不证明所有 Codex 版本、供应商、tunnel 或桌面工具重载已通过实测。0.5 管理会话 MVP 在版本相关实机验证完成前仍属实验性。
-
-开发见 [CONTRIBUTING.md](CONTRIBUTING.md)，安全问题见 [SECURITY.md](SECURITY.md)。
-
-## 许可证
-
-项目使用 MIT 许可证，见 [LICENSE](LICENSE) 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。OpenAI、Codex 及第三方服务名称属于各自所有者；AgentCaptain 是独立项目。
+项目采用 MIT 许可证，见 [LICENSE](LICENSE) 和[第三方说明](THIRD_PARTY_NOTICES.md)。AgentCaptain 是独立项目；OpenAI、Codex 及其他第三方名称属于各自所有者。

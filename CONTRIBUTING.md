@@ -5,6 +5,21 @@ Keep contributions small, reproducible, and explicit about authority and failure
 states. This project is licensed under MIT; contribute only code and assets you
 have permission to share.
 
+## Start with a small, clear change
+
+- Use the [bug report](https://github.com/jiale-wangOwO/agent-captain/issues/new?template=bug_report.yml)
+  for a reproducible problem, or the [feature request](https://github.com/jiale-wangOwO/agent-captain/issues/new?template=feature_request.yml)
+  to describe a workflow and how success should be checked. English and Chinese
+  reports are welcome.
+- Check existing issues first. For a substantial change, discuss the problem and
+  boundaries before investing in a large implementation.
+- Report vulnerabilities through the process in [SECURITY.md](SECURITY.md), not
+  an ordinary issue. Do not attach real runtime state or business conversations.
+
+For a quick map of the source and its boundaries, see
+[repository layout](docs/repository-layout.md). Keep discussion constructive,
+specific, and respectful; critique the change, not the person.
+
 ## Development checks
 
 The Python application and tests use the standard library. Install Node.js 22
@@ -12,7 +27,6 @@ and Python 3.11 or newer, then run from the repository root:
 
 ```sh
 npm ci
-python scripts/check_publication.py
 python -m unittest discover -s tests -v
 npm run test:terminal
 npm run test:ui
@@ -30,6 +44,11 @@ normal Node suites. The opt-in Python live tests must only be used with informed
 consent and disposable terminals. Never point a diagnostic at somebody else's
 active work or publish its runtime files.
 
+Leave `CEO_HUB_LIVE_TESTS`, `CEO_HUB_REMOTE_TESTS`, and
+`RUN_WINDOWS_BACKGROUND_LIVE` unset or set to `0` for ordinary development. Do not
+connect a real machine, start a model, or restart a user's service just to validate
+a UI or documentation change.
+
 ## Before a commit
 
 1. Add regression tests for the relevant state transitions. A successful SSH
@@ -39,11 +58,30 @@ active work or publish its runtime files.
    synthetic fixtures such as `example-ssh-host` and `/home/example/project`.
 3. Inspect the diff. Stage only intended source files, then run
    `python scripts/check_publication.py --tracked` to inspect the actual Git index.
+   This includes newly staged files and excludes private, unstaged deployment
+   material. Do not substitute the default whole-checkout candidate scan in an
+   installation that also contains local notes or project handoffs.
    Review test fixture paths manually: the checker's generic personal-path
    heuristic excludes `tests/`, but its key, host/session, and private-file rules
    still apply. Do not copy real deployment data into synthetic fixtures.
 4. Document compatibility limits and any opt-in or migration step. Do not claim
    a repair is deployed or a remote session is restored without checking it.
+
+The publication check is heuristic: it does not review Git history, binary asset
+metadata, Actions logs, or screenshots. Review those separately before sharing.
+Never stage a private file merely to make it part of a check.
+
+## Opening a pull request
+
+Explain the user-visible problem, the change, and the checks actually run. Keep
+unrelated cleanup separate. Use the pull request checklist to call out security,
+compatibility, or manual validation limits, including checks you could not run.
+An issue, screenshot, or passing unit test is not evidence of a live deployment.
+
+For documentation-only changes, check links, examples, and rendering; mark
+unrelated suites as not run with a reason. For behavior changes, add a regression
+test and run the relevant suites. Maintainers may ask for a smaller reproduction
+or more evidence; no review turnaround time is promised.
 
 ## Reliability and safety requirements
 
