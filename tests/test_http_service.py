@@ -7,7 +7,7 @@ from urllib.request import Request, build_opener, ProxyHandler
 from unittest.mock import Mock
 
 from agent_captain.server.app import create_server
-from agent_captain.core.terminal_hub import Hub
+from agent_captain.core.terminal_hub import Hub, HistoryReadError
 
 
 class HttpServiceTests(unittest.TestCase):
@@ -41,6 +41,27 @@ class HttpServiceTests(unittest.TestCase):
         self.assertEqual(result["agents"][0]["agent_id"], "local::active")
         self.assertFalse(hasattr(self.hub, "servers"))
         self.assertFalse(hasattr(self.hub, "live_servers"))
+
+    def test_busy_read_is_explicit_conflict_for_ui_and_plugin_not_worker_offline(self):
+        self.hub.read_agent = Mock(side_effect=HistoryReadError("ssh_read_in_progress"))
+        self.hub.plugin_call = Mock(side_effect=HistoryReadError("ssh_read_in_progress"))
+        cases = (
+            ("/api/agents/read", {"host": "fixture", "thread_id": "original", "cursor": "original-page"},
+             {"Cookie": "ceo_session=test-private-token", "Origin": self.server.origin}),
+            ("/api/plugin", {"tool": "read_agent", "arguments": {"agent_id": "fixture::original", "cursor": "original-page"}},
+             {"Authorization": "Bearer test-private-token"}),
+        )
+        for path, body, headers in cases:
+            with self.subTest(path=path), self.assertRaises(HTTPError) as caught:
+                self.request(path, body, **headers)
+            self.assertEqual(caught.exception.code, 409)
+            result = json.load(caught.exception)
+            self.assertEqual(result["code"], "ssh_read_in_progress")
+            self.assertIn("原游标", result["error"])
+            self.assertNotIn("original-page", result["error"])
+            self.assertNotIn("messages", result)
+            self.assertNotIn("output_binding", result)
+        self.assertEqual(self.hub.store.outbox(), [])
 
     def test_browser_origin_cannot_use_bearer_channel(self):
         with self.assertRaises(HTTPError) as error:

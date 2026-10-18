@@ -1051,15 +1051,18 @@ async function readConversationOutput(append = false) {
   const key = agentKey(agent);
   if (!outputView || outputView.key !== key || outputView.terminalId !== agent.terminal_id) outputView = {key, terminalId: agent.terminal_id, open: true, busy: false, messageKeys: new Set(), signalKeys: new Set(), messageCount: 0, signalCount: 0};
   const view = outputView; if (view.busy || append && !view.nextCursor) return;
-  if (!append) {
-    view.result = null; view.nextCursor = null; view.sessionId = null; view.messageKeys.clear(); view.signalKeys.clear(); view.messageCount = 0; view.signalCount = 0;
-    view.includeTools = $('#output-include-tools').checked;
+  const previousData = view.result?.thread || view.result;
+  const hasSuccessfulPage = view.result?.source === 'codex_rollout' || previousData?.source === 'codex_rollout';
+  const requestedTools = append ? !!view.includeTools : !!$('#output-include-tools').checked;
+  if (!append && !hasSuccessfulPage) {
     $('#output-messages').replaceChildren(node('p', '正在读取这个终端的实际会话记录……', 'empty-copy')); $('#output-signals').replaceChildren();
     $('#output-source').textContent = '正在确认并读取实际会话输出……'; $('#output-note').textContent = '';
     $('#output-more').hidden = true; $('#output-pagination-note').textContent = '';
+  } else if (!append) {
+    $('#output-note').textContent = '正在刷新最新输出；读取成功前保留上次成功读取的页面。';
   }
   const generation = ++outputGeneration, body = {host: agent.host, thread_id: agent.thread_id, limit: 30};
-  body.include_tools = !!view.includeTools;
+  body.include_tools = requestedTools;
   if (append) body.cursor = view.nextCursor;
   view.open = true; view.busy = true;
   $('#conversation-output-panel').hidden = false; $('#terminal-output').setAttribute('aria-expanded', 'true');
@@ -1069,11 +1072,35 @@ async function readConversationOutput(append = false) {
     if (selectedAgent !== key || currentAgent()?.terminal_id !== view.terminalId || outputView !== view || generation !== outputGeneration) return;
     const returnedSession = result.output_binding?.session_id || result.thread?.output_binding?.session_id || result.thread?.session_id || result.session_id;
     if (append && view.sessionId && returnedSession && returnedSession !== view.sessionId) throw new Error('会话关联已变化，请刷新最新输出后再继续读取，不会混合两个会话的内容');
+    const returnedData = result.thread || result;
+    const actual = result.source === 'codex_rollout' || returnedData.source === 'codex_rollout';
+    if (hasSuccessfulPage && !actual) {
+      const binding = result.output_binding || returnedData.output_binding || {};
+      throw Object.assign(new Error(binding.reason || returnedData.note || result.note || '本次未读取到真实会话输出'), {code: binding.reason_code});
+    }
+    // Commit a new range only after a successful response. Failed refreshes
+    // keep the previous cursor, deduplication keys and its exact tool mode.
+    if (!append) {
+      view.result = null; view.nextCursor = null; view.sessionId = null; view.messageKeys.clear(); view.signalKeys.clear(); view.messageCount = 0; view.signalCount = 0;
+      $('#output-messages').replaceChildren(); $('#output-signals').replaceChildren();
+    }
+    view.includeTools = requestedTools; $('#output-include-tools').checked = requestedTools;
     renderConversationOutput(view, result);
   } catch (error) {
     if (selectedAgent !== key || currentAgent()?.terminal_id !== view.terminalId || outputView !== view || generation !== outputGeneration) return;
-    $('#output-note').textContent = `会话输出读取失败：${error.message}。不能把现有终端画面当成完整报告。`;
-    if (!append) { $('#output-messages').replaceChildren(); empty($('#output-messages'), '请检查关联的会话 ID，或稍后重新读取。'); }
+    const readBusy = error.code === 'ssh_read_in_progress';
+    if (hasSuccessfulPage) {
+      $('#output-include-tools').checked = !!view.includeTools;
+      $('#output-note').textContent = `${readBusy ? '同一路由已有会话输出读取，请等前一次结束后手动重试。' : `本次会话输出读取失败：${error.message}。`}已保留上次成功读取的正文、分页及工具显示模式；保留的内容不代表本次已刷新。`;
+    } else if (readBusy) {
+      $('#output-source').textContent = '会话输出读取暂忙';
+      $('#output-note').textContent = '同一路由已有会话输出读取，请等前一次结束后手动重试。本次未发起远端查询。';
+      $('#output-messages').replaceChildren(); empty($('#output-messages'), '暂未读取到会话记录，请稍后手动点击「刷新最新输出」。');
+      $('#output-pagination-note').textContent = '等待前一次读取结束后可手动重试。';
+    } else {
+      $('#output-note').textContent = `会话输出读取失败：${error.message}。不能把现有终端画面当成完整报告。`;
+      if (!append) { $('#output-messages').replaceChildren(); empty($('#output-messages'), '本次未读到实际会话记录，请稍后手动重试。'); }
+    }
     throw error;
   } finally {
     view.busy = false;

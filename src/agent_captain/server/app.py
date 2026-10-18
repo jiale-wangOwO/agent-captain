@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from agent_captain import __version__ as VERSION
-from agent_captain.core.terminal_hub import Hub
+from agent_captain.core.terminal_hub import Hub, HistoryReadError
 from agent_captain.paths import ROOT
 
 
@@ -269,6 +269,9 @@ def create_server(hub, port=8766, token=None):
                     self.respond(200, hub.create_agent(body["host"], body["cwd"], body["title"], body.get("text", ""), body.get("active", True), body.get("request_key"), command=body.get("command", "")))
                 else:
                     self.respond(404, {"error": "Not found"})
+            except HistoryReadError as error:
+                self.respond(409 if error.reason_code == "ssh_read_in_progress" else 400,
+                             {"error": str(error), "code": error.reason_code})
             except PermissionError as error:
                 self.respond(403, {"error": str(error)})
             except Exception as error:

@@ -142,6 +142,11 @@ class HistoryTransportTests(unittest.TestCase):
         self.assertFalse(result["history_complete"])
         self.assertEqual(result["output_binding"]["state"], "unavailable")
         self.assertEqual(result["output_binding"]["reason_code"], "ssh_handshake_failed")
+        self.assertEqual(result["read_transport"]["attempts"], 2)
+        self.assertEqual([row["reason_code"] for row in result["read_transport"]["attempt_trace"]],
+                         ["ssh_handshake_failed", "ssh_handshake_failed"])
+        self.assertTrue(all(type(row["elapsed_ms"]) is int and row["elapsed_ms"] >= 0
+                            for row in result["read_transport"]["attempt_trace"]))
         self.assertNotIn(SECRET, json.dumps(result))
         self.assertEqual(self.terminals.writes, [])
 
@@ -185,7 +190,8 @@ class HistoryTransportTests(unittest.TestCase):
                     stdout=SECRET, stderr="Host key verification failed. " + SECRET)):
                 with self.assertRaises(ValueError) as caught:
                     self.hub.read_agent("remote", "worker", **{field: "same-session-page"})
-            self.assertIn("分页无法继续", str(caught.exception))
+            self.assertIn("原游标未被判为失效", str(caught.exception))
+            self.assertNotIn("请重新读取最新", str(caught.exception))
             self.assertIn("ssh_host_key_failed", str(caught.exception))
             self.assertNotIn(SECRET, str(caught.exception))
         self.assertEqual(self.terminals.writes, [])
@@ -196,6 +202,20 @@ class HistoryTransportTests(unittest.TestCase):
         self.assertEqual(result["messages"], [])
         self.assertEqual(result["output_binding"]["reason_code"], "output_read_failed")
         self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_retry_success_retains_sanitized_attempt_trace(self):
+        output = {"id": SESSION, "source": "codex_rollout", "messages": [], "content_complete": True}
+        binding = {**self.binding, "terminal_id": TERMINAL, "historical": False, "live_session_verified": True}
+        with patch("agent_captain.core.terminal_hub.subprocess.run", side_effect=[
+                reply(returncode=255, stderr="kex_exchange_identification: Connection closed " + SECRET),
+                reply({"state": "bound", "binding": binding, "output": output})]):
+            result = self.hub.read_agent("remote", "worker")
+        self.assertEqual(result["source"], "codex_rollout")
+        trace = result["read_transport"]["attempt_trace"]
+        self.assertEqual([item["reason_code"] for item in trace], ["ssh_handshake_failed", "ok"])
+        self.assertEqual([item["attempt"] for item in trace], [1, 2])
+        self.assertNotIn(SECRET, json.dumps(result))
+        self.assertEqual(self.terminals.writes, [])
 
 
 if __name__ == "__main__":

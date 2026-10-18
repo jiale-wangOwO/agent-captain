@@ -37,14 +37,16 @@ HISTORY_ERROR_MESSAGES = {
     "remote_read_failed": "远端只读会话查询失败；请检查所选会话记录和远端 python3。",
     "protocol_invalid": "远端未返回有效的只读会话查询结果；请检查 SSH 启动环境和远端 python3。",
     "output_read_failed": "真实会话输出读取或身份核验失败；请核对所选 Session 后重试。",
+    "ssh_read_in_progress": "同一 SSH 目标已有完整会话读取正在进行，本次未发起新 SSH；请等前次读取结束，再沿用原游标重试。 [ssh_read_in_progress]",
 }
 
 
 class HistoryReadError(RuntimeError):
     """Only a fixed public classification crosses the SSH error boundary."""
 
-    def __init__(self, reason_code):
+    def __init__(self, reason_code, read_transport=None):
         self.reason_code = reason_code if reason_code in HISTORY_ERROR_MESSAGES else "remote_read_failed"
+        self.read_transport = read_transport
         super().__init__(HISTORY_ERROR_MESSAGES[self.reason_code])
 
 
@@ -92,6 +94,10 @@ class Hub:
         self.terminals = terminals if terminals is not None else TerminalClient()
         self.directories = directories if directories is not None else DirectoryBrowser()
         self.registry_lock = threading.RLock()
+        # Admission is fail-fast, not a network-spanning registry lock or a
+        # hidden retry queue. Aliases registered with the same target share it.
+        self._read_admission_lock = threading.Lock()
+        self._reading_routes = set()
         self._reconnecting = set()
         self.event_condition = threading.Condition()
         self.stopping = False
@@ -169,7 +175,9 @@ class Hub:
         batched = request["op"] == "read_bound_output"
         deadlines = (75, 45) if batched else (45,)
         started = time.monotonic()
+        trace = []
         for attempt, deadline in enumerate(deadlines):
+            attempt_started = time.monotonic()
             try:
                 reply = subprocess.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPersist=no",
                     "-o", "ConnectTimeout=30", target, "python3 - " + payload],
@@ -181,9 +189,14 @@ class Hub:
             except (OSError, UnicodeError):
                 failure = "ssh_transport_unavailable"
             if failure:
+                trace.append({"attempt": attempt + 1, "reason_code": failure,
+                              "elapsed_ms": round((time.monotonic() - attempt_started) * 1000)})
                 if attempt + 1 < len(deadlines) and failure in ("ssh_timeout", "ssh_handshake_failed", "ssh_transport_unavailable"):
                     continue
-                raise HistoryReadError(failure) from None
+                diagnostic = {"kind": "ssh", "attempts": attempt + 1,
+                    "elapsed_ms": round((time.monotonic() - started) * 1000), "attempt_trace": trace,
+                    "batched_identity_checks": True} if batched else None
+                raise HistoryReadError(failure, diagnostic) from None
             try:
                 result = response_wire.decode_reply(reply.stdout) if batched else json.loads(reply.stdout)
             except (ValueError, TypeError, UnicodeError):
@@ -198,7 +211,10 @@ class Hub:
             if batched:
                 value = {**value, "read_transport": {"kind": "ssh", "attempts": attempt + 1,
                          "elapsed_ms": round((time.monotonic() - started) * 1000),
-                         "response_bytes": len(reply.stdout.encode("utf-8")), "batched_identity_checks": True}}
+                         "response_bytes": len(reply.stdout.encode("utf-8")),
+                         "attempt_trace": trace + [{"attempt": attempt + 1, "reason_code": "ok",
+                             "elapsed_ms": round((time.monotonic() - attempt_started) * 1000)}],
+                         "batched_identity_checks": True}}
             return value
 
     def connect_host(self, host):
@@ -1532,9 +1548,15 @@ class Hub:
         except Exception as error:
             reason_code, reason = _safe_output_failure(error)
             if cursor or after_cursor:
+                if isinstance(error, HistoryReadError) and reason_code in (
+                        "ssh_handshake_failed", "ssh_timeout", "ssh_transport_unavailable",
+                        "ssh_authentication_failed", "ssh_host_key_failed"):
+                    raise ValueError("本次会话输出分页未读到记录，原游标未被判为失效；处理连接问题后可沿用同一游标重试："
+                                     + reason + " [" + reason_code + "]") from None
                 raise ValueError("会话输出分页无法继续，请重新读取最新记录：" + reason + " [" + reason_code + "]") from None
             return {"output_binding": {"state": "unavailable", "reason": reason, "reason_code": reason_code}, "messages": [],
-                    "content_complete": False, "note": "真实会话输出当前不可用；以下屏幕仅作状态参考，不是完整回复。"}
+                    "content_complete": False, "note": "真实会话输出当前不可用；以下屏幕仅作状态参考，不是完整回复。",
+                    **({"read_transport": error.read_transport} if isinstance(error, HistoryReadError) and error.read_transport else {})}
 
     def read_agent(self, host, thread_id, limit=18, plugin=False, cursor=None, after_cursor=None, include_tools=False):
         if type(limit) is not int or not 1 <= limit <= 100:
@@ -1544,6 +1566,21 @@ class Hub:
         if type(include_tools) is not bool:
             raise ValueError("include_tools 必须为布尔值。")
         agent = self.get_agent(host, thread_id, plugin=plugin)
+        route = self.host(host)
+        target = route["target"] if route["transport"] == "ssh" else None
+        if target is not None:
+            with self._read_admission_lock:
+                if target in self._reading_routes:
+                    raise HistoryReadError("ssh_read_in_progress")
+                self._reading_routes.add(target)
+        try:
+            return self._read_agent_output(host, thread_id, agent, limit, plugin, cursor, after_cursor, include_tools)
+        finally:
+            if target is not None:
+                with self._read_admission_lock:
+                    self._reading_routes.discard(target)
+
+    def _read_agent_output(self, host, thread_id, agent, limit, plugin, cursor, after_cursor, include_tools):
         if not agent.get("terminal_id"):
             return {**agent, **self.history(host, {"op": "read", "thread_id": thread_id, "limit": limit}), "source": "persisted_history"}
         try:

@@ -19,6 +19,7 @@ function element() {
 }
 const textOf = element => [element.textContent || '', ...(element.children || []).map(textOf)].join('');
 const reply = value => ({ok: true, json: async () => value});
+const busyReply = () => ({ok: false, status: 409, json: async () => ({code: 'ssh_read_in_progress', error: '同一路由正在读取，请等前一次结束后沿用原游标手动重试。'})});
 const actual = (extra = {}) => ({source: 'codex_rollout', output_binding: {state: 'bound', session_id: sessionId, live_session_verified: true},
   messages: [{message_id: 'm1', role: 'assistant', text: '完整报告的开头\n完整报告的末尾', chunk_offset: 0, total_chars: 21, content_complete: true}],
   recent_signals: [], content_complete: true, history_complete: false, truncated: false, has_more: false, ...extra});
@@ -52,6 +53,7 @@ async function harness() {
 const readCalls = h => h.network.filter(call => call.url === '/api/agents/read');
 const bodyOf = call => JSON.parse(call.options.body);
 const forbiddenCalls = h => h.network.filter(call => /\/api\/terminals\/(?:input|create|connect|resize|close)/.test(call.url));
+const currentOutput = h => JSON.parse(vm.runInContext('JSON.stringify({result:outputView.result,nextCursor:outputView.nextCursor,afterCursor:outputView.afterCursor,sessionId:outputView.sessionId,includeTools:outputView.includeTools,messageCount:outputView.messageCount,signalCount:outputView.signalCount})', h.context));
 
 test('output reader is a separate pane and markup offers exact UUID association', () => {
   const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
@@ -145,6 +147,123 @@ test('refresh starts a new latest range without cursor and does not retain older
   assert.equal(bodyOf(readCalls(h)[1]).cursor, undefined);
   assert.match(textOf(h.get('#output-messages')), /NEW OUTPUT/);
   assert.doesNotMatch(textOf(h.get('#output-messages')), /OLD OUTPUT/);
+});
+
+test('fresh busy preserves the last successful page and tool-mode cursor throughout the pending request', async () => {
+  const h = await harness();
+  h.get('#output-include-tools').checked = true;
+  h.route(() => reply(actual({has_more: true, next_cursor: 'tools-page', after_cursor: 'tools-after',
+    messages: [{message_id: 'old-tool', role: 'tool', text: 'OLD FULL TOOL BODY'}],
+    recent_signals: [{message_id: 'old-signal', type: 'tool_output', text: 'OLD SIGNAL'}]})));
+  await h.context.readConversationOutput();
+  const saved = currentOutput(h), message = h.get('#output-messages').children[0], signal = h.get('#output-signals').children[0];
+  const source = h.get('#output-source').textContent;
+  let complete;
+  h.route(() => new Promise(resolve => {complete = () => resolve(busyReply());}));
+  h.get('#output-include-tools').checked = false;
+  const refreshing = h.context.readConversationOutput();
+  assert.deepEqual(currentOutput(h), saved, 'Starting a refresh does not mutate its previous successful range');
+  assert.equal(h.get('#output-messages').children[0], message);
+  assert.equal(h.get('#output-signals').children[0], signal);
+  assert.match(h.get('#output-note').textContent, /正在刷新.*保留上次成功/);
+  complete();
+  await assert.rejects(refreshing, error => error.code === 'ssh_read_in_progress');
+  assert.deepEqual(currentOutput(h), saved);
+  assert.equal(h.get('#output-messages').children[0], message);
+  assert.equal(h.get('#output-signals').children[0], signal);
+  assert.equal(h.get('#output-source').textContent, source);
+  assert.equal(h.get('#output-include-tools').checked, true, 'A failed mode switch rolls back to the old cursor mode');
+  assert.equal(h.get('#output-more').hidden, false);
+  assert.equal(h.get('#output-more').disabled, false);
+  assert.match(h.get('#output-note').textContent, /等前一次结束后手动重试.*上次成功.*不代表本次已刷新/);
+  assert.doesNotMatch(h.get('#output-note').textContent, /重新关联|关联会话/);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(readCalls(h).length, 2, 'Busy does not schedule another output read');
+  assert.equal(bodyOf(readCalls(h)[1]).include_tools, false);
+  assert.equal(forbiddenCalls(h).length, 0);
+});
+
+test('pagination busy retains the original cursor, session and tool mode for an explicit same-page retry', async () => {
+  const h = await harness();
+  h.get('#output-include-tools').checked = true;
+  h.route(() => reply(actual({has_more: true, next_cursor: 'original-tool-cursor', after_cursor: 'original-after'})));
+  await h.context.readConversationOutput();
+  const saved = currentOutput(h), message = h.get('#output-messages').children[0];
+  h.get('#output-include-tools').checked = false;
+  h.route(() => busyReply());
+  await assert.rejects(h.context.readConversationOutput(true), error => error.code === 'ssh_read_in_progress');
+  assert.deepEqual(currentOutput(h), saved);
+  assert.equal(h.get('#output-messages').children[0], message);
+  assert.equal(h.get('#output-include-tools').checked, true);
+  assert.deepEqual(bodyOf(readCalls(h)[1]), {host: 'spark', thread_id: 'ceohub-fixture', limit: 30,
+    include_tools: true, cursor: 'original-tool-cursor'});
+  h.route(() => reply(actual({messages: [{message_id: 'second-page', role: 'tool', text: 'NEXT TOOL PAGE'}]})));
+  await h.context.readConversationOutput(true);
+  assert.deepEqual(bodyOf(readCalls(h)[2]), bodyOf(readCalls(h)[1]));
+  assert.match(textOf(h.get('#output-messages')), /完整报告.*NEXT TOOL PAGE/s);
+  assert.equal(readCalls(h).length, 3);
+  assert.equal(forbiddenCalls(h).length, 0);
+});
+
+test('an initial busy read gives a manual retry hint without suggesting a broken session association', async () => {
+  const h = await harness();
+  h.route(() => busyReply());
+  await assert.rejects(h.context.readConversationOutput(), error => error.code === 'ssh_read_in_progress');
+  assert.match(h.get('#output-source').textContent, /读取暂忙/);
+  assert.match(h.get('#output-note').textContent, /等前一次结束后手动重试.*未发起远端查询/);
+  assert.match(textOf(h.get('#output-messages')), /稍后手动点击/);
+  assert.doesNotMatch(h.get('#output-note').textContent + textOf(h.get('#output-messages')), /关联会话|会话 ID|重新关联/);
+  assert.equal(h.get('#output-more').hidden, true);
+  assert.equal(h.get('#output-refresh').disabled, false);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(readCalls(h).length, 1);
+  h.route(() => reply(actual()));
+  await h.context.readConversationOutput();
+  assert.match(textOf(h.get('#output-messages')), /完整报告的开头/);
+  assert.match(h.get('#output-source').textContent, /真实会话记录/);
+  assert.equal(readCalls(h).length, 2);
+  assert.equal(forbiddenCalls(h).length, 0);
+});
+
+test('other failed reads and semantic fallback retain the last successful range rather than overwrite it', async () => {
+  const h = await harness();
+  h.route(() => reply(actual({has_more: true, next_cursor: 'still-valid', after_cursor: 'still-after'})));
+  await h.context.readConversationOutput();
+  const saved = currentOutput(h), message = h.get('#output-messages').children[0];
+  for (const route of [() => {throw new Error('offline');}, () => reply({source: 'terminal', messages: [],
+    output_binding: {state: 'unavailable', reason_code: 'ssh_timeout', reason: '真实会话读取超时'}, note: '仅有屏幕'})]) {
+    h.route(route);
+    await assert.rejects(h.context.readConversationOutput());
+    assert.deepEqual(currentOutput(h), saved);
+    assert.equal(h.get('#output-messages').children[0], message);
+    assert.match(h.get('#output-note').textContent, /保留上次成功.*不代表本次已刷新/);
+  }
+  assert.equal(forbiddenCalls(h).length, 0);
+});
+
+test('an explicit successful retry replaces the old range and commits the requested new tool mode', async () => {
+  const h = await harness();
+  h.get('#output-include-tools').checked = true;
+  h.route(() => reply(actual({has_more: true, next_cursor: 'old-tool-page', messages: [{message_id: 'old', role: 'tool', text: 'OLD TOOL RANGE'}]})));
+  await h.context.readConversationOutput();
+  h.get('#output-include-tools').checked = false;
+  h.route(() => busyReply());
+  await assert.rejects(h.context.readConversationOutput());
+  assert.equal(currentOutput(h).includeTools, true);
+  h.get('#output-include-tools').checked = false;
+  h.route(() => reply(actual({has_more: true, next_cursor: 'new-plain-page', messages: [{message_id: 'new', role: 'assistant', text: 'NEW PLAIN RANGE'}]})));
+  await h.context.readConversationOutput();
+  assert.equal(bodyOf(readCalls(h)[2]).include_tools, false);
+  assert.equal(bodyOf(readCalls(h)[2]).cursor, undefined);
+  assert.equal(currentOutput(h).includeTools, false);
+  assert.equal(currentOutput(h).nextCursor, 'new-plain-page');
+  assert.equal(h.get('#output-include-tools').checked, false);
+  assert.match(textOf(h.get('#output-messages')), /NEW PLAIN RANGE/);
+  assert.doesNotMatch(textOf(h.get('#output-messages')), /OLD TOOL RANGE/);
+  await h.context.readConversationOutput(true);
+  assert.equal(bodyOf(readCalls(h)[3]).include_tools, false);
+  assert.equal(bodyOf(readCalls(h)[3]).cursor, 'new-plain-page');
+  assert.equal(forbiddenCalls(h).length, 0);
 });
 
 test('an in-flight read cannot overwrite a newly selected agent output', async () => {
