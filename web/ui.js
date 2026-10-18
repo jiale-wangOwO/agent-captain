@@ -266,7 +266,12 @@ function renderDetail() {
   if (outputView?.key === selectedAgent && outputView.open) renderOutputBinding(agent);
 }
 function renderAgentRecoveryNotice(agent = currentAgent()) {
-  const message = agent ? agentRecoveryNotices.get(agentKey(agent)) || agent.recovery?.message || '' : '';
+  const localNotice = agent ? agentRecoveryNotices.get(agentKey(agent)) : '';
+  let message = agent ? localNotice || agent.recovery?.message || '' : '';
+  const obsoleteWait = !localNotice || localNotice === agent?.recovery?.message
+    || localNotice === '原终端显示已附着且身份一致；前台尚未就绪，请进入终端核对。';
+  if (agent?.recovery?.code === 'awaiting_foreground' && agent.connected === true && agent.agent_ready === true
+      && !agent.human_busy && !agent.blocked_reason && obsoleteWait) message = '原终端已连接，前台已核验可交互。';
   $('#agent-recovery-notice').textContent = message; $('#agent-recovery-notice').hidden = !message;
   renderDisplayServiceNotice();
 }

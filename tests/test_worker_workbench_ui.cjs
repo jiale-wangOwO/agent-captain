@@ -437,6 +437,24 @@ test('connected unknown display offers exact-key verification and accepts done w
   assert.equal(h.get('#terminal-reconcile-dialog').open, false);
 });
 
+test('fresh readiness replaces only an obsolete awaiting-foreground notice without rewriting receipts', async () => {
+  const wait = '原终端显示已附着且身份一致；前台尚未就绪，请进入终端核对。';
+  const h = await harness({agents: [worker('remote', 'two', 'Spark', {recovery: {code: 'awaiting_foreground', message: wait}})]});
+  await h.context.selectAgent(h.agents[0]);
+  assert.equal(h.get('#agent-recovery-notice').textContent, '原终端已连接，前台已核验可交互。');
+  h.context.waitNotice = wait; vm.runInContext('agentRecoveryNotices.set("remote:two", waitNotice);', h.context);
+  h.context.renderAgentRecoveryNotice(h.agents[0]);
+  assert.equal(h.get('#agent-recovery-notice').textContent, '原终端已连接，前台已核验可交互。');
+  assert.equal(h.agents[0].recovery.message, wait); assert.equal(vm.runInContext('agentRecoveryNotices.get("remote:two")', h.context), wait);
+  for (const change of [{connected: false}, {agent_ready: false}, {human_busy: true}, {blocked_reason: 'authentication'}, {recovery: {code: 'reconnect_unknown', message: wait}}]) {
+    h.context.renderAgentRecoveryNotice({...h.agents[0], ...change});
+    assert.equal(h.get('#agent-recovery-notice').textContent, wait);
+  }
+  vm.runInContext('agentRecoveryNotices.set("remote:two", "当前登录需要处理");', h.context);
+  h.context.renderAgentRecoveryNotice(h.agents[0]);
+  assert.equal(h.get('#agent-recovery-notice').textContent, '当前登录需要处理');
+});
+
 test('connected Captain request captures its plugin endpoint and key without impersonating UI origin', async () => {
   const h = await harness({agents: [worker('remote', 'two', 'Spark', {recovery: {code: 'reconnect_unknown', request_origin: 'plugin', next_action: 'reconcile_original_worker', reconcile_kind: 'live_display', reconcile_available: true, reconcile_request_keys: ['original-plugin-key']}})], handle: async (call, backend) => {
     if (call.url === '/api/agents/reconcile-original-worker') return backend.reply({...backend.agents[0], operation: 'reconcile_original_worker', operation_state: 'done', recovery: {code: 'reconnected', request_origin: 'plugin', reconciliation_kind: 'live_display', reconciled: true, retryable: false, next_action: 'open_terminal'}});
