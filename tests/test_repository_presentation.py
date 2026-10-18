@@ -196,6 +196,28 @@ class RepositoryPresentationTests(unittest.TestCase):
                 self.assertIn("# AgentCaptain · 队长", content)
                 self.assertIn("docs/guides/visual-demo.md", links)
 
+    def test_agent_setup_prompt_precedes_manual_steps_and_keeps_human_boundaries(self):
+        cases = (
+            ("README.md", "## Get started", "### 🤖 Let your agent set it up", "### Manual setup",
+             ("README", "operator guide", "verify", "existing Codex", "SSH", "sessions", "login", "trust", "approval", "URL", "delegating")),
+            ("README.zh-CN.md", "## 快速开始", "### 🤖 让你的 Agent 帮你安装", "### 手动安装",
+             ("README", "操作指南", "验证", "现有 Codex", "SSH", "会话", "登录", "信任", "审批", "地址", "派发")),
+        )
+        for relative, started, heading, manual, requirements in cases:
+            with self.subTest(document=relative):
+                content = (ROOT / relative).read_text(encoding="utf-8")
+                section = content.split(started + "\n", 1)[1]
+                self.assertTrue(section.lstrip().startswith(heading))
+                prompt_section, manual_section = section.split(manual + "\n", 1)
+                prompt = re.search(r"```text\n(.*?)\n```", prompt_section, re.S)
+                self.assertIsNotNone(prompt, "Installation instructions should be a copyable plain-text prompt")
+                text = prompt.group(1)
+                self.assertIn("https://github.com/jiale-wangOwO/agent-captain", text)
+                for requirement in requirements:
+                    self.assertIn(requirement, text)
+                self.assertIn("npm ci", manual_section)
+                self.assertIn("python scripts/captain.py serve", manual_section)
+
     def test_superseded_logo_files_are_not_shipped_or_referenced(self):
         old_assets = ("assets/agent-captain-logo.svg", "web/agent-captain-mark.svg",
                       "assets/brand/agentcaptain-mark.svg")

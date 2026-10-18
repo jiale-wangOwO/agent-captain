@@ -43,6 +43,24 @@ The **Captain is the model in a native local Codex conversation**, initialized w
 
 ## Get started
 
+### 🤖 Let your agent set it up
+
+Already use Codex, Claude Code, Cursor, or another coding agent? Paste this into it and let it guide the setup instead of following the manual steps:
+
+```text
+Please install https://github.com/jiale-wangOwO/agent-captain and get it running
+on this computer. Follow its README and operator guide, and verify the local workbench.
+Help me start my first Captain using my existing Codex setup, then ask which SSH
+machines and project folders I want to add. Preserve existing settings and sessions;
+leave login, passwords, trust and approval prompts to me.
+When ready, give me the URL and a short guide to connecting workers,
+chatting with them directly, and delegating tasks through the Captain.
+```
+
+Any coding agent can help with installation; the Captain itself currently runs in local Codex. Repository access and any required sign-in or approvals still need your participation.
+
+### Manual setup
+
 You need **Python 3.11+**, **Node.js 22+**, npm, and a configured local **Codex CLI**. Remote workers additionally need Linux, OpenSSH, Python 3, tmux, and Codex for that remote user. See the [complete requirements](docs/guides/operator-guide.md#requirements).
 
 ```sh

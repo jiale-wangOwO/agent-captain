@@ -45,6 +45,22 @@
 
 ## 快速开始
 
+### 🤖 让你的 Agent 帮你安装
+
+已经在用 Codex、Claude Code、Cursor 或其他编程 Agent？把下面这段话发给它，让它带你完成安装，不必先逐条执行手动步骤：
+
+```text
+请帮我安装 https://github.com/jiale-wangOwO/agent-captain，
+按照项目的 README 和操作指南，在这台电脑上启动并验证本地工作台。
+帮我使用现有 Codex 配置启动第一个 Captain，再问我想接入哪些 SSH 机器和项目目录。
+保留现有配置和会话；登录、密码、信任和审批提示由我自己处理。
+准备好后，给我工作台地址，以及接入工作 agent、直接对话和通过队长派发任务的简短用法。
+```
+
+安装助手可以是任意编程 Agent；Captain 本身目前仍使用本机 Codex。仓库访问、登录和必要审批仍需要你参与。
+
+### 手动安装
+
 主控电脑需要 **Python 3.11+**、**Node.js 22+**、npm，以及配置好的本机 **Codex CLI**。远程工作机还需 Linux、OpenSSH、Python 3、tmux 和该用户的 Codex。见[完整环境要求](docs/guides/operator-guide.zh-CN.md#环境要求)。
 
 ```sh
