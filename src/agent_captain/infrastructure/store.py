@@ -21,7 +21,7 @@ class Store:
             create table if not exists agents (host text, thread_id text, alias text, owned integer default 0,
                 primary key(host,thread_id));
             create table if not exists outbox (id text primary key, host text, thread_id text, text text,
-                state text, turn_id text, error text, time real);
+                state text, turn_id text, error text, time real, submitted_at real);
             """)
             columns = {r[1] for r in self.db.execute("pragma table_info(agents)")}
             for name, declaration in (("active", "integer default 0"), ("access", "text default 'observe'"),
@@ -36,6 +36,8 @@ class Store:
                 self.db.execute("alter table outbox add column request_key text")
             if "kind" not in outbox_columns:
                 self.db.execute("alter table outbox add column kind text default 'message'")
+            if "submitted_at" not in outbox_columns:
+                self.db.execute("alter table outbox add column submitted_at real")
             self.db.execute("create unique index if not exists outbox_request_key on outbox(request_key) where request_key is not null")
             self.db.execute("create table if not exists operations(request_key text primary key, fingerprint text, state text, result text)")
 
@@ -151,7 +153,16 @@ class Store:
 
     def update_outbox(self, request_id, state, turn_id=None, error=None):
         with self.lock, self.db:
-            self.db.execute("update outbox set state=?,turn_id=coalesce(?,turn_id),error=? where id=?", (state, turn_id, error, request_id))
+            if state in ("submitted", "delivered"):
+                # Freeze the first confirmed terminal write. Legacy rows which
+                # already recorded an acknowledgement have an unknown time;
+                # repeating that acknowledgement cannot invent it today.
+                self.db.execute("update outbox set submitted_at=case when state in ('submitted','delivered') "
+                                "then submitted_at else coalesce(submitted_at,?) end,"
+                                "state=?,turn_id=coalesce(?,turn_id),error=? where id=?",
+                                (time.time(), state, turn_id, error, request_id))
+            else:
+                self.db.execute("update outbox set state=?,turn_id=coalesce(?,turn_id),error=? where id=?", (state, turn_id, error, request_id))
 
     def revoke_pending(self, host, thread_id, states):
         with self.lock, self.db:

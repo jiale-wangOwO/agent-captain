@@ -98,6 +98,10 @@ class Hub:
         # hidden retry queue. Aliases registered with the same target share it.
         self._read_admission_lock = threading.Lock()
         self._reading_routes = set()
+        # Passive response observations belong to a configured route, never to
+        # a periodic ping or an extra SSH probe. One entry per host bounds it.
+        self._host_latency_lock = threading.Lock()
+        self._host_latencies = {}
         self._reconnecting = set()
         self.event_condition = threading.Condition()
         self.stopping = False
@@ -145,19 +149,84 @@ class Hub:
             old = self.hosts.get(name)
             if old and (old.get("transport"), old.get("target", "")) != (transport, target) and any(a["host"] == name for a in self.store.agents()):
                 raise ValueError("此机器已有工作终端；请以新 ID 添加新地址。")
-            self.hosts[name] = config
+            with self._host_latency_lock:
+                self.hosts[name] = config
+                if old is None or (old.get("transport"), old.get("target", "")) != (transport, target):
+                    # Removing this entry also invalidates in-flight receipts,
+                    # including a later switch back to the same target string.
+                    self._host_latencies.pop(name, None)
             self.store.setting("hosts", self.hosts)
             self.connections.pop(name, None)
         self.record_event("host_configured", host=name)
         return {"id": name, **config}
 
+    @staticmethod
+    def _unknown_host_latency(config):
+        local = config.get("transport") == "local"
+        return {"state": "local" if local else "unknown", "metric": "local" if local else "ssh_response",
+                "last_ms": None, "last_success_at": None, "last_attempt_at": None, "reason_code": None}
+
+    def _begin_host_latency(self, host, config):
+        route = (config.get("transport"), config.get("target", ""))
+        with self._host_latency_lock:
+            for removed in self._host_latencies.keys() - self.hosts.keys():
+                self._host_latencies.pop(removed, None)
+            current = self.hosts.get(host)
+            if current is None or (current.get("transport"), current.get("target", "")) != route:
+                return None
+            entry = self._host_latencies.get(host)
+            if entry is None or entry["route"] != route:
+                entry = {"route": route, "latest_attempt": 0, "value": self._unknown_host_latency(config)}
+                self._host_latencies[host] = entry
+            entry["latest_attempt"] += 1
+            return entry, entry["latest_attempt"], time.time()
+
+    def _finish_host_latency(self, host, observation, started, reason_code=None):
+        if observation is None:
+            return
+        elapsed_ms, completed_at = max(0, round((time.monotonic() - started) * 1000)), time.time()
+        entry, attempt, attempted_at = observation
+        with self._host_latency_lock:
+            config = self.hosts.get(host)
+            if (self._host_latencies.get(host) is not entry or entry["latest_attempt"] != attempt
+                    or config is None or (config.get("transport"), config.get("target", "")) != entry["route"]):
+                return  # A new route or newer read must not inherit old timing.
+            value = {**entry["value"], "last_attempt_at": attempted_at,
+                     "state": "failed" if reason_code else "measured", "reason_code": reason_code}
+            if reason_code is None:
+                value.update(last_ms=elapsed_ms, last_success_at=completed_at)
+            entry["value"] = value
+
+    def _host_latency_view(self, host, config):
+        if config.get("transport") == "local":
+            return self._unknown_host_latency(config)
+        with self._host_latency_lock:
+            entry = self._host_latencies.get(host)
+            if entry is not None and entry["route"] == (config.get("transport"), config.get("target", "")):
+                return dict(entry["value"])
+        return self._unknown_host_latency(config)
+
     def history(self, host, request):
-        config = self.host(host)
+        config = dict(self.host(host))
         if config["transport"] == "local":
             return catalog.main(request)
         target = config["target"]
         if target.startswith("-") or any(c.isspace() or ord(c) < 32 for c in target):
             raise ValueError("Invalid SSH target")
+        observation, started = self._begin_host_latency(host, config), time.monotonic()
+        try:
+            value = self._ssh_history(config, request)
+        except HistoryReadError as error:
+            self._finish_host_latency(host, observation, started, error.reason_code)
+            raise
+        except Exception:
+            self._finish_host_latency(host, observation, started, "remote_read_failed")
+            raise
+        self._finish_host_latency(host, observation, started)
+        return value
+
+    def _ssh_history(self, config, request):
+        target = config["target"]
         payload = base64.urlsafe_b64encode(json.dumps(request, ensure_ascii=False).encode()).decode()
         # Send compact portable read-only modules through stdin. No remote installation,
         # provider startup or authentication/configuration file reads are needed.
@@ -2022,10 +2091,13 @@ class Hub:
         agents = self.attached_agents()
         connected = self.connected_hosts(agents)
         events = self.store.recent_events(kinds=MANAGEMENT_EVENTS) if int(after) == 0 else self.store.events(after, kinds=MANAGEMENT_EVENTS)
+        with self.registry_lock:
+            hosts = [(host, dict(config), dict(self.connections.get(host, {}))) for host, config in self.hosts.items()]
         return {"version": VERSION, "controller": "codex-plugin", "legacy_scope_shared": True,
                 "management_policy": "connected_workers", "worker_access": "automatic",
                 "effective_worker_count": sum(bool(agent.get("active")) for agent in agents),
-                "hosts": [{"id": h, **c, **self.connections.get(h, {}), "connected": h in connected} for h, c in self.hosts.items()],
+                "hosts": [{"id": host, **config, **connection, "connected": host in connected,
+                           "latency": self._host_latency_view(host, config)} for host, config, connection in hosts],
                 "agents": agents, "events": events, "cursor": self.store.event_cursor() if int(after) == 0 else (events[-1]["id"] if events else int(after)),
                 "outbox": self.store.outbox(), "approvals": []}
 

@@ -1,19 +1,16 @@
-<p align="center">
-  <img src="assets/brand/agentcaptain-mark.png" alt="AgentCaptain open-ring compass logo" width="120">
-</p>
-
-# AgentCaptain · 队长
-
-**One captain for agents across your machines.**
-
-Delegate, coordinate, and supervise local and remote coding agents through one lead conversation. Set the goal, let your Captain follow the work, and keep the final say.
-
-[![CI](https://github.com/jiale-wangOwO/agent-captain/actions/workflows/ci.yml/badge.svg)](https://github.com/jiale-wangOwO/agent-captain/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-64748b)](LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776ab)](docs/guides/operator-guide.md#requirements)
-[![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-43853d)](docs/guides/operator-guide.md#requirements)
-
-[中文](README.zh-CN.md) · [Get started](#get-started) · [Documentation](docs/index.md) · [Contribute](CONTRIBUTING.md) · [Security](SECURITY.md)
+<div align="center">
+  <p><img src="assets/brand/agentcaptain-mark.png" alt="AgentCaptain open-ring compass logo" width="120" height="120"></p>
+  <h1>AgentCaptain</h1>
+  <p><strong>One captain for agents across your machines.</strong></p>
+  <p>Delegate, coordinate, and supervise local and remote coding agents through one lead conversation.<br>Set the goal, let your lead agent follow the work, and keep the final say.</p>
+  <p>
+    <a href="https://github.com/jiale-wangOwO/agent-captain/actions/workflows/ci.yml"><img src="https://github.com/jiale-wangOwO/agent-captain/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-64748b" alt="License: MIT"></a>
+    <a href="docs/guides/operator-guide.md#requirements"><img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+"></a>
+    <a href="docs/guides/operator-guide.md#requirements"><img src="https://img.shields.io/badge/Node.js-22%2B-43853d" alt="Node.js 22+"></a>
+  </p>
+  <p><a href="README.zh-CN.md">中文</a> · <a href="#get-started">Get started</a> · <a href="docs/index.md">Documentation</a> · <a href="CONTRIBUTING.md">Contribute</a> · <a href="SECURITY.md">Security</a></p>
+</div>
 
 ![AgentCaptain workbench with synthetic demonstration data](docs/images/workspace-demo.jpg)
 
@@ -39,22 +36,23 @@ The **Captain is the model in a native local Codex conversation**, initialized w
 - **Connected means manageable.** Registered open shared workers join the management view automatically. Name, search, filter, and pin them without an activation checklist.
 - **Actual conversation output.** Read an exactly associated Codex session, including paginated long replies. A terminal's visible report tail is not treated as the full report.
 - **Human-first interaction.** Shared terminals preserve direct access and protect human drafts. Uncertain submissions keep their original delivery identity rather than being blindly resent.
+- **Timing with context.** Message cards separate creation from confirmed terminal write; machine cards show passive SSH response observations, not ping or proof of task progress. See [how to read these indicators](docs/guides/operator-guide.md#message-times-and-ssh-response).
 - **Explicit recovery.** Reconnect an original persistent terminal without silently creating a replacement, resuming a model, or replaying tasks.
 
 ## Get started
 
 ### 🤖 Let your agent set it up
 
-Already use Codex, Claude Code, Cursor, or another coding agent? Paste this into it and let it guide the setup instead of following the manual steps:
+If you have a coding agent (Claude Code, Cursor, Codex, whatever), you don't need to read the rest of this file. Just say to it:
 
 ```text
 Please install https://github.com/jiale-wangOwO/agent-captain and get it running
 on this computer. Follow its README and operator guide, and verify the local workbench.
-Help me start my first Captain using my existing Codex setup, then ask which SSH
+Help me start my first management session using my existing Codex setup, then ask which SSH
 machines and project folders I want to add. Preserve existing settings and sessions;
 leave login, passwords, trust and approval prompts to me.
 When ready, give me the URL and a short guide to connecting workers,
-chatting with them directly, and delegating tasks through the Captain.
+chatting with them directly, and delegating tasks through the lead agent.
 ```
 
 Any coding agent can help with installation; the Captain itself currently runs in local Codex. Repository access and any required sign-in or approvals still need your participation.

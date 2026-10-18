@@ -179,6 +179,12 @@ Ordinary task messages use bracketed paste and Enter in the same foreground Code
 
 Human drafts take precedence: `human_busy` means the controller must not overwrite them. A `submitted` delivery proves bytes were written, **not** that Codex accepted or completed the task. Keep the same `request_key`, inspect `get_delivery`, and never blindly resubmit uncertain writes with a new key.
 
+### Message times and SSH response
+
+Message cards distinguish **Created** (the record's creation time) from **Confirmed write** (when the Hub first receives confirmation that the terminal input was written). These times are displayed in the browser's local time, with UTC in the tooltip. Confirmed write is **not model acceptance, task start, or completion**. Queued or unknown delivery has no invented write time; older acknowledged records without one remain explicitly unrecorded. Input typed directly in a terminal does not create a management-message card.
+
+Each SSH machine's response label passively records the end-to-end duration of an existing read request, including connection setup, remote execution, response transfer, and any retry already allowed for that read. It is **not ping**, model response time, or an isolated network round trip; displaying it starts no extra probes. Without a sample the label is unknown; local machines show no SSH latency, samples older than two minutes are marked historical, and a failed query remains failed even if its last successful sample is retained. A low number alone does not establish that a worker or task is ready. See the [workbench indicator contract](../agent-workbench.md#消息时间与机器响应指标) for field semantics and recovery boundaries.
+
 The UI provides copy/paste, local scrollback, directory selection, explicit screen refresh, and confirmed terminal close. Mouse-wheel scrolling never becomes worker input. Clipboard fallback does not add Enter, although pasted text may itself contain newlines.
 
 Closing a page, changing selection, or closing the Python Hub does not stop the independent terminal broker. If the broker or control computer stops, local PTYs end. Remote Hub-owned tmux sessions can survive SSH display disconnections and be reattached; reconnect does not automatically resume Codex or resend a task.

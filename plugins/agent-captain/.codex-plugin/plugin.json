@@ -8,10 +8,10 @@
   "interface": {
     "displayName": "AgentCaptain",
     "shortDescription": "一个主控，统筹本机与远程 Agent",
-    "longDescription": "机器连接在 UI 配置，已接入的开放工作终端自动可管理。当前 Codex 模型担当 Captain（队长），目标内向相关 agent 问询、派发、追问、纠偏和验收，实际项目工作由工作 agent 执行，用户保留最终决策。与用户共用终端，不覆盖草稿、绕过审批、改写凭据或重放未知任务；后台不另运行主控模型。",
+    "longDescription": "机器连接在 UI 配置，已接入的开放工作终端自动可管理。当前 Codex 模型担当主控，目标内向相关 agent 问询、派发、追问、纠偏和验收，实际项目工作由工作 agent 执行，用户保留最终决策。与用户共用终端，不覆盖草稿、绕过审批、改写凭据或重放未知任务；后台不另运行主控模型。",
     "developerName": "AgentCaptain contributors",
     "category": "Developer Tools",
     "capabilities": ["Read", "Write"],
-    "defaultPrompt": ["作为我的 Captain，先向相关 agent 了解情况，再组织推进和验收，汇总进展及需要我决定的事项。", "把这项目标交给负责的工作 agent，在目标范围内问询、跟进和纠偏，向我汇总有证据的结果。"]
+    "defaultPrompt": ["作为我的主控，先向相关 agent 了解情况，再组织推进和验收，汇总进展及需要我决定的事项。", "把这项目标交给负责的工作 agent，在目标范围内问询、跟进和纠偏，向我汇总有证据的结果。"]
   }
 }

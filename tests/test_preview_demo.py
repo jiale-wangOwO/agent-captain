@@ -50,6 +50,18 @@ class PreviewDemoTests(unittest.TestCase):
         state["hosts"][0]["label"] = "changed"
         self.assertEqual(demo.fixture_state()["hosts"][0]["label"], "Local workstation")
 
+    def test_delivery_times_and_response_samples_have_api_compatible_numeric_types(self):
+        state = demo.fixture_state()
+        delivery = state["outbox"][0]
+        self.assertIsInstance(delivery["time"], (int, float))
+        self.assertIsInstance(delivery["submitted_at"], (int, float))
+        self.assertLess(delivery["time"], delivery["submitted_at"])
+        self.assertIsNone(state["hosts"][0]["latency"]["last_ms"])
+        for host in state["hosts"][1:]:
+            self.assertEqual(host["latency"]["metric"], "ssh_response")
+            self.assertGreater(host["latency"]["last_ms"], 0)
+            self.assertEqual(host["latency"]["last_success_at"], delivery["submitted_at"])
+
     def test_shipped_ui_has_clear_notice_local_assets_and_no_cookie(self):
         with preview() as (server, base):
             self.assertEqual(server.server_address[0], "127.0.0.1")
@@ -145,7 +157,7 @@ class PreviewDemoTests(unittest.TestCase):
                 imports.update(alias.name for alias in node.names)
             elif isinstance(node, ast.ImportFrom):
                 imports.add(node.module)
-        self.assertEqual(imports, {"__future__", "argparse", "copy", "http.server", "json", "pathlib", "urllib.parse"})
+        self.assertEqual(imports, {"__future__", "argparse", "copy", "datetime", "http.server", "json", "pathlib", "urllib.parse"})
 
     def test_absolute_proxy_style_requests_are_never_forwarded(self):
         with preview() as (server, _):

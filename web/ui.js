@@ -94,6 +94,25 @@ function renderWorkbenchFilters() {
   $('#all-machines').classList.toggle('selected', !agentFilters.host);
 }
 function dateText(value) { if (!value) return ''; const date = new Date(typeof value === 'number' ? value * (value < 1e12 ? 1000 : 1) : value); return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN'); }
+function timestamp(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return null;
+  const date = new Date(value * 1000); if (Number.isNaN(date.getTime())) return null;
+  const pad = part => String(part).padStart(2, '0');
+  return {iso: date.toISOString(), text: `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`};
+}
+function responseDuration(value) {
+  return value < 1000 ? `${Math.round(value)} ms` : `${(value / 1000).toFixed(1)} s`;
+}
+function hostLatencyView(host, now = Date.now()) {
+  const explanation = '已有 SSH 查询的端到端响应，包含建连、远端执行和传输，不是网络 ping；不会额外发起探测。';
+  if (host.transport === 'local') return {state: 'local', text: '延时 — · 本机', title: '本机不经过 SSH，不伪造网络延时。'};
+  const sample = host.latency || {}, measured = typeof sample.last_ms === 'number' && Number.isFinite(sample.last_ms) && sample.last_ms >= 0;
+  const observed = timestamp(sample.last_success_at), last = sample.metric === 'ssh_response' && measured && observed ? responseDuration(sample.last_ms) : null;
+  if (sample.state === 'failed') return {state: 'failed', text: last ? `SSH 查询失败 · 上次 ${last}` : 'SSH 响应暂不可用', title: `${explanation} 最近一次查询未成功。${last ? `上次成功 ${last}，测于 ${observed.text}（本地时间）。` : ''}`};
+  if (sample.metric !== 'ssh_response' || sample.state !== 'measured' || !last) return {state: 'unknown', text: 'SSH 响应 —', title: `${explanation} 尚无成功测量。`};
+  const age = now - sample.last_success_at * 1000, stale = age < 0 || age > 120000;
+  return {state: stale ? 'stale' : 'measured', text: `${stale ? '上次 SSH' : 'SSH 响应'} ${last}`, title: `${explanation} 测于 ${observed.text}（本地时间）。${stale ? '这是历史样本，不代表当前响应。' : ''}`};
+}
 function toast(text) { $('#toast').textContent = text; $('#toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('#toast').hidden = true; }, 7500); }
 // These exact GET routes use the same deliberately opaque authentication
 // response in app.py. Do not reinterpret an arbitrary missing resource as auth.
@@ -133,6 +152,8 @@ function renderHosts() {
     const card = node('div', null, 'host-card' + (host.id === agentFilters.host ? ' selected' : '')); const select = button('', 'host-select', async () => selectHost(host.id));
     const name = node('span', null, 'host-name'); name.append(node('span', '', 'connection-dot' + (display.connected ? ' connected' : '')), node('strong', host.label || host.id));
     select.append(name, node('span', host.transport === 'local' ? '本机' : (host.target || host.targetAlias || 'SSH'), 'host-target')); card.append(select);
+    const latency = hostLatencyView(host), latencyLabel = node('span', latency.text, `host-latency ${latency.state}`);
+    latencyLabel.title = latency.title; select.append(latencyLabel);
     const controls = node('div', null, 'host-controls'); controls.append(node('span', display.label, 'muted'), button('连接', 'text-button', async () => {
       const result = await request('/api/hosts/connect', {host: host.id}); await refresh(true);
       if (result.connected === false) throw new Error(result.error || '机器连接失败。请检查 SSH 配置。');
@@ -1147,7 +1168,23 @@ async function readHistory() {
 }
 function renderOutbox() {
   const box = $('#outbox'); box.replaceChildren(); const records = state.outbox.slice().sort((a, b) => (b.time || 0) - (a.time || 0)).slice(0, 8); if (!records.length) empty(box, '暂无 Captain 发送记录。你在终端直接输入时不会生成任务卡。');
-  for (const message of records) { const card = node('article', null, 'feedback-card'), agent = state.agents.find(item => item.host === message.host && item.thread_id === message.thread_id); card.append(node('strong', deliveryLabels[message.state] || message.state || '已记录'), node('div', `${agent?.alias || shortId(message.thread_id)} · ${message.host}`, 'muted'), node('p', message.text || '')); if (message.error) card.append(node('p', message.error, 'error-text')); box.append(card); }
+  for (const message of records) {
+    const card = node('article', null, 'feedback-card'), agent = state.agents.find(item => item.host === message.host && item.thread_id === message.thread_id);
+    card.append(node('strong', deliveryLabels[message.state] || message.state || '已记录'), node('div', `${agent?.alias || shortId(message.thread_id)} · ${message.host}`, 'muted'));
+    const times = node('div', null, 'delivery-times'), created = timestamp(message.time), submitted = timestamp(message.submitted_at);
+    for (const [label, value, help] of [
+      ['创建', created, '消息记录的创建时间；不表示已写入终端。'],
+      ['确认写入', submitted, '首次得到终端写入确认的时间；不表示模型已接收或任务已完成。']
+    ]) {
+      if (!value) continue;
+      const time = node('time', `${label} ${value.text}`); time.setAttribute('datetime', value.iso); time.title = `${help} 按浏览器本地时间显示；UTC ${value.iso}`; times.append(time);
+    }
+    if (!created) times.append(node('span', '创建时间未记录'));
+    if (!submitted && ['submitted', 'delivered'].includes(message.state)) times.append(node('span', '确认写入时间未记录 · 历史记录'));
+    card.append(times, node('p', message.text || ''));
+    if (message.error) card.append(node('p', message.error, 'error-text'));
+    box.append(card);
+  }
 }
 function renderEvents(events) {
   for (const item of events || []) { const id = item.id ?? `${item.kind}:${JSON.stringify(item.data)}`; activity.set(id, item); if (typeof item.id === 'number') cursor = Math.max(cursor, item.id); }
@@ -1171,7 +1208,8 @@ async function refresh(force = false) {
     // Host cards depend on live display counts, not just the saved machine
     // configuration. Keep output sequence/text out of this cache signature.
     const hostDisplays = state.hosts.map(host => [host.id, hostDisplayStatus(host)]);
-    const parts = {hosts: JSON.stringify([state.hosts, selectedHost, hostDisplays, agentFilters.host]), agents: JSON.stringify([state.agents, selectedAgent, agentFilters]), outbox: JSON.stringify(state.outbox), detail: JSON.stringify(currentAgent() || null)};
+    const hostLatencies = state.hosts.map(host => [host.id, hostLatencyView(host)]);
+    const parts = {hosts: JSON.stringify([state.hosts, selectedHost, hostDisplays, agentFilters.host, hostLatencies]), agents: JSON.stringify([state.agents, selectedAgent, agentFilters]), outbox: JSON.stringify(state.outbox), detail: JSON.stringify(currentAgent() || null)};
     for (const [key, render] of Object.entries({hosts: renderHosts, agents: renderAgents, outbox: renderOutbox, detail: renderDetail})) if (rendered[key] !== parts[key]) { rendered[key] = parts[key]; render(); }
     renderEvents(next.events); $('#status').textContent = `后台服务在线${next.version ? ' · ' + next.version : ''}`; $('#status').classList.add('online');
     // Independent diagnostics must not delay the selected terminal's frame

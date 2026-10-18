@@ -2,13 +2,13 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AgentCaptain · 队长</title>
+  <title>AgentCaptain</title>
   <meta name="description" content="一个主控，统筹本机与远程 Agent。统一派发任务、跟进进度、协调协作和审查交付，也能随时进入真实终端直接对话。">
   <link rel="icon" href="/agent-captain-mark.png" type="image/png">
   <link rel="stylesheet" href="/vendor/xterm.css"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/prose.css">
 </head>
 <body>
-<header class="topbar"><div class="brand"><img class="brand-mark" src="/agent-captain-mark.png" width="38" height="38" alt=""><div><strong class="wordmark" aria-label="AgentCaptain · 队长">AgentCaptain <span>队长</span></strong><span class="tagline">One captain for agents across your machines.</span></div></div><div class="top-actions"><span id="status" class="service-status" role="status">连接后台服务中</span><button id="machine-settings" class="subtle">配置机器</button></div></header>
+<header class="topbar"><div class="brand"><img class="brand-mark" src="/agent-captain-mark.png" width="38" height="38" alt=""><div><strong class="wordmark" aria-label="AgentCaptain">AgentCaptain</strong><span class="tagline">One captain for agents across your machines.</span></div></div><div class="top-actions"><span id="status" class="service-status" role="status">连接后台服务中</span><button id="machine-settings" class="subtle">配置机器</button></div></header>
 <section id="terminal-service-notice" class="terminal-service-notice" role="status" hidden><div><strong id="terminal-service-heading">本机终端显示服务未连接</strong><p id="terminal-service-message"></p></div><button id="terminal-service-recover" type="button">恢复本机显示服务…</button></section>
 <section id="pending-create-notice" class="terminal-service-notice" role="status" hidden><div><strong>有终端打开请求需要核对</strong><p id="pending-create-message"></p></div><button id="pending-create-open" type="button">核对原打开请求</button></section>
 <section class="controller-strip" aria-label="管理会话"><div class="controller-card-copy"><span class="eyebrow">ONE CAPTAIN · LOCAL &amp; REMOTE AGENTS</span><h1 id="controller-title">一个主控，统筹本机与远程 Agent。</h1><p id="controller-description">你定目标，Captain 负责派发、跟进、协调和交付审查。在本机 Codex 管理会话中统一带队，不必逐个终端来回切换。</p><p class="controller-benefits">多机器统一管理 · 进展与待决事项集中汇总 · 随时进入真实终端直接对话</p><div class="controller-summary"><span id="controller-state" class="badge" role="status">正在检查管理会话</span><span id="controller-owner" class="muted"></span><span id="controller-phase" class="muted"></span></div><p id="controller-error" class="terminal-error" role="alert" hidden></p></div><div class="controller-card-actions"><button id="controller-primary" disabled>启动管理会话</button><button id="controller-scope" class="subtle" disabled>管理设置</button><button id="controller-desktop" class="subtle" disabled>在 Codex 中继续</button><span id="controller-scope-count" class="scope-caption">工作会话连接后自动可管理</span></div></section>

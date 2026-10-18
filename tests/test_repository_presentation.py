@@ -42,6 +42,10 @@ WORKSPACE = "docs/images/workspace-demo.jpg"
 CAPTAIN = "docs/images/captain-demo.jpg"
 MAX_ASSET_BYTES = 2 * 1024 * 1024
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+AGENT_SETUP_INTRO = (
+    "If you have a coding agent (Claude Code, Cursor, Codex, whatever), "
+    "you don't need to read the rest of this file. Just say to it:"
+)
 
 
 def without_fences(text: str) -> str:
@@ -63,10 +67,11 @@ def without_fences(text: str) -> str:
 
 
 def local_links(text: str) -> list[str]:
-    """Recognize this project's inline links/images, not bare URLs or tags."""
+    """Recognize inline Markdown and HTML links/images, not bare URLs."""
     prose = without_fences(text)
     targets = re.findall(r"\]\(([^\s)]+)\)", prose)
     targets += re.findall(r"<img\b[^>]*\bsrc=[\"']([^\"']+)[\"']", prose, re.I)
+    targets += re.findall(r"<a\b[^>]*\bhref=[\"']([^\"']+)[\"']", prose, re.I)
     return [unescape(target) for target in targets
             if not urlsplit(target).scheme and not target.startswith("//")]
 
@@ -78,7 +83,11 @@ def heading_anchors(text: str) -> set[str]:
     for line in without_fences(text).splitlines():
         match = re.match(r"^#{1,6}\s+(.+?)\s*#*\s*$", line)
         if not match:
-            continue
+            # The landing hero uses a native HTML heading so title and logo
+            # share one GitHub-compatible centered container.
+            match = re.match(r"^\s*<h[1-6]\b[^>]*>(.*?)</h[1-6]>\s*$", line, re.I)
+            if not match:
+                continue
         heading = re.sub(r"<[^>]+>", "", unescape(match.group(1))).lower()
         slug = re.sub(r"[^\w -]", "", heading).replace(" ", "-")
         duplicate = counts[slug]
@@ -192,9 +201,30 @@ class RepositoryPresentationTests(unittest.TestCase):
                 links = local_links(content)
                 self.assertIn(MARK, links)
                 self.assertIn(WORKSPACE, links)
-                self.assertEqual(re.findall(r"<img\b[^>]*\bsrc=\"([^\"]+)\"", content), [MARK])
-                self.assertIn("# AgentCaptain · 队长", content)
+                images = re.findall(r"<img\b[^>]*\bsrc=\"([^\"]+)\"", content)
+                self.assertEqual([src for src in images if not urlsplit(src).scheme], [MARK])
+                self.assertIn("<h1>AgentCaptain</h1>", content)
                 self.assertIn("docs/guides/visual-demo.md", links)
+
+    def test_landing_hero_groups_logo_title_tagline_badges_and_navigation(self):
+        for relative in ("README.md", "README.zh-CN.md"):
+            with self.subTest(document=relative):
+                content = (ROOT / relative).read_text(encoding="utf-8")
+                self.assertTrue(content.startswith('<div align="center">\n'))
+                hero, body = content.split("</div>\n", 1)
+                self.assertEqual(re.findall(r"<h1\b[^>]*>(.*?)</h1>", hero), ["AgentCaptain"])
+                self.assertIn(MARK, local_links(hero))
+                self.assertIn("One captain for agents across your machines.", hero)
+                self.assertIn('alt="CI"', hero)
+                self.assertIn("docs/index.md", local_links(hero))
+                self.assertRegex(body, r"^\s*!\[AgentCaptain")
+                self.assertNotIn("<div", body, "The centered hero must not swallow the body")
+
+    def test_public_product_name_has_no_translated_alias(self):
+        for relative in sorted(ANCHOR_DOCUMENTS):
+            with self.subTest(document=relative):
+                content = (ROOT / relative).read_text(encoding="utf-8")
+                self.assertNotIn("\u961f\u957f", content)
 
     def test_agent_setup_prompt_precedes_manual_steps_and_keeps_human_boundaries(self):
         cases = (
@@ -209,6 +239,7 @@ class RepositoryPresentationTests(unittest.TestCase):
                 section = content.split(started + "\n", 1)[1]
                 self.assertTrue(section.lstrip().startswith(heading))
                 prompt_section, manual_section = section.split(manual + "\n", 1)
+                self.assertIn(AGENT_SETUP_INTRO, prompt_section)
                 prompt = re.search(r"```text\n(.*?)\n```", prompt_section, re.S)
                 self.assertIsNotNone(prompt, "Installation instructions should be a copyable plain-text prompt")
                 text = prompt.group(1)
@@ -247,17 +278,19 @@ class RepositoryPresentationTests(unittest.TestCase):
         self.assertGreaterEqual(height, 500)
         self.assertGreater(width, height)
 
-    def test_link_extractor_ignores_fences_external_urls_and_bare_tags(self):
+    def test_link_extractor_covers_html_anchors_and_ignores_fences_external_urls(self):
         sample = ("[local](guide.md#heading) <img src='mark.png' alt='mark'>\n"
                   "[web](https://example.test/no-network) <https://example.test/bare>\n"
                   "```sh\n[example](not-a-real-file.md)\n```\n"
                   "~~~text\n<img src='not-a-real-image.png'>\n~~~\n"
-                  "<placeholder> https://example.test/plain\n")
-        self.assertEqual(local_links(sample), ["guide.md#heading", "mark.png"])
+                  "<placeholder> https://example.test/plain\n"
+                  "<a href='guide.md#html&amp;anchor'>HTML navigation</a>\n"
+                  "<a href='https://example.test/outside'>external</a>\n")
+        self.assertEqual(local_links(sample), ["guide.md#heading", "mark.png", "guide.md#html&anchor"])
 
     def test_heading_slugs_cover_current_unicode_and_duplicate_titles(self):
-        self.assertEqual(heading_anchors("# 环境要求\n## Optional: connect\n## Optional: connect\n"),
-                         {"环境要求", "optional-connect", "optional-connect-1"})
+        self.assertEqual(heading_anchors("<h1>AgentCaptain</h1>\n# 环境要求\n## Optional: connect\n## Optional: connect\n"),
+                         {"agentcaptain", "环境要求", "optional-connect", "optional-connect-1"})
 
     def test_png_validator_rejects_truncation_and_crc_damage(self):
         original = (ROOT / MARK).read_bytes()

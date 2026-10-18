@@ -4,7 +4,7 @@
 
 Preview the **shipped web interface** with synthetic fixtures, without connecting a real machine or starting a model. This is a reproducible UI showcase—not a simulated successful integration test.
 
-用同一套实际 Web UI 加载虚构数据，查看工作台与队长管理界面。不需要模型、登录、SSH 或真实服务凭据；演示内容不代表实际任务已完成。
+用同一套实际 Web UI 加载虚构数据，查看工作台与管理会话界面。不需要模型、登录、SSH 或真实服务凭据；演示内容不代表实际任务已完成。
 
 ## Run locally
 
@@ -40,9 +40,9 @@ This preview proves how the interface renders and navigates with these fixtures.
 | Asset | What it shows |
 |---|---|
 | [workspace-demo.jpg](../images/workspace-demo.jpg) | Cross-machine workbench and a selected synthetic worker. |
-| [captain-demo.jpg](../images/captain-demo.jpg) | The synthetic Captain management display. |
+| [captain-demo.jpg](../images/captain-demo.jpg) | The synthetic management display. |
 
-Both screenshots are captures of the actual web UI served by this preview, **not AI-generated screens**. They retain the browser capture's native JPEG bytes and use the matching `.jpg` extension, without pixel edits or format conversion. All displayed machines, tasks and messages remain synthetic fixtures; the logo change does not change those fixtures or imply a new live integration result. The current identity uses the selected open-ring compass; see the [brand assets and usage](../../assets/brand/README.md) and its [generation brief](../../assets/brand/generation.md).
+Both screenshots are captures of the actual web UI served by this preview, **not AI-generated screens**. They retain the browser capture's native JPEG bytes and matching `.jpg` extensions, with no pixel edits or format conversion. All displayed machines, tasks, messages and response timings remain synthetic fixtures, not observations or successful delivery evidence from real workers. The current identity uses the selected open-ring compass; see the [brand assets and usage](../../assets/brand/README.md) and its [generation brief](../../assets/brand/generation.md).
 
 To update the showcase:
 

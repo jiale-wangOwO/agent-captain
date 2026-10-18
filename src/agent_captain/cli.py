@@ -9,7 +9,7 @@ def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(
         prog="agent-captain",
-        description="AgentCaptain · 队长 — 一个主控，统筹本机与远程 Agent。")
+        description="AgentCaptain — 一个主控，统筹本机与远程 Agent。")
     parser.add_argument("command", choices=("service", "terminal", "mcp", "serve", "find", "read", "probe"),
                         help="service: web lifecycle; terminal: display maintenance; mcp: stdio; serve/find/read/probe: HTTP/catalog")
     if not args or args[0] in ("--help", "-h"):

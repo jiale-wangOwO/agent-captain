@@ -311,7 +311,7 @@ def serve(port=8766):
 def main(argv=None):
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    parser = argparse.ArgumentParser(description="AgentCaptain · 队长 — 一个主控，统筹本机与远程 Agent。")
+    parser = argparse.ArgumentParser(description="AgentCaptain — 一个主控，统筹本机与远程 Agent。")
     sub = parser.add_subparsers(dest="command", required=True)
     web = sub.add_parser("serve")
     web.add_argument("--port", type=int, default=8766)

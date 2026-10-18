@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
@@ -20,13 +21,17 @@ from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 STAMP = "2026-01-01T10:00:00Z"
+STAMP_EPOCH = datetime.fromisoformat(STAMP).timestamp()
 SELECTED_AGENT = "demo-build:demo-release-review"
 DEMO_NOTICE = "SYNTHETIC DEMO · 演示数据 · 无真实机器或模型连接 · 写操作已禁用"
 MAX_BODY_BYTES = 16384
 HOSTS = [
-    {"id": "demo-local", "label": "Local workstation", "transport": "local", "connected": True},
-    {"id": "demo-build", "label": "Build server", "transport": "ssh", "target": "build.example", "connected": True},
-    {"id": "demo-research", "label": "Research node", "transport": "ssh", "target": "research.example", "connected": True},
+    {"id": "demo-local", "label": "Local workstation", "transport": "local", "connected": True,
+     "latency": {"state": "local", "metric": "local", "last_ms": None}},
+    {"id": "demo-build", "label": "Build server", "transport": "ssh", "target": "build.example", "connected": True,
+     "latency": {"state": "measured", "metric": "ssh_response", "last_ms": 842, "last_success_at": STAMP_EPOCH}},
+    {"id": "demo-research", "label": "Research node", "transport": "ssh", "target": "research.example", "connected": True,
+     "latency": {"state": "measured", "metric": "ssh_response", "last_ms": 1360, "last_success_at": STAMP_EPOCH}},
 ]
 
 
@@ -116,7 +121,7 @@ def fixture_state() -> dict:
     """Return fresh synthetic records, never references to mutable global data."""
     return copy.deepcopy({
         "version": "0.7.0 · DEMO", "demo": True, "hosts": HOSTS, "agents": WORKERS,
-        "outbox": [{"id": "demo-delivery", "host": "demo-build", "thread_id": "demo-release-review", "time": STAMP, "state": "submitted", "text": "演示：请核验发布准备，汇总证据与风险；暂不发布或推送。"}],
+        "outbox": [{"id": "demo-delivery", "host": "demo-build", "thread_id": "demo-release-review", "time": STAMP_EPOCH - 12, "submitted_at": STAMP_EPOCH, "state": "submitted", "text": "演示：请核验发布准备，汇总证据与风险；暂不发布或推送。"}],
         "events": [{"id": 1, "kind": "terminal_input_submitted", "time": STAMP, "data": {"host": "demo-build", "thread_id": "demo-release-review", "text": "演示：Captain 已向指定工作会话派发核验请求。"}}],
     })
 
@@ -176,7 +181,7 @@ class DemoHandler(BaseHTTPRequestHandler):
         path, query = request.path, parse_qs(request.query)
         if path == "/":
             html = (ROOT / "web/index.html").read_text(encoding="utf-8")
-            html = html.replace("<title>AgentCaptain · 队长</title>", "<title>AgentCaptain · Synthetic demo</title>")
+            html = html.replace("<title>AgentCaptain</title>", "<title>AgentCaptain · Synthetic demo</title>")
             html = html.replace("</head>", '<link rel="stylesheet" href="/demo.css"></head>')
             html = html.replace("<body>", f'<body><aside class="demo-banner" role="note">{DEMO_NOTICE}</aside>')
             html = html.replace("</body>", '<script src="/demo-guard.js"></script></body>')

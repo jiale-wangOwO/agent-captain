@@ -6,8 +6,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 function element(tag = 'div') {
-  return {tagName: tag, value: '', textContent: '', checked: false, hidden: false, disabled: false, clientWidth: 900, children: [], childElementCount: 0, style: {}, dataset: {}, listeners: {}, classList: {add() {}, remove() {}, toggle() {}},
-    append(...items) { this.children.push(...items); this.childElementCount = this.children.length; }, replaceChildren(...items) { this.children = items; this.childElementCount = items.length; }, setAttribute() {}, addEventListener(type, handler) { this.listeners[type] = handler; }, removeEventListener() {}, contains() { return false; }, focus() { this.focusCount = (this.focusCount || 0) + 1; }, select() {}, reset() {}, showModal() { this.open = true; }, close() { this.open = false; }, getBoundingClientRect: () => ({left: 0, top: 0, right: 900, bottom: 600})};
+  return {tagName: tag, value: '', textContent: '', checked: false, hidden: false, disabled: false, clientWidth: 900, children: [], childElementCount: 0, style: {}, dataset: {}, listeners: {}, attributes: {}, classList: {add() {}, remove() {}, toggle() {}},
+    append(...items) { this.children.push(...items); this.childElementCount = this.children.length; }, replaceChildren(...items) { this.children = items; this.childElementCount = items.length; }, setAttribute(name, value) { this.attributes[name] = String(value); }, getAttribute(name) { return this.attributes[name]; }, addEventListener(type, handler) { this.listeners[type] = handler; }, removeEventListener() {}, contains() { return false; }, focus() { this.focusCount = (this.focusCount || 0) + 1; }, select() {}, reset() {}, showModal() { this.open = true; }, close() { this.open = false; }, getBoundingClientRect: () => ({left: 0, top: 0, right: 900, bottom: 600})};
 }
 const worker = (host, id, alias, extra = {}) => ({host, thread_id: id, terminal_id: `terminal-${id}`, mode: 'terminal', alias, cwd: host === 'local' ? 'C:/work/project' : '/home/example/workspace/project', connected: true, active: true, command: 'codex', state: 'agent', agent_ready: true, management: {status: 'ready', label: 'Codex 输入就绪', primary_action: 'open_terminal', needs_attention: false}, ...extra});
 function descendants(root) { return [root, ...(root.children || []).flatMap(descendants)]; }
@@ -32,7 +32,7 @@ async function harness(options = {}) {
       const body = opts.body ? JSON.parse(opts.body) : undefined; const call = {url: String(url), options: opts, body}; calls.push(call);
       const reply = value => ({ok: true, status: 200, json: async () => value});
       if (options.handle) { const result = await options.handle(call, {agents, hosts, reply}); if (result) return result; }
-      if (url.startsWith('/api/state')) return reply({hosts, agents, outbox: [], events: []});
+      if (url.startsWith('/api/state')) return reply({hosts, agents, outbox: options.outbox || [], events: []});
       if (url.startsWith('/api/terminals/output')) { const query = new URLSearchParams(url.split('?')[1]); const agent = agents.find(a => a.host === query.get('host') && a.thread_id === query.get('thread_id')); return reply({data: '', seq: 1, reset: true, cols: 100, rows: 30, connected: agent?.connected !== false}); }
       if (url === '/api/agents/update') { const agent = agents.find(a => a.host === body.host && a.thread_id === body.thread_id); Object.assign(agent, body); return reply({...agent}); }
       if (url === '/api/agents/reconnect') { const agent = agents.find(a => a.host === body.host && a.thread_id === body.thread_id); agent.connected = true; return reply({...agent, recovery: {code: 'connected', message: '已重新连接原 tmux 显示，未运行 resume 或任务。'}}); }
@@ -47,6 +47,57 @@ function setFilter(h, field, value) { h.get('#agent-' + (field === 'query' ? 'se
 test('default workbench is cross-machine and closed records are hidden with honest counts', async () => {
   const h = await harness(); assert.deepEqual(cardTitles(h.get), ['Alpha', 'Beta']); assert.equal(h.get('#registry-count').textContent, '2');
   assert.match(h.get('#agent-count-caption').textContent, /2 \/ 3.*1.*已关闭.*不是任务完成/); assert.equal(h.calls.filter(c => c.options.method === 'POST').length, 0);
+});
+
+test('delivery cards distinguish creation from confirmed terminal write with exact datetime values', async () => {
+  const created = 1792304100.125, submitted = created + 62.5;
+  const h = await harness({outbox: [{id: 'delivery-fixture', host: 'remote', thread_id: 'two', text: 'Message fixture', state: 'submitted', time: created, submitted_at: submitted}]});
+  const card = h.get('#outbox').children[0], times = descendants(card).filter(item => item.tagName === 'time');
+  assert.equal(times.length, 2);
+  assert.match(times[0].textContent, /^创建 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  assert.match(times[1].textContent, /^确认写入 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  assert.equal(times[0].getAttribute('datetime'), new Date(created * 1000).toISOString());
+  assert.equal(times[1].getAttribute('datetime'), new Date(submitted * 1000).toISOString());
+  assert.notEqual(times[0].getAttribute('datetime'), times[1].getAttribute('datetime'));
+  assert.match(times[0].title, /创建时间.*不表示已写入终端/);
+  assert.match(times[1].title, /首次得到终端写入确认.*不表示模型已接收或任务已完成/);
+  assert.match(times[1].title, /本地时间.*UTC/);
+  assert.equal(h.calls.filter(call => call.options.method === 'POST').length, 0);
+});
+
+test('legacy acknowledged deliveries show unknown confirmation time instead of using creation or current time', async () => {
+  const h = await harness({outbox: [
+    {id: 'legacy-null', host: 'remote', thread_id: 'two', text: 'Null historical timestamp', state: 'submitted', time: 1792304100, submitted_at: null},
+    {id: 'legacy-missing', host: 'remote', thread_id: 'two', text: 'Missing historical timestamps', state: 'delivered'}
+  ]});
+  const cards = h.get('#outbox').children;
+  const knownCreation = cards.find(card => descendants(card).some(item => item.textContent === 'Null historical timestamp'));
+  const noTimes = cards.find(card => descendants(card).some(item => item.textContent === 'Missing historical timestamps'));
+  assert.equal(descendants(knownCreation).filter(item => item.tagName === 'time').length, 1);
+  assert.equal(descendants(noTimes).filter(item => item.tagName === 'time').length, 0);
+  for (const card of cards) assert.ok(descendants(card).some(item => item.textContent === '确认写入时间未记录 · 历史记录'));
+  assert.ok(descendants(noTimes).some(item => item.textContent === '创建时间未记录'));
+  assert.equal(h.calls.filter(call => call.options.method === 'POST').length, 0);
+});
+
+test('queued submitting and uncertain records never acquire an acknowledgement time from their creation date', async () => {
+  const h = await harness({outbox: ['queued', 'submitting', 'unknown'].map((state, index) => ({id: 'pending-' + state, host: 'remote', thread_id: 'two', text: state, state, time: 1792304100 + index, submitted_at: null}))});
+  for (const card of h.get('#outbox').children) {
+    const times = descendants(card).filter(item => item.tagName === 'time');
+    assert.equal(times.length, 1); assert.match(times[0].textContent, /^创建 /);
+    assert.equal(descendants(card).some(item => /^确认写入/.test(item.textContent)), false);
+  }
+  assert.equal(h.calls.filter(call => call.options.method === 'POST').length, 0);
+});
+
+test('invalid delivery timestamp values render unknown without fabricated datetime attributes', async () => {
+  for (const value of [null, undefined, 0, -1, NaN, Infinity, '1792304100', 1e20]) {
+    const h = await harness({outbox: [{id: 'invalid-time', host: 'remote', thread_id: 'two', state: 'submitted', time: value, submitted_at: value}]});
+    const nodes = descendants(h.get('#outbox').children[0]);
+    assert.equal(nodes.filter(item => item.tagName === 'time').length, 0, `invalid timestamp ${String(value)}`);
+    assert.ok(nodes.some(item => item.textContent === '创建时间未记录'));
+    assert.ok(nodes.some(item => item.textContent === '确认写入时间未记录 · 历史记录'));
+  }
 });
 
 test('default working includes every real open terminal even if old activation is false or display disconnected', async () => {
@@ -226,7 +277,8 @@ test('shipped markup has naming in detail and no separate worker activation or g
 test('AgentCaptain branding explains one lead across machines without the previous joke identity', () => {
   const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
   const css = fs.readFileSync(path.join(__dirname, '../web/style.css'), 'utf8');
-  assert.match(html, /<title>AgentCaptain · 队长<\/title>/);
+  assert.match(html, /<title>AgentCaptain<\/title>/);
+  assert.doesNotMatch(html, /\u961f\u957f/);
   assert.match(html, /One captain for agents across your machines\./);
   assert.match(html, /一个主控，统筹本机与远程 Agent。/);
   assert.match(html, /派发、跟进、协调和交付审查/);

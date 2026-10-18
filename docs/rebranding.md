@@ -1,6 +1,6 @@
 # AgentCaptain rename and compatibility / 改名与兼容
 
-The product is **AgentCaptain · 队长**. Its positioning is **One captain for agents across your machines. / 一个主控，统筹本机与远程 Agent。** The native management model is the **Captain**; the coding agents doing the work are **Workers**. The human keeps final decision-making authority.
+The product is **AgentCaptain**. Its positioning is **One captain for agents across your machines. / 一个主控，统筹本机与远程 Agent。** The native management model is the **Captain**; the coding agents doing the work are **Workers**. The human keeps final decision-making authority.
 
 This is a branding update, not a new remote-control protocol or permission model. Task delegation, progress follow-up, delivery review, direct worker terminals, and local/SSH connections retain their existing boundaries. It does not add background model wake-ups, automatic task replay, or unattended recovery.
 

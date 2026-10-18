@@ -8,7 +8,7 @@ Start with what you want to do. The guides describe real behavior and its bounda
 
 ## Get started · 开始使用
 
-Want an agent to handle setup? Copy the [English setup prompt](../README.md#get-started) or [中文安装提示词](../README.zh-CN.md#快速开始) into your coding agent. 它会按指南协助安装、验证工作台并引导你启动第一个 Captain；手动安装步骤也保留在同一入口。
+Want an agent to handle setup? Copy the [English setup prompt](../README.md#get-started) or [中文安装提示词](../README.zh-CN.md#快速开始) into your coding agent. 它会按指南协助安装、验证工作台并引导你启动第一个管理会话；手动安装步骤也保留在同一入口。
 
 - [English operator guide](guides/operator-guide.md) / [中文操作指南](guides/operator-guide.zh-CN.md) — requirements, installation, first Captain, and worker connections.
 - [Management session: design and limits](management-session-product.md) — what the Captain owns, how identity is established, delegation and acceptance, and experimental desktop transfer.
@@ -19,6 +19,7 @@ Want an agent to handle setup? Copy the [English setup prompt](../README.md#get-
 ## Daily work · 日常管理
 
 - [Agent workbench](agent-workbench.md) — name, filter, pin, open, and reconnect registered work; terminal scrolling, human drafts, and safe closure.
+- [Message times and SSH response](guides/operator-guide.md#message-times-and-ssh-response) / [消息时间与 SSH 响应](guides/operator-guide.zh-CN.md#消息时间与-ssh-响应) — distinguish a recorded terminal write from model/task acceptance and passive SSH response samples from ping.
 - [Read output without guessing](guides/operator-guide.md#read-output-without-guessing) / [会话输出不是终端截图](guides/operator-guide.zh-CN.md#会话输出不是终端截图) — exact Session association, pagination, completeness flags, and live versus historical evidence.
 - [Manage an objective, not every message](guides/operator-guide.md#manage-an-objective-not-every-message) / [交代目标，不必逐条批准管理消息](guides/operator-guide.zh-CN.md#交代目标不必逐条批准管理消息) — workers execute, the Captain coordinates and reviews, and the human makes final decisions.
 - [MCP tool reference](guides/operator-guide.md#mcp-tools) / [MCP 工具](guides/operator-guide.zh-CN.md#mcp-工具) — tool purposes and the permissions they actually enforce.

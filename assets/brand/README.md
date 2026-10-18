@@ -2,7 +2,7 @@
 
 <img src="agentcaptain-mark.png" width="112" height="112" alt="AgentCaptain: an open-ring mint-and-teal compass">
 
-**AgentCaptain · 队长**
+**AgentCaptain**
 
 One captain for agents across your machines.
 
@@ -13,7 +13,7 @@ arc and a two-tone northeast-pointing needle. It keeps the original compass
 direction while using a newly generated design, not a copy of the earlier mark.
 The wordmark and tagline remain native text, so they stay readable and accessible.
 
-采用用户选定的 **B · 开放圆环**：克制的圆弧与指向东北的双色指针，以方向感表达队长的协调角色。
+采用用户选定的 **B · 开放圆环**：克制的圆弧与指向东北的双色指针，以方向感表达主控的协调角色。
 这是一幅新生成的设计，延续原来的简约指南针方向，而不是复制旧图。名称与标语保留为原生文字，不嵌入图形。
 
 ## Assets and usage
@@ -26,7 +26,7 @@ The wordmark and tagline remain native text, so they stay readable and accessibl
   Prefer a matching dark ink surface; keep the built-in clear space rather than
   cropping tightly around the arc or needle.
 - Keep the selected artwork unchanged; do not stretch, recolor or add effects.
-- In text, write **AgentCaptain** as one word. The Chinese companion name is **队长**.
+- In both English and Chinese text, write **AgentCaptain** as one word. Use “lead agent” or “主控” for the management role; do not add a translated product alias.
 - The generation brief uses deep ink (approximately `#101B21`), pale mint
   (`#A7EAD1`) and restrained teal (`#5BAEBE`). These are design references, not
   a claim that every generated pixel exactly matches a hex value.
