@@ -185,7 +185,9 @@ def call_service(name: str, arguments: dict[str, Any]) -> Any:
         timeout = 225
     elif name == "read_agent":
         # A display snapshot can wait up to 55 seconds; verified output then
-        # uses three independent 45-second SSH reads. Leave time for both.
+        # uses one 75-second SSH transaction, with at most one 45-second
+        # transient-only retry. The combined 175-second allowance leaves room
+        # for service overhead below this MCP deadline.
         # Read allowance never changes uncertain-input delivery semantics.
         timeout = 210
     else:

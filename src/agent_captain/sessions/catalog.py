@@ -167,6 +167,12 @@ def read(thread_id, limit=18):
 
 
 def main(request):
+    if request["op"] == "read_bound_output":
+        if __package__:
+            from . import verified_output
+        else:
+            import verified_output
+        return verified_output.main(request)
     if request["op"] == "bind_output":
         if __package__:
             from . import session_binding
@@ -198,6 +204,14 @@ def main(request):
 if __name__ == "__main__":
     try:
         request = json.loads(base64.urlsafe_b64decode(sys.argv[1]))
-        print(json.dumps({"ok": True, "result": main(request)}, ensure_ascii=False))
+        result = {"ok": True, "result": main(request)}
+        if request.get("op") == "read_bound_output":
+            if __package__:
+                from . import response_wire
+            else:
+                import response_wire
+            print(response_wire.encode_reply(result))
+        else:
+            print(json.dumps(result, ensure_ascii=False))
     except Exception as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))

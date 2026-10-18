@@ -146,12 +146,10 @@ class HistoryTransportTests(unittest.TestCase):
         self.assertEqual(self.terminals.writes, [])
 
     def test_post_read_verification_failure_withholds_all_semantic_output(self):
-        output = {"source": "codex_rollout", "messages": [{"role": "assistant", "text": "REAL BODY"}],
-                  "content_complete": True, "history_complete": True}
-        failure = reply(returncode=255, stdout=SECRET, stderr="banner exchange failed " + SECRET)
-        with patch("agent_captain.core.terminal_hub.subprocess.run", side_effect=[reply(self.binding), reply(output), failure]) as run:
+        failure = {"state": "unavailable", "reason_code": "session_identity_changed"}
+        with patch("agent_captain.core.terminal_hub.subprocess.run", return_value=reply(failure)) as run:
             result = self.hub.read_agent("remote", "worker")
-        self.assertEqual(run.call_count, 3)
+        self.assertEqual(run.call_count, 1)
         self.assertTrue(result["connected"])
         self.assertEqual(result["source"], "terminal")
         self.assertEqual(result["messages"], [])
@@ -161,13 +159,15 @@ class HistoryTransportTests(unittest.TestCase):
         self.assertEqual(self.terminals.writes, [])
 
     def test_normal_exact_session_read_keeps_original_verification_flow(self):
-        output = {"source": "codex_rollout", "messages": [{"role": "assistant", "text": "BEGIN\nFULL BODY\nEND"}],
+        output = {"id": SESSION, "source": "codex_rollout", "messages": [{"role": "assistant", "text": "BEGIN\nFULL BODY\nEND"}],
                   "content_complete": True, "history_complete": True, "status": "completed_in_history"}
-        with patch("agent_captain.core.terminal_hub.subprocess.run", side_effect=[reply(self.binding), reply(output), reply(self.binding)]) as run:
+        binding = {**self.binding, "terminal_id": TERMINAL, "historical": False, "live_session_verified": True}
+        with patch("agent_captain.core.terminal_hub.subprocess.run", return_value=reply(
+                {"state": "bound", "binding": binding, "output": output})) as run:
             result = self.hub.read_agent("remote", "worker")
-        self.assertEqual(run.call_count, 3)
-        self.assertEqual(sum(call.kwargs["timeout"] for call in run.call_args_list), 135,
-                         "Three identity-bound reads leave broker overhead below the 180 second MCP deadline")
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.kwargs["timeout"], 75,
+                         "Both identity checks and semantic output share one SSH transaction")
         self.assertTrue(all("ConnectTimeout=30" in call.args[0] for call in run.call_args_list))
         self.assertEqual(result["source"], "codex_rollout")
         self.assertEqual(result["messages"], output["messages"])
@@ -175,6 +175,8 @@ class HistoryTransportTests(unittest.TestCase):
         self.assertTrue(result["output_binding"]["live_session_verified"])
         self.assertEqual(result["output_binding"]["session_id"], SESSION)
         self.assertEqual(result["conversation_status"], "completed_in_history")
+        self.assertEqual(result["read_transport"]["attempts"], 1)
+        self.assertTrue(result["read_transport"]["batched_identity_checks"])
         self.assertEqual(self.terminals.writes, [])
 
     def test_pagination_failure_is_safe_error_not_screen_output(self):

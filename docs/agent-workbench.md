@@ -85,6 +85,8 @@ MCP 提供数据、认证与新建目录检查以及受控动作；技能教管�
 
 已有终端的显示连接与真实会话读取是独立路径。`read_agent` 通过只读 SSH 查询精确关联的 Codex 记录，并在读取前后核验进程与 Session；不会把查询命令输入到工作 agent。新 SSH 失败时保留 `connected` 的真实显示状态，但返回 `output_binding.state=unavailable`、固定的 `reason_code`、空 `messages` 和 `content_complete=false`。`ssh_handshake_failed` 不等于模型停止，`ssh_authentication_failed`、`ssh_host_key_failed`、`ssh_timeout` 等也不混为同一问题。不会回显任意 SSH/provider 错误或凭据，分页失败不会降级把屏幕当正文。恢复后继续使用原 `read_agent` 接口与分页规则，无需重开工作模型或重复派工。
 
+远程读取的绑定、正文读取、后置复核共用一次 SSH 事务；屏幕核验独立进行，不能替代真实会话证据。仅该只读事务可对瞬时传输故障重试一次，不重试认证、主机密钥、协议、身份或游标错误。`include_tools`、`next_cursor` 和 `after_cursor` 的使用规则不变；不同工具模式的游标不能混用。可选 `read_transport` 记录尝试次数与耗时，供区分网络抖动与会话读取问题。
+
 ## 更新与验收边界
 
 新字段使用增量迁移，保留原机器、terminal、会话关联、人工别名、独立管理身份和新建目录。旧激活与 worker scope 元数据为兼容保留，但不再限制普通登记工作对象的管理；迁移不重发已有输入、不重置未知操作。网页服务可单独更新；不为部署工作台而结束独立工作终端 broker。兼容旧插件身份升级，避免重复安装两个管理入口。

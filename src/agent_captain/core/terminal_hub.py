@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 
 from agent_captain import __version__ as VERSION
-from agent_captain.sessions import catalog
+from agent_captain.sessions import catalog, response_wire
 from agent_captain.transport.directory_browser import DirectoryBrowser
 from agent_captain.transport.ssh_source import pack_python_source
 from agent_captain.infrastructure.store import Store
@@ -155,34 +155,51 @@ class Hub:
         payload = base64.urlsafe_b64encode(json.dumps(request, ensure_ascii=False).encode()).decode()
         # Send compact portable read-only modules through stdin. No remote installation,
         # provider startup or authentication/configuration file reads are needed.
-        modules = ("session_binding", "conversation_output") if request["op"] in ("bind_output", "resolve_output", "read_output") else ()
+        modules = (("session_binding", "conversation_output", "verified_output", "response_wire") if request["op"] == "read_bound_output"
+                   else ("session_binding", "conversation_output") if request["op"] in ("bind_output", "resolve_output", "read_output") else ())
         source = "import sys,types\n"
         for name in modules:
             code = source_path("sessions", name + ".py").read_text(encoding="utf-8")
             source += f"_module=types.ModuleType({name!r});sys.modules[{name!r}]=_module;exec(compile({code!r},{name!r},'exec'),_module.__dict__)\n"
         source += source_path("sessions", "catalog.py").read_text(encoding="utf-8").replace("from __future__ import annotations\n", "", 1)
-        try:
-            reply = subprocess.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPersist=no",
-                "-o", "ConnectTimeout=30", target, "python3 - " + payload],
-                input=pack_python_source(source), text=True, encoding="utf-8", errors="replace",
-                capture_output=True, timeout=45, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        except subprocess.TimeoutExpired:
-            raise HistoryReadError("ssh_timeout") from None
-        except (OSError, UnicodeError):
-            raise HistoryReadError("ssh_transport_unavailable") from None
-        if reply.returncode:
-            raise HistoryReadError(_ssh_history_failure(reply.stderr, reply.returncode)) from None
-        try:
-            result = json.loads(reply.stdout)
-        except (ValueError, TypeError, UnicodeError):
-            raise HistoryReadError("protocol_invalid") from None
-        if not isinstance(result, dict) or type(result.get("ok")) is not bool:
-            raise HistoryReadError("protocol_invalid")
-        if not result["ok"]:
-            raise HistoryReadError("remote_read_failed")
-        if not isinstance(result.get("result"), dict):
-            raise HistoryReadError("protocol_invalid")
-        return result["result"]
+        packed = pack_python_source(source)
+        # Only this fixed read-only transaction may retry once. Every attempt
+        # redoes BOTH live identity checks with the original cursor; never use
+        # this policy for input, attachment, authentication or protocol errors.
+        batched = request["op"] == "read_bound_output"
+        deadlines = (75, 45) if batched else (45,)
+        started = time.monotonic()
+        for attempt, deadline in enumerate(deadlines):
+            try:
+                reply = subprocess.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPersist=no",
+                    "-o", "ConnectTimeout=30", target, "python3 - " + payload],
+                    input=packed, text=True, encoding="utf-8", errors="replace",
+                    capture_output=True, timeout=deadline, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                failure = _ssh_history_failure(reply.stderr, reply.returncode) if reply.returncode else None
+            except subprocess.TimeoutExpired:
+                failure = "ssh_timeout"
+            except (OSError, UnicodeError):
+                failure = "ssh_transport_unavailable"
+            if failure:
+                if attempt + 1 < len(deadlines) and failure in ("ssh_timeout", "ssh_handshake_failed", "ssh_transport_unavailable"):
+                    continue
+                raise HistoryReadError(failure) from None
+            try:
+                result = response_wire.decode_reply(reply.stdout) if batched else json.loads(reply.stdout)
+            except (ValueError, TypeError, UnicodeError):
+                raise HistoryReadError("protocol_invalid") from None
+            if not isinstance(result, dict) or type(result.get("ok")) is not bool:
+                raise HistoryReadError("protocol_invalid")
+            if not result["ok"]:
+                raise HistoryReadError("remote_read_failed")
+            if not isinstance(result.get("result"), dict):
+                raise HistoryReadError("protocol_invalid")
+            value = result["result"]
+            if batched:
+                value = {**value, "read_transport": {"kind": "ssh", "attempts": attempt + 1,
+                         "elapsed_ms": round((time.monotonic() - started) * 1000),
+                         "response_bytes": len(reply.stdout.encode("utf-8")), "batched_identity_checks": True}}
+            return value
 
     def connect_host(self, host):
         self.host(host)
@@ -1418,10 +1435,59 @@ class Hub:
         return {"agent_id": agent["agent_id"], "output_binding": {"state": "bound", "session_id": session_id,
                  "method": binding["method"]}, "note": "已关联所选会话记录；没有重启或输入到工作 agent。"}
 
+    @staticmethod
+    def _bound_conversation_page(output, binding, read_transport=None):
+        pinned_note = " 当前进程未暴露确切会话 ID，这是用户已选或上次核验的会话记录；如果在 Codex 内使用 /new 或 /resume 切换过会话，请重新关联，不能把旧记录当新会话结果。" if not binding.get("live_session_verified") else ""
+        return {**output, "note": output.get("note", "") + pinned_note,
+                "output_binding": {"state": "bound", "session_id": binding["session_id"],
+                "method": binding.get("method", "process_evidence" if binding.get("live_session_verified") else "last_verified_session"),
+                "historical": bool(binding.get("historical")), "live_session_verified": bool(binding.get("live_session_verified"))},
+                **({"read_transport": read_transport} if read_transport is not None else {})}
+
+    def _remote_conversation_output(self, host, agent, view, saved, limit, cursor, after_cursor, include_tools):
+        """One SSH read transaction, with native identity checks on BOTH sides.
+
+        The screen snapshot remains independent foreground evidence. It cannot
+        authorize this read or replace the remote process/rollout checks.
+        """
+        page = self.history(host, {"op": "read_bound_output", "terminal_id": agent["terminal_id"],
+            "saved_binding": saved, "historical_allowed": agent.get("mode") in ("closed", "closing", "close_unknown") or not view.get("connected"),
+            "limit": limit, "include_tools": include_tools,
+            **({"cursor": cursor} if cursor else {}), **({"after_cursor": after_cursor} if after_cursor else {})})
+        if page.get("state") == "unavailable":
+            messages = {
+                "session_identity_changed": "读取期间 Codex 进程已变化，未返回旧会话输出；请重新读取。",
+                "output_binding_invalid": "读取期间会话关联证据冲突或失效，未返回记录；请重新核验。",
+            }
+            if page.get("reason_code") in messages:
+                raise ValueError(messages[page["reason_code"]])
+            raise HistoryReadError("remote_read_failed")
+        if page.get("state") == "unbound":
+            reason = page.get("reason", "session_identity_unavailable")
+            if not isinstance(reason, str) or not re.fullmatch(r"[a-z_]{1,80}", reason):
+                raise HistoryReadError("protocol_invalid")
+            return {"output_binding": {"state": "unbound", "reason": reason}, "messages": [], "content_complete": False,
+                    "note": "尚未准确关联 Codex 会话输出。请用当前终端 /status 的 Session ID 在 UI「关联会话」。屏幕不是完整回复。"}
+        binding, output = page.get("binding"), page.get("output")
+        if (page.get("state") != "bound" or not isinstance(binding, dict) or not isinstance(output, dict)
+                or binding.get("state") != "bound" or binding.get("terminal_id") != agent["terminal_id"]
+                or not isinstance(binding.get("session_id"), str) or not binding["session_id"]
+                or type(binding.get("live_session_verified")) is not bool or type(binding.get("historical")) is not bool
+                or binding["historical"] and binding["live_session_verified"]
+                or output.get("source") != "codex_rollout" or output.get("id") != binding["session_id"]
+                or not isinstance(output.get("messages"), list)):
+            raise HistoryReadError("protocol_invalid")
+        if self.controllers.is_controller_reference(host, binding["session_id"]):
+            raise PermissionError("管理会话输出不能作为工作 agent 读取。")
+        self.store.setting(self._output_key(host, agent["terminal_id"]), binding)
+        return self._bound_conversation_page(output, binding, page.get("read_transport"))
+
     def _conversation_output(self, host, agent, view, limit, cursor=None, after_cursor=None, include_tools=False):
         key = self._output_key(host, agent["terminal_id"])
         saved = self.store.setting(key)
         try:
+            if self.host(host)["transport"] == "ssh":
+                return self._remote_conversation_output(host, agent, view, saved, limit, cursor, after_cursor, include_tools)
             probe = self._probe_output(host, agent, view)
             if probe.get("state") == "bound" and probe.get("binding_evidence") == "held_rollout":
                 # argv's initial resume selector survives in-TUI /new /resume.
@@ -1462,11 +1528,7 @@ class Hub:
                     raise ValueError("读取期间会话关联证据冲突或失效，未返回记录；请重新核验。")
                 else:
                     binding["live_session_verified"] = False
-            pinned_note = " 当前进程未暴露确切会话 ID，这是用户已选或上次核验的会话记录；如果在 Codex 内使用 /new 或 /resume 切换过会话，请重新关联，不能把旧记录当新会话结果。" if not binding.get("live_session_verified") else ""
-            return {**output, "note": output.get("note", "") + pinned_note,
-                    "output_binding": {"state": "bound", "session_id": binding["session_id"],
-                    "method": binding.get("method", "process_evidence" if binding.get("live_session_verified") else "last_verified_session"),
-                    "historical": bool(binding.get("historical")), "live_session_verified": bool(binding.get("live_session_verified"))}}
+            return self._bound_conversation_page(output, binding)
         except Exception as error:
             reason_code, reason = _safe_output_failure(error)
             if cursor or after_cursor:
