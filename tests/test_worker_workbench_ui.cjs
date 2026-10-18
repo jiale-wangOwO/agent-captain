@@ -418,6 +418,55 @@ test('server-proven original key offers manual reconciliation after storage loss
   assert.equal(h.calls.some(c => /terminal-service\/recover|\/input|\/create|controllers/.test(c.url)), false);
 });
 
+test('connected unknown display offers exact-key verification and accepts done without reattaching', async () => {
+  const h = await harness({agents: [worker('remote', 'two', 'Spark', {recovery: {code: 'reconnect_unknown', next_action: 'reconcile_reconnect', reconcile_kind: 'live_display', reconcile_available: true, reconcile_request_keys: ['original-live-key']}})], handle: async (call, backend) => {
+    if (call.url === '/api/agents/reconcile-reconnect') return backend.reply({...backend.agents[0], operation_state: 'done', recovery: {code: 'reconnected', reconciliation_kind: 'live_display', reconciled: true, retryable: false, next_action: 'open_terminal'}});
+  }});
+  await h.context.selectAgent(h.agents[0]);
+  const session = vm.runInContext('terminalSession', h.context);
+  assert.equal(h.get('#terminal-reconcile').hidden, false); assert.equal(h.get('#terminal-reconcile').textContent, '核对原连接');
+  await h.context.reconnectTerminal();
+  assert.equal(h.get('#terminal-reconcile-dialog').open, true);
+  assert.match(h.get('#terminal-reconcile-dialog .field-help').textContent, /不重新附着.*不发送输入/);
+  assert.equal(h.calls.filter(c => c.options.method === 'POST').length, 0);
+  await h.context.reconcileSelectedReconnect();
+  assert.deepEqual(h.calls.find(c => c.url === '/api/agents/reconcile-reconnect').body, {host: 'remote', thread_id: 'two', request_key: 'original-live-key', confirm: true});
+  assert.equal(h.calls.some(c => /\/agents\/reconnect|\/input|\/create|\/close|terminal-service\/recover/.test(c.url)), false);
+  assert.equal(vm.runInContext('terminalSession', h.context), session, 'Verification preserves the existing browser terminal');
+  assert.equal(vm.runInContext('reconnectOperations.get("remote:two").acknowledged', h.context), true);
+  assert.equal(h.get('#terminal-reconcile-dialog').open, false);
+});
+
+test('connected Captain request captures its plugin endpoint and key without impersonating UI origin', async () => {
+  const h = await harness({agents: [worker('remote', 'two', 'Spark', {recovery: {code: 'reconnect_unknown', request_origin: 'plugin', next_action: 'reconcile_original_worker', reconcile_kind: 'live_display', reconcile_available: true, reconcile_request_keys: ['original-plugin-key']}})], handle: async (call, backend) => {
+    if (call.url === '/api/agents/reconcile-original-worker') return backend.reply({...backend.agents[0], operation: 'reconcile_original_worker', operation_state: 'done', recovery: {code: 'reconnected', request_origin: 'plugin', reconciliation_kind: 'live_display', reconciled: true, retryable: false, next_action: 'open_terminal'}});
+  }});
+  await h.context.selectAgent(h.agents[0]); const session = vm.runInContext('terminalSession', h.context);
+  await h.context.reconnectTerminal();
+  // The request's protocol belongs to the captured confirmation target, not a
+  // subsequent metadata refresh which might carry a different next_action.
+  h.agents[0].recovery.next_action = 'reconcile_reconnect';
+  await h.context.reconcileSelectedReconnect();
+  assert.deepEqual(h.calls.find(c => c.url === '/api/agents/reconcile-original-worker').body, {host: 'remote', thread_id: 'two', request_key: 'original-plugin-key', confirm: true});
+  assert.equal(h.calls.some(c => /\/agents\/(?:reconcile-reconnect|reconnect)|\/input|\/create|\/close/.test(c.url)), false);
+  assert.equal(vm.runInContext('reconnectOperations.get("remote:two").requestOrigin', h.context), 'plugin');
+  assert.equal(vm.runInContext('reconnectOperations.get("remote:two").requestKey', h.context), 'original-plugin-key');
+  assert.equal(vm.runInContext('terminalSession', h.context), session);
+});
+
+test('reconciled disconnected plugin request directs Captain to same key without a UI reconnect', async () => {
+  const h = await harness({agents: [worker('remote', 'two', 'Spark', {connected: false, recovery: {code: 'reconnect_unknown', request_origin: 'plugin', next_action: 'reconcile_original_worker', reconcile_available: true, reconcile_request_keys: ['owner-proof-plugin-key']}})], handle: async (call, backend) => {
+    if (call.url === '/api/agents/reconcile-original-worker') return backend.reply({...backend.agents[0], operation_state: 'blocked', recovery: {code: 'local_display_unavailable', request_origin: 'plugin', request_key: 'owner-proof-plugin-key', reconciled: true, retryable: true, next_action: 'reconnect'}});
+  }});
+  await h.context.selectAgent(h.agents[0]); await h.context.reconnectTerminal(); await h.context.reconcileSelectedReconnect();
+  await h.context.reconnectTerminal();
+  assert.equal(h.calls.filter(c => c.url === '/api/agents/reconcile-original-worker').length, 1);
+  assert.equal(h.calls.some(c => /\/agents\/(?:reconcile-reconnect|reconnect)|\/input|\/create|\/close/.test(c.url)), false);
+  assert.equal(vm.runInContext('reconnectOperations.get("remote:two").requestOrigin', h.context), 'plugin');
+  assert.equal(vm.runInContext('reconnectOperations.get("remote:two").requestKey', h.context), 'owner-proof-plugin-key');
+  assert.match(h.get('#agent-recovery-notice').textContent, /Captain.*同一插件请求键.*不会以 UI 来源重试/);
+});
+
 test('multiple server-known keys require human selection, not first-key guessing; invalid key is inert', async () => {
   const h = await harness({agents: [worker('remote', 'two', '316', {connected: false, recovery: {code: 'reconnect_unknown', reconcile_available: true, reconcile_request_keys: ['first-old-key', 'second-old-key']}})], handle: async (call, backend) => call.url === '/api/agents/reconcile-reconnect' ? backend.reply({...backend.agents[0], operation_state: 'blocked', recovery: {...localDisplayBlocked, next_action: 'reconnect'}}) : null});
   await h.context.selectAgent(h.agents[0]); h.context.openReconnectReconciliation(); assert.equal(h.get('#terminal-reconcile-key').value, ''); assert.equal(h.get('#terminal-reconcile-confirm').disabled, true);
@@ -442,9 +491,15 @@ test('selection changed during per-agent reconciliation keeps key on original wo
   assert.equal(h.calls.some(c => c.url === '/api/agents/reconnect'), false); assert.equal(vm.runInContext('reconnectOperations.get("remote:two").requestKey', h.context), 'original-key'); assert.equal(vm.runInContext('reconnectOperations.has("remote:spark")', h.context), false);
 });
 
-for (const origin of ['ui', 'plugin', undefined]) test(`known blocked ${origin || 'unspecified'} recovery only restores an exact UI-origin request key after storage loss`, async () => {
+for (const origin of ['ui', 'plugin', undefined]) test(`known blocked ${origin || 'unspecified'} recovery preserves request origin after storage loss`, async () => {
   const h = await harness({agents: [worker('remote', 'two', '316', {connected: false, recovery: {...localDisplayBlocked, request_origin: origin, request_key: 'exact-old-key'}}), worker('remote', 'spark', 'Spark', {connected: false, recovery: {...localDisplayBlocked, request_origin: 'ui', request_key: 'different-agent-key'}})]});
   await h.context.selectAgent(h.agents[0]); await h.context.reconnectTerminal(); const operation = h.calls.find(c => c.url === '/api/agents/reconnect');
+  if (origin === 'plugin') {
+    assert.equal(operation, undefined, 'A plugin retry cannot be converted into a new UI-origin attempt');
+    assert.match(h.get('#agent-recovery-notice').textContent, /Captain.*同一插件请求键.*不会以 UI 来源重试/);
+    assert.equal(h.calls.some(c => /\/input|\/create|controllers/.test(c.url)), false);
+    return;
+  }
   assert.equal(operation.body.host, 'remote'); assert.equal(operation.body.thread_id, 'two');
   if (origin === 'ui') assert.equal(operation.body.request_key, 'exact-old-key'); else assert.notEqual(operation.body.request_key, 'exact-old-key');
   assert.notEqual(operation.body.request_key, 'different-agent-key'); assert.equal(h.calls.some(c => /\/input|\/create|controllers/.test(c.url)), false);

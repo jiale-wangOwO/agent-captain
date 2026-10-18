@@ -5,6 +5,7 @@ import json
 import errno
 import hashlib
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -589,6 +590,55 @@ class TerminalClient:
         except Exception:
             raise BrokerError("原显示结束证据尚不能确认；保留未知结果，不重复附着。", "ended_display_unconfirmed") from None
 
+    def live_display_snapshot(self, terminal_id):
+        """Authenticate one existing live SSH display without probing its TUI.
+
+        Two receipts can bracket remote read-only checks. Only immutable local
+        attachment fields are included: normal output, geometry and human input
+        changes must not impersonate a replacement display or block a read.
+        """
+        try:
+            with self.lock:
+                context = self._bound_context()
+                if self._bound_check(context).get("state") != "ready":
+                    raise ValueError()
+                reply = self.request("/sessions", timeout=3)
+                records = reply.get("sessions") if isinstance(reply, dict) else None
+                if (not isinstance(records, list)
+                        or any(not isinstance(item, dict) or not isinstance(item.get("id"), str) for item in records)):
+                    raise ValueError()
+                selected = [item for item in records if item["id"] == terminal_id]
+                if len(selected) != 1:
+                    raise ValueError()
+                record = selected[0]
+                pid = record.get("pid")
+                if (record.get("transport") != "ssh" or record.get("connected") is not True
+                        or type(pid) is not int or not 0 < pid <= 2147483647):
+                    raise ValueError()
+                process = observe_process(pid)
+                birth, executable = process.get("birth"), process.get("executable")
+                if (process.get("state") != "alive" or not isinstance(birth, str)
+                        or not re.fullmatch(r"(?:win-filetime:[0-9]{1,24}|linux-start:[a-f0-9-]{36}:[0-9]{1,24})", birth)
+                        or not isinstance(executable, str) or not Path(executable).is_absolute()
+                        or Path(executable).name.lower() not in ("ssh", "ssh.exe")
+                        or record.get("display_identity") != {"birth": birth, "executable": executable}):
+                    raise ValueError()
+                if self._bound_check(context).get("state") != "ready":
+                    raise ValueError()
+                data = context["data"]
+                if self._owner_state(data) != "alive":
+                    raise ValueError()
+                return {"owner": {key: data.get(key) for key in ("pid", "version", "recovery_id")},
+                        "reference_sha256": context["reference"]["sha256"],
+                        "descriptor_sha256": context["descriptor"]["sha256"],
+                        "reference_identity": context["reference"]["identity"],
+                        "descriptor_identity": context["descriptor"]["identity"], "owner_pid_state": "alive",
+                        "session": {key: record.get(key) for key in
+                                    ("id", "host", "transport", "target", "cwd", "pid", "connected", "created_at", "display_identity")},
+                        "display_pid_state": "alive", "display_identity": {"birth": birth, "executable": executable}}
+        except Exception:
+            raise BrokerError("原显示连接证据尚不能确认；保留未知结果，不重复附着。", "live_display_unconfirmed") from None
+
     def create(self, body):
         self.ensure_started()
         return self.request("/sessions/create", body)
@@ -612,5 +662,5 @@ class TerminalClient:
     def write(self, terminal_id, action, body):
         if action not in ("input", "prompt", "resize", "close"):
             raise ValueError("Unknown terminal action")
-        timeout = PROMPT_RPC_TIMEOUT if action == "prompt" else FOREGROUND_RPC_TIMEOUT if action == "input" else 20
+        timeout = PROMPT_RPC_TIMEOUT if action == "prompt" else FOREGROUND_RPC_TIMEOUT if action in ("input", "resize") else 20
         return self.request(f"/sessions/{quote(terminal_id, safe='')}/{action}", body, timeout=timeout)

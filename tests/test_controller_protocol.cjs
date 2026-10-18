@@ -202,7 +202,7 @@ test('new Windows » marker does not turn generic node or a background agent wit
     assert.equal((await f.broker.snapshot(f.id)).agent_ready, false);
     await assert.rejects(f.broker.prompt(f.id, { text: 'not a foreground agent', request_key: 'generic-node' }));
     assert.deepEqual(f.writes, []);
-    assert.equal(f.current.directRootProof, undefined);
+    assert.equal(f.current.directRootProof, null);
   }
 });
 

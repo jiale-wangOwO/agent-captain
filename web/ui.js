@@ -19,6 +19,7 @@ if (workbenchSaved.active) { workbenchSaved.active = false; try { window.localSt
 let restoreAgentKey = agentKeyFromHash() || (typeof workbenchSaved.agent === 'string' ? workbenchSaved.agent : null), renameTarget = null;
 const renameDrafts = new Map();
 const reconnectOperations = new Map(Array.isArray(workbenchSaved.reconnect) ? workbenchSaved.reconnect.filter(entry => Array.isArray(entry) && typeof entry[0] === 'string' && typeof entry[1]?.requestKey === 'string') : []);
+const terminalResizeFlights = new Map();
 const agentRecoveryNotices = new Map();
 const pendingCreateStorageKey = 'pron-hub.pending-terminal-create.v1';
 let pendingTerminalCreate = null, pendingCreateStorageError = false, submittingTerminalCreate = false;
@@ -34,7 +35,7 @@ let displayServiceStatus = null, displayServiceCheck = null, displayServiceCheck
 let reconnectReconcileTarget = null;
 const displayServiceHelp = '本机显示服务离线不等于远端任务退出。恢复只启动显示服务，不重启 Codex、不发送输入，也不重建已经结束的本机终端。';
 function needsDisplayServiceRecovery(recovery) { return recovery?.code === 'local_display_unavailable' || recovery?.next_action === 'recover_display_service'; }
-function needsReconnectReconciliation(recovery) { return ['reconcile', 'reconcile_reconnect'].includes(recovery?.next_action); }
+function needsReconnectReconciliation(recovery) { return ['reconcile', 'reconcile_reconnect', 'reconcile_original_worker'].includes(recovery?.next_action); }
 function displayServiceUnavailable() { return displayServiceStatus?.running === false || displayServiceStatus?.available === false || displayServiceStatus?.online === false || displayServiceStatus?.healthy === false || ['offline', 'unavailable', 'stopped'].includes(displayServiceStatus?.state || displayServiceStatus?.status) || displayServiceStatus?.running !== true && needsDisplayServiceRecovery(currentAgent()?.recovery); }
 const deliveryLabels = {queued: '已排队', waiting_for_agent: '等待在终端中启动工作 agent', human_busy: '等待你完成当前终端输入', blocked: '等待处理终端中的登录或审批', not_sent: '未发送', submitting: '输入提交中', submitted: '已写入终端', delivered: '已写入终端', completed: '该轮已结束', failed: '送达失败', interrupted: '已中断', scope_revoked: '已取消 · 原工作会话不再可用', unknown: '送达结果不确定 · 请核对终端', awaiting_connection: '等待终端连接'};
 const statusLabels = {shell: 'Shell 已就绪', running: '终端运行中', connected: '终端已连接', disconnected: '显示连接已断开', not_connected: '尚未连接终端', exited: '显示连接已结束', closed: '终端已关闭', closing: '正在关闭终端', close_unknown: '关闭结果未确认', error: '连接错误', unknown: '终端状态未知'};
@@ -250,7 +251,8 @@ function renderDetail() {
   if (terminalSession?.key === selectedAgent) { terminalSession.closed = closed; if (closed || closing) { terminalSession.closing = true; cancelPendingResize(terminalSession); terminalSession.term.blur(); } }
   $('#terminal-help').textContent = '滚轮、PageUp / PageDown 只滚动翻页，不输入到 agent。Shift+Home 查看最早保留历史，Shift+End 回到最新。' + (closed ? '终端已关闭，保留的输出仍可查看。需要继续工作时请新建终端；这个已关闭的进程不会重新启动。' : closing ? '终端正在关闭或关闭结果尚未确认，输入与重连已暂停。保留的输出仍可查看，请先核对进程状态。' : disconnected ? '显示连接已断开，输入已暂停。保留画面仍可查看和复制；这不能证明远端工作进程退出。可以点击「重新连接」接回原终端，会话和进程是否仍在需重新核对。' : '选中文字后 Ctrl+C 复制，无选中时 Ctrl+C 中断。Ctrl+V 粘贴，也可用 Ctrl+Shift+C/V 或右键菜单。关闭页面会保留任务；「关闭终端」会结束其中的工作进程。');
   $('#terminal-connect').textContent = disconnected ? '重新连接' : '刷新画面';
-  $('#terminal-reconcile').hidden = !terminal || !disconnected || !canReconcileReconnect(agent);
+  $('#terminal-reconcile').hidden = !terminal || !canReconcileReconnect(agent);
+  $('#terminal-reconcile').textContent = agent.recovery?.reconcile_kind === 'live_display' ? '核对原连接' : '核验原重连…';
   $('#terminal-reconcile').disabled = closed || closing;
   const sourceId = agent.resume_thread_id || agent.source_thread_id || (terminal && /^[0-9a-f]{8}-[0-9a-f-]+$/i.test(agent.thread_id) ? agent.thread_id : null);
   const runningAgent = agent.agent_ready === true || agent.state === 'agent' || agent.status === 'agent';
@@ -322,16 +324,21 @@ async function recoverDisplayService() {
         if (terminalSession?.key === target.key && terminalSession.input) completionMessage = '显示服务已恢复。当前终端有未发送输入，已保留；请先核对草稿，再点击重新连接。';
         else {
           const operation = reconnectOperations.get(target.key);
-          if (operation && !operation.acknowledged && (needsReconnectReconciliation(agent.recovery) || needsReconnectReconciliation({next_action: operation.nextAction}))) {
-            if (result.owner_recovered !== true || !result.recovery_id) throw new Error('显示服务已在线，但没有本次恢复的核验证据。旧请求结果仍未确认，已保留原请求键；不会新建请求或重发输入。');
-            const reconciled = await request('/api/agents/reconcile-reconnect', {host: agent.host, thread_id: agent.thread_id, request_key: operation.requestKey, confirm: true});
-            const recovery = reconciled.recovery || reconciled.agent?.recovery || {};
-            if (!((recovery.retryable === true || reconciled.retryable === true) && (recovery.operation_state || reconciled.operation_state) === 'blocked')) throw new Error(recovery.message || '原请求结果仍未确认，已保留原请求键；不会自动重发。');
-            operation.nextAction = recovery.next_action; operation.recoveryCode = recovery.code; operation.operationState = recovery.operation_state; persistWorkbench();
-            if (reconciled.agent?.host === agent.host && reconciled.agent?.thread_id === agent.thread_id) Object.assign(agent, reconciled.agent);
-            agent.recovery = recovery;
+          if (agent.recovery?.request_origin === 'plugin' || operation?.requestOrigin === 'plugin') {
+            completionMessage = '显示服务已恢复。原重连属于 Captain 插件，请核验原请求，再让 Captain 沿用同一插件请求键接回；网页不会以 UI 来源重试。';
+            agentRecoveryNotices.set(target.key, completionMessage); renderAgentRecoveryNotice(agent);
+          } else {
+            if (operation && !operation.acknowledged && (needsReconnectReconciliation(agent.recovery) || needsReconnectReconciliation({next_action: operation.nextAction}))) {
+              if (result.owner_recovered !== true || !result.recovery_id) throw new Error('显示服务已在线，但没有本次恢复的核验证据。旧请求结果仍未确认，已保留原请求键；不会新建请求或重发输入。');
+              const reconciled = await request('/api/agents/reconcile-reconnect', {host: agent.host, thread_id: agent.thread_id, request_key: operation.requestKey, confirm: true});
+              const recovery = reconciled.recovery || reconciled.agent?.recovery || {};
+              if (!((recovery.retryable === true || reconciled.retryable === true) && (recovery.operation_state || reconciled.operation_state) === 'blocked')) throw new Error(recovery.message || '原请求结果仍未确认，已保留原请求键；不会自动重发。');
+              operation.nextAction = recovery.next_action; operation.recoveryCode = recovery.code; operation.operationState = recovery.operation_state; persistWorkbench();
+              if (reconciled.agent?.host === agent.host && reconciled.agent?.thread_id === agent.thread_id) Object.assign(agent, reconciled.agent);
+              agent.recovery = recovery;
+            }
+            await reconnectTerminal({afterServiceRecovery: true});
           }
-          await reconnectTerminal({afterServiceRecovery: true});
         }
       }
     }
@@ -346,14 +353,23 @@ function canReconcileReconnect(agent) { return isTerminal(agent) && !isClosedAge
 function openReconnectReconciliation() {
   const agent = currentAgent(); if (!canReconcileReconnect(agent) || reconnectReconcileTarget?.submitting) return;
   const keys = reconnectReconcileKeys(agent);
-  reconnectReconcileTarget = {key: agentKey(agent), host: agent.host, thread_id: agent.thread_id, keys, submitting: false};
+  const liveDisplay = agent.recovery?.reconcile_kind === 'live_display';
+  const pluginRequest = agent.recovery?.next_action === 'reconcile_original_worker';
+  reconnectReconcileTarget = {key: agentKey(agent), host: agent.host, thread_id: agent.thread_id, keys, liveDisplay,
+    requestOrigin: pluginRequest ? 'plugin' : 'ui', endpoint: pluginRequest ? '/api/agents/reconcile-original-worker' : '/api/agents/reconcile-reconnect', submitting: false};
   const select = $('#terminal-reconcile-key'); select.replaceChildren();
   const placeholder = node('option', '请选择要核验的原重连请求'); placeholder.value = ''; select.append(placeholder);
   for (const key of keys) { const option = node('option', key); option.value = key; select.append(option); }
   // Even a unique candidate still needs human confirmation; for multiple
   // candidates never silently pick the first or a new browser-generated key.
   const held = reconnectOperations.get(agentKey(agent)); select.value = keys.length === 1 ? keys[0] : keys.includes(held?.requestKey) ? held.requestKey : '';
-  $('#terminal-reconcile-target').textContent = `仅核验并接回：${agent.alias || agent.title || shortId(agent.thread_id)}（${state.hosts.find(host => host.id === agent.host)?.label || agent.host}）。`;
+  $('#terminal-reconcile-dialog h2').textContent = liveDisplay ? '核对原连接？' : pluginRequest ? '核验 Captain 原重连请求？' : '核验原重连结果并接回终端？';
+  $('#terminal-reconcile-dialog .field-help').textContent = liveDisplay
+    ? '后台会核验当前显示服务、原显示进程和远端原 tmux/pane 身份，确认后核销这条原重连请求。不重新附着、不新建终端、不发送输入；无法确认时保留未知状态。'
+    : pluginRequest ? '后台只核验这条 Captain 插件的原请求及原工作进程证据。核验成功后仍需 Captain 沿用同一插件请求键接回；网页不会以 UI 来源重试，不发送输入。'
+    : '只使用该工作会话已有的原请求键。后台会核验显示服务身份，以及原显示已结束或经确认恢复的服务中不存在；原显示已结束时，还需核对远端原 tmux/pane 身份未变，才允许同键接回。无法确认时保持未知。不会新建 Codex、执行 resume、发送或重发输入，也不连接其他工作会话。';
+  $('#terminal-reconcile-confirm').textContent = liveDisplay ? '核对原连接' : pluginRequest ? '核验原请求' : '核验并重连所选原终端';
+  $('#terminal-reconcile-target').textContent = `${liveDisplay ? '仅核验当前原连接' : '仅核验并接回'}：${agent.alias || agent.title || shortId(agent.thread_id)}（${state.hosts.find(host => host.id === agent.host)?.label || agent.host}）。`;
   $('#terminal-reconcile-error').hidden = true; $('#terminal-reconcile-confirm').disabled = !select.value;
   $('#terminal-reconcile-dialog').showModal();
 }
@@ -364,11 +380,27 @@ async function reconcileSelectedReconnect() {
   if (terminalSession?.key === target.key && terminalSession.input) throw new Error('当前终端有未发送输入，已保留；请先核对草稿。');
   target.submitting = true; $('#terminal-reconcile-confirm').disabled = true; $('#terminal-reconcile-error').hidden = true;
   try {
-    const result = await request('/api/agents/reconcile-reconnect', {host: target.host, thread_id: target.thread_id, request_key: requestKey, confirm: true});
+    const result = await request(target.endpoint, {host: target.host, thread_id: target.thread_id, request_key: requestKey, confirm: true});
     const recovery = result.recovery || result.agent?.recovery || {};
+    if (result.operation_state === 'done' && recovery.reconciled === true && recovery.reconciliation_kind === 'live_display' && recovery.code === 'reconnected') {
+      reconnectOperations.set(target.key, {requestKey, requestOrigin: target.requestOrigin, acknowledged: true, acknowledgedBy: 'verified_live_display', recoveryCode: recovery.code, nextAction: recovery.next_action, operationState: 'done'}); persistWorkbench();
+      const agent = registeredAgent(target.key), updated = result.agent || result;
+      if (agent) { if (updated.host === target.host && updated.thread_id === target.thread_id) Object.assign(agent, updated); agent.recovery = recovery; }
+      agentRecoveryNotices.set(target.key, recovery.message || '已核对原显示连接，未重新附着或发送输入。');
+      if (terminalSession?.key === target.key) terminalSession.forceSnapshot = true;
+      await refresh(true);
+      if (reconnectReconcileTarget === target) $('#terminal-reconcile-dialog').close();
+      return;
+    }
     if (!((recovery.retryable === true || result.retryable === true) && (recovery.operation_state || result.operation_state) === 'blocked')) throw new Error(recovery.message || '原重连结果仍未确认；不会重新附着或新建请求。');
-    reconnectOperations.set(target.key, {requestKey, acknowledged: false, recoveryCode: recovery.code, nextAction: recovery.next_action, operationState: 'blocked'}); persistWorkbench();
+    reconnectOperations.set(target.key, {requestKey, requestOrigin: target.requestOrigin, acknowledged: false, recoveryCode: recovery.code, nextAction: recovery.next_action, operationState: 'blocked'}); persistWorkbench();
     const agent = registeredAgent(target.key); if (agent) agent.recovery = recovery;
+    if (target.requestOrigin === 'plugin') {
+      agentRecoveryNotices.set(target.key, '原 Captain 插件请求已核验。请让 Captain 沿用同一插件请求键接回；网页不会以 UI 来源重试，也不会发送输入。');
+      if (selectedAgent === target.key) renderAgentRecoveryNotice(agent);
+      if (reconnectReconcileTarget === target) $('#terminal-reconcile-dialog').close();
+      return;
+    }
     if (selectedAgent === target.key) { await reconnectTerminal(); if (reconnectReconcileTarget === target) $('#terminal-reconcile-dialog').close(); }
     else toast('原请求核验结果已保留在对应工作会话；选择已改变，未执行重连。');
   } catch (error) { if (reconnectReconcileTarget === target) { $('#terminal-reconcile-error').textContent = error.message; $('#terminal-reconcile-error').hidden = false; } }
@@ -766,6 +798,7 @@ function flushTerminalInput(session) {
 function cancelPendingResize(session) {
   if (!session.resizePending) return;
   clearTimeout(session.resizeTimer); session.resizeTimer = null; session.resizePending = false; session.targetSize = '';
+  session.resizeDesired = null;
   session.resizeGeneration = (session.resizeGeneration || 0) + 1;
   session.frameGeneration = (session.frameGeneration || 0) + 1;
   session.forceSnapshot = true;
@@ -789,25 +822,55 @@ function scheduleResize(session, cols, rows) {
   const generation = session.resizeGeneration = (session.resizeGeneration || 0) + 1;
   session.frameGeneration = (session.frameGeneration || 0) + 1;
   session.resizePending = true;
+  session.resizeDesired = {cols, rows, size, generation};
+  if (!session.resizeInFlight && !session.resizeWaitingForFlight) queueTerminalResize(session);
+}
+function queueTerminalResize(session) {
   clearTimeout(session.resizeTimer); session.resizeTimer = setTimeout(async () => {
-    if (session.disposed || !isTerminalDisplayCurrent(session) || generation !== session.resizeGeneration) return;
     session.resizeTimer = null;
+    if (session.disposed || !isTerminalDisplayCurrent(session) || !session.resizeDesired) return;
     if (window.PronTerminalHistory?.isActive?.(session)) { cancelPendingResize(session); return; }
     if (session.closing || session.closed || !sessionConnected(session)) { cancelPendingResize(session); return; }
+    // A disposed/reopened display can still have a request in flight for the
+    // same registered terminal. Wait for it too; local generations cannot
+    // cancel a resize already queued in the broker.
+    const flightKey = `${terminalApiPath(session, 'resize')}:${JSON.stringify(terminalApiIdentity(session))}`;
+    const existing = terminalResizeFlights.get(flightKey);
+    if (existing) {
+      session.resizeWaitingForFlight = existing;
+      existing.then(() => {
+        if (session.resizeWaitingForFlight !== existing) return;
+        session.resizeWaitingForFlight = null;
+        if (!session.disposed && isTerminalDisplayCurrent(session) && session.resizeDesired && !session.closing && !session.closed && sessionConnected(session)) queueTerminalResize(session);
+      });
+      return;
+    }
+    const {cols, rows, size, generation} = session.resizeDesired;
+    const recoveringGeometry = session.geometryUnknown === true;
+    let finishFlight;
+    const flight = new Promise(resolve => { finishFlight = resolve; });
+    terminalResizeFlights.set(flightKey, flight); session.resizeInFlight = true;
     if (recoveringGeometry) session.resizeRecoveryAttempts = (session.resizeRecoveryAttempts || 0) + 1;
     try {
       await request(terminalApiPath(session, 'resize'), {...terminalApiIdentity(session), cols, rows});
       if (session.disposed || !isTerminalDisplayCurrent(session) || generation !== session.resizeGeneration) return;
-      session.size = size; session.resizePending = false; session.resizeError = '';
+      session.size = size; session.resizePending = false; session.resizeDesired = null; session.resizeError = '';
       session.geometryUnknown = false; session.resizeRecoveryAttempts = 0; session.resizeRecoveryRetryAt = 0;
       session.frameGeneration = (session.frameGeneration || 0) + 1;
       session.forceSnapshot = true; renderTerminalErrors(session);
     } catch (error) {
       if (session.disposed || !isTerminalDisplayCurrent(session) || generation !== session.resizeGeneration) return;
-      session.resizePending = false; session.targetSize = ''; session.forceSnapshot = true;
+      session.resizePending = false; session.resizeDesired = null; session.targetSize = ''; session.forceSnapshot = true;
       if (recoveringGeometry) session.resizeRecoveryRetryAt = Date.now() + Math.min(30000, 2000 * 2 ** (session.resizeRecoveryAttempts - 1));
       if (isDisconnectedError(error)) { updateDisplayConnection(session, false); renderTerminalErrors(session); return; }
       session.resizeError = `调整终端尺寸失败：${error.message}`; renderTerminalErrors(session);
+    } finally {
+      session.resizeInFlight = false;
+      if (terminalResizeFlights.get(flightKey) === flight) terminalResizeFlights.delete(flightKey);
+      finishFlight();
+      // While this request ran, retain only the final requested dimensions.
+      // Obsolete ACKs cannot clear that pending generation's geometry fence.
+      if (!session.disposed && isTerminalDisplayCurrent(session) && session.resizeDesired && !session.closing && !session.closed && sessionConnected(session)) queueTerminalResize(session);
     }
   }, 140);
 }
@@ -859,8 +922,12 @@ async function pollTerminal(session) {
 }
 async function reconnectTerminal(options = {}) {
   const agent = currentAgent(); if (!isTerminal(agent)) return;
+  if (agent.recovery?.code === 'reconnect_unknown' && canReconcileReconnect(agent)) { openReconnectReconciliation(); return; }
   if (!displayDisconnected(agent)) { disposeTerminal(); await openTerminal(agent); return; }
   const key = agentKey(agent), previous = reconnectOperations.get(key);
+  if ((agent.recovery?.request_origin === 'plugin' && agent.recovery?.retryable === true) || (previous?.requestOrigin === 'plugin' && !previous.acknowledged)) {
+    agentRecoveryNotices.set(key, '原重连属于 Captain 插件，请让 Captain 沿用同一插件请求键继续接回；网页不会以 UI 来源重试。'); renderAgentRecoveryNotice(agent); return;
+  }
   const unknown = ['unknown', 'reconnect_unknown', 'delivery_unknown'].includes(agent.recovery?.code);
   if (unknown && canReconcileReconnect(agent)) { openReconnectReconciliation(); return; }
   if (unknown && (!previous || previous.acknowledged && previous.acknowledgedBy !== 'connected_output')) {

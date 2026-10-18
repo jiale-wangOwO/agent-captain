@@ -132,6 +132,15 @@ function sameIdentity(one, two) {
   return !!one && !!two && one.kind === two.kind && one.pid === two.pid && one.startTicks === two.startTicks && one.pgid === two.pgid;
 }
 
+function validDisplayIdentity(identity, platform) {
+  const paths = platform === 'win32' ? path.win32 : path.posix;
+  return identity && Object.keys(identity).sort().join(',') === 'birth,executable'
+    && typeof identity.birth === 'string' && /^(win-filetime:[0-9]{1,24}|linux-start:[a-f0-9-]{36}:[0-9]{1,24})$/.test(identity.birth)
+    && typeof identity.executable === 'string' && identity.executable.length > 0 && identity.executable.length <= 4096
+    && !/[\x00-\x1f]/.test(identity.executable) && paths.isAbsolute(identity.executable)
+    && ['ssh', 'ssh.exe'].includes(paths.basename(identity.executable).toLowerCase());
+}
+
 function nativeRootKind(program, platform) {
   if (typeof program !== 'string') return null;
   const name = (platform === 'win32' ? path.win32 : path.posix).basename(program);
@@ -197,8 +206,12 @@ function spawnSshPipe(file, args, options) {
     async resize(cols, rows) {
       let result;
       try {
-        result = await commandResult(file, ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', options.target,
-          remoteBridgeCommand('resize', { sessionId: options.sessionId, bridgeId: options.bridgeId, cols, rows })], 18000);
+        // Resizing uses its own authenticated SSH connection, just like the
+        // foreground probe. Do not time it out before a slow relay can even
+        // finish authentication; a missing/mismatched ACK still fences input.
+        result = await commandResult(file, ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20',
+          '-o', 'ControlMaster=no', '-o', 'ControlPersist=no', '-o', 'ControlPath=none', options.target,
+          remoteBridgeCommand('resize', { sessionId: options.sessionId, bridgeId: options.bridgeId, cols, rows })], 45000);
       } catch (error) { result = { stdout: typeof error.stdout === 'string' ? error.stdout : '' }; }
       const marker = 'CEO_HUB_PTY_RESULT=';
       const line = String(result.stdout || '').split(/\r?\n/).reverse().find(line => line.startsWith(marker));
@@ -228,6 +241,7 @@ class TerminalBroker {
     this.runCommand = options.runCommand || commandResult;
     this.resolveProgramPath = options.resolveProgramPath || fs.realpathSync;
     this.readRootMetadata = options.readRootMetadata || linuxRootMetadata;
+    this.queryDisplayIdentity = options.queryDisplayIdentity || (pid => identityQuery(['observe', String(pid)]));
     this.maxOutput = options.maxOutput || MAX_OUTPUT;
   }
 
@@ -237,6 +251,9 @@ class TerminalBroker {
       id: session.id, host: session.host, transport: session.transport,
       target: session.target, title: session.title, cwd: session.cwd,
       connected: session.connected, pid: session.pty?.pid || null,
+      ...(session.transport === 'ssh' ? { display_identity: session.displayIdentityPid === session.pty?.pid
+        && Number.isSafeInteger(session.displayIdentityPid) && session.displayIdentityPid > 0
+        && validDisplayIdentity(session.displayIdentity, this.platform) ? { ...session.displayIdentity } : null } : {}),
       cols: session.cols, rows: session.rows, state: session.connected ? session.geometryUnknown ? 'unknown' : session.state : 'exited',
       command: session.command, current_seq: session.seq, created_at: session.createdAt,
       agent_ready: session.connected && session.state === 'agent' && !blocked,
@@ -275,6 +292,7 @@ class TerminalBroker {
       throw new ApiError(409, 'session_conflict', 'Session belongs to another machine');
     }
     if (session?.connected) return this.describe(session);
+    if (session?.attaching) throw new ApiError(409, 'session_attaching', 'The original terminal attachment is still starting');
     if (session && transport === 'local') throw new ApiError(409, 'session_exited', 'Local terminal has exited; create a new terminal');
     const cols = boundedInteger(body.cols, session?.cols || 100, 20, 500);
     const rows = boundedInteger(body.rows, session?.rows || 30, 5, 200);
@@ -294,10 +312,20 @@ class TerminalBroker {
       // The broker answers even when no browser is open. These are terminal
       // protocol replies, not human keystrokes and must not take a typing lease.
       terminal.onData(data => {
-        if (session.connected) this.serializeWrite(session, () => { if (session.connected) session.pty.write(data); }).catch(() => {});
+        const child = session.pty, generation = session.attachmentGeneration;
+        if (session.connected) this.serializeWrite(session, () => {
+          if (session.connected && session.pty === child && session.attachmentGeneration === generation) child.write(data);
+        }).catch(() => {});
       });
       this.sessions.set(id, session);
     }
+    // A registry row may outlive its SSH attachment. Invalidate all observations
+    // and callbacks from the old child before waiting for a replacement child.
+    const attachmentGeneration = session.attachmentGeneration = (session.attachmentGeneration || 0) + 1;
+    session.cwd = cwd;
+    session.state = 'unknown'; session.command = ''; session.agentIdentity = null;
+    session.lastProbe = 0; session.probing = null; session.directRootProof = null;
+    session.displayIdentity = null; session.displayIdentityPid = null;
     let file, args, localCwd, bridgeId;
     if (transport === 'local') {
       if (!fs.statSync(cwd, { throwIfNoEntry: false })?.isDirectory()) {
@@ -318,7 +346,11 @@ class TerminalBroker {
       args = ['-tt', '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=3', target, remote];
       localCwd = os.homedir();
     }
+    session.attaching = true;
     try {
+      // Drain already accepted frames while the previous child is disconnected.
+      // Late DA/DSR parsing must never reply into the replacement attachment.
+      await this.flushScreen(session);
       const spawn = transport === 'ssh' ? this.spawnRemote : this.spawn;
       const child = spawn(file, args, {
         name: 'xterm-256color', cols, rows, cwd: localCwd, env: { ...process.env, TERM: 'xterm-256color' },
@@ -326,17 +358,30 @@ class TerminalBroker {
         target, sessionId: id, bridgeId,
       });
       if (child.ready) await child.ready;
+      if (transport === 'ssh' && Number.isSafeInteger(child.pid) && child.pid > 0 && child.pid <= 2147483647) {
+        try {
+          const observed = this.queryDisplayIdentity(child.pid);
+          const identity = { birth: observed?.birth, executable: observed?.executable };
+          if (observed?.state === 'alive' && validDisplayIdentity(identity, this.platform)) {
+            session.displayIdentity = Object.freeze(identity);
+            session.displayIdentityPid = child.pid;
+          }
+        } catch { /* The display remains usable without a strict birth proof. */ }
+      }
       session.pty = child;
       session.connected = true;
       session.geometryUnknown = false;
       session.exitCode = null;
       session.cols = cols; session.rows = rows;
-      child.onData(data => this.acceptOutput(session, data));
-      child.onExit(({ exitCode }) => { session.connected = false; session.exitCode = exitCode; session.state = 'exited'; });
+      const isCurrentChild = () => session.attachmentGeneration === attachmentGeneration && session.pty === child;
+      child.onData(data => { if (isCurrentChild() && session.connected) this.acceptOutput(session, data); });
+      child.onExit(({ exitCode }) => {
+        if (isCurrentChild()) { session.connected = false; session.exitCode = exitCode; session.state = 'exited'; }
+      });
     } catch (error) {
       session.connected = false;
       throw new ApiError(500, 'spawn_failed', `Could not start ${transport} terminal: ${error.message}`);
-    }
+    } finally { session.attaching = false; }
     return this.describe(session);
   }
 
@@ -521,18 +566,21 @@ class TerminalBroker {
 
   async refreshForeground(session, force = false) {
     if (!session.connected || (!force && Date.now() - session.lastProbe < 1500)) return;
-    if (session.probing) { await session.probing; if (!force) return; }
-    session.probing = (async () => {
+    const child = session.pty, generation = session.attachmentGeneration;
+    const isCurrentChild = () => session.connected && session.pty === child && session.attachmentGeneration === generation;
+    if (session.probing) { await session.probing; if (!force || !isCurrentChild()) return; }
+    const probing = (async () => {
       try {
         const result = await this.probe(session);
-        if (session.connected) {
+        if (isCurrentChild()) {
           session.command = result.command || ''; session.state = result.state || classifyCommand(session.command);
           session.agentIdentity = verifiedIdentity(result);
         }
-      } catch { if (session.connected) { session.state = 'unknown'; session.agentIdentity = null; } }
-      finally { session.lastProbe = Date.now(); }
+      } catch { if (isCurrentChild()) { session.state = 'unknown'; session.agentIdentity = null; } }
+      finally { if (isCurrentChild()) session.lastProbe = Date.now(); }
     })();
-    try { await session.probing; } finally { session.probing = null; }
+    session.probing = probing;
+    try { await probing; } finally { if (session.probing === probing) session.probing = null; }
   }
 
   async probeForeground(session) {

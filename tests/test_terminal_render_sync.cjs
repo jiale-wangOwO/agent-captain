@@ -102,15 +102,60 @@ test('output response fetched before a resize generation is never replayed after
   assert.equal(h.fixture.term.writes.length, 0); assert.equal(h.fixture.seq, 9); assert.equal(h.fixture.forceSnapshot, true);
 });
 
-test('out-of-order older resize ACK cannot overwrite the latest size and generation', async () => {
+test('an in-flight resize coalesces every later change into only the final dimensions', async () => {
   const h = harness(), older = deferred(), latest = deferred();
   h.route((url, options, fallback) => url === '/api/terminals/resize' ? (JSON.parse(options.body).cols === 90 ? older.promise : latest.promise) : fallback(url));
   h.context.scheduleResize(h.fixture, 90, 40); const first = h.runTimer(140);
-  h.context.scheduleResize(h.fixture, 80, 35); const second = h.runTimer(140);
-  latest.resolve(reply({accepted: true})); await second;
-  const generation = h.fixture.frameGeneration;
+  h.context.scheduleResize(h.fixture, 85, 37);
+  h.context.scheduleResize(h.fixture, 80, 35);
+  assert.equal(h.network.filter(call => call.url === '/api/terminals/resize').length, 1);
+  assert.equal([...h.timers.values()].some(timer => timer.delay === 140), false, 'Later sizes cannot enqueue another HTTP request while one is in flight');
   older.resolve(reply({accepted: true})); await first;
-  assert.equal(h.fixture.size, '80:35'); assert.equal(h.fixture.frameGeneration, generation); assert.equal(h.fixture.resizePending, false);
+  assert.equal(h.fixture.size, '73:34', 'An obsolete ACK cannot confirm the newest dimensions');
+  assert.equal(h.fixture.resizePending, true);
+  const second = h.runTimer(140);
+  latest.resolve(reply({accepted: true})); await second;
+  assert.deepEqual(h.network.filter(call => call.url === '/api/terminals/resize').map(call => JSON.parse(call.options.body).cols), [90, 80]);
+  assert.equal(h.fixture.size, '80:35'); assert.equal(h.fixture.resizePending, false);
+});
+
+test('a failed obsolete resize sends only the final pending size and preserves its geometry fence', async () => {
+  const h = harness(), firstReply = deferred(); h.fixture.geometryUnknown = true;
+  h.route((url, options, fallback) => url === '/api/terminals/resize' && JSON.parse(options.body).cols === 90 ? firstReply.promise : fallback(url));
+  h.context.scheduleResize(h.fixture, 90, 40); const first = h.runTimer(140);
+  h.context.scheduleResize(h.fixture, 85, 37); h.context.scheduleResize(h.fixture, 80, 35);
+  firstReply.resolve({ok: false, status: 409, json: async () => ({error: 'old resize was not confirmed'})}); await first;
+  assert.equal(h.fixture.resizePending, true); assert.equal(h.fixture.geometryUnknown, true);
+  assert.equal(h.network.filter(call => call.url === '/api/terminals/resize').length, 1);
+  await h.runTimer(140);
+  assert.deepEqual(h.network.filter(call => call.url === '/api/terminals/resize').map(call => JSON.parse(call.options.body).cols), [90, 80]);
+  assert.equal(h.fixture.size, '80:35'); assert.equal(h.fixture.geometryUnknown, false);
+});
+
+test('reopening the same registered terminal waits for the old display resize before starting another', async () => {
+  const h = harness(), firstReply = deferred();
+  h.route((url, options, fallback) => url === '/api/terminals/resize' && JSON.parse(options.body).cols === 90 ? firstReply.promise : fallback(url));
+  h.context.scheduleResize(h.fixture, 90, 40); const first = h.runTimer(140); h.fixture.disposed = true;
+  const reopened = {...h.fixture, disposed: false, resizeInFlight: false, resizePending: false, resizeDesired: null, targetSize: '', resizeWaitingForFlight: null};
+  h.context.reopened = reopened; vm.runInContext('terminalSession=reopened;', h.context);
+  h.context.scheduleResize(reopened, 80, 35); await h.runTimer(140);
+  h.context.scheduleResize(reopened, 85, 37);
+  assert.equal(h.network.filter(call => call.url === '/api/terminals/resize').length, 1);
+  firstReply.resolve(reply({accepted: true})); await first;
+  await h.runTimer(140);
+  assert.deepEqual(h.network.filter(call => call.url === '/api/terminals/resize').map(call => JSON.parse(call.options.body).cols), [90, 85]);
+  assert.equal(reopened.size, '85:37'); assert.equal(h.fixture.size, '73:34');
+});
+
+test('closing an in-flight resize discards the later desired size without another request', async () => {
+  const h = harness(), ack = deferred();
+  h.route((url, options, fallback) => url === '/api/terminals/resize' ? ack.promise : fallback(url));
+  h.context.scheduleResize(h.fixture, 90, 40); const pending = h.runTimer(140);
+  h.context.scheduleResize(h.fixture, 80, 35); h.fixture.closing = true; h.context.cancelPendingResize(h.fixture);
+  ack.resolve(reply({accepted: true})); await pending;
+  assert.equal(h.network.filter(call => call.url === '/api/terminals/resize').length, 1);
+  assert.equal([...h.timers.values()].some(timer => timer.delay === 140), false);
+  assert.equal(h.fixture.resizePending, false); assert.equal(h.fixture.resizeDesired, null);
 });
 
 test('periodic incremental frames do not reset the screen or force new snapshots', async () => {

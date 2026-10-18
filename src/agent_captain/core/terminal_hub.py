@@ -269,11 +269,14 @@ class Hub:
             recovery = dict(recovery)
             if recovery.get("code") == "reconnect_unknown":
                 proof = self.store.setting("terminal-owner-recovery-proof") or {}
-                fingerprint = self._reconnect_fingerprint(host, thread_id, row.get("terminal_id"), "ui", None)
+                proof_origin = recovery.get("request_origin") if recovery.get("request_origin") in ("ui", "plugin") else "ui"
+                fingerprint = self._reconnect_fingerprint(host, thread_id, row.get("terminal_id"), proof_origin, None)
                 keys = [key.removeprefix("agent-reconnect:") for key, value in proof.get("operations", {}).items()
                         if key.startswith("agent-reconnect:") and value == fingerprint]
                 if keys:
-                    recovery.update(reconcile_available=True, next_action="reconcile_reconnect", reconcile_request_keys=keys)
+                    recovery.update(reconcile_available=True,
+                                    next_action="reconcile_reconnect" if proof_origin == "ui" else "reconcile_original_worker",
+                                    reconcile_request_keys=keys)
                 elif (recovery.get("request_origin") == "ui" and isinstance(recovery.get("request_key"), str)
                       and runtime.get("id") == row.get("terminal_id") and runtime.get("host") == host
                       and runtime.get("transport") == "ssh" and runtime.get("target") == self.host(host).get("target")
@@ -290,6 +293,35 @@ class Hub:
                         pass
                     else:
                         recovery.update(reconcile_available=True, next_action="reconcile_reconnect",
+                                        reconcile_request_keys=[recovery["request_key"]])
+                elif (recovery.get("request_origin") in ("ui", "plugin") and isinstance(recovery.get("request_key"), str)
+                      and runtime.get("id") == row.get("terminal_id") and runtime.get("host") == host
+                      and runtime.get("transport") == "ssh" and runtime.get("target") == self.host(host).get("target")
+                      and runtime.get("connected") is True and runtime.get("state") != "exited"
+                      and isinstance(runtime.get("display_identity"), dict)):
+                    # Offer an explicit read-only check for this exact pending
+                    # UI result, never silently turn a live screen into proof.
+                    try:
+                        self._existing_display_identity(runtime, row.get("terminal_id"))
+                        self._request_key(recovery["request_key"])
+                        with self.store.lock:
+                            operation = self.store.db.execute("select fingerprint,state,result from operations where request_key=?",
+                                ("agent-reconnect:" + recovery["request_key"],)).fetchone()
+                        previous = json.loads(operation["result"]) if operation and operation["result"] else {}
+                        stamp = previous.get("owner_stamp", {})
+                        candidate_fingerprint = self._reconnect_fingerprint(host, thread_id, row.get("terminal_id"), recovery["request_origin"], None)
+                        if (not operation or operation["fingerprint"] != candidate_fingerprint or operation["state"] != "done"
+                                or previous.get("state") != "unknown" or previous.get("recovery") != recovery
+                                or type(stamp.get("pid")) is not int or stamp["pid"] <= 0
+                                or not isinstance(stamp.get("recovery_id"), str)
+                                or not re.fullmatch(r"[a-f0-9]{32}", stamp["recovery_id"])):
+                            raise ValueError()
+                    except (ValueError, TypeError, AttributeError):
+                        pass
+                    else:
+                        recovery.update(reconcile_available=True,
+                                        next_action="reconcile_reconnect" if recovery["request_origin"] == "ui" else "reconcile_original_worker",
+                                        reconcile_kind="live_display",
                                         reconcile_request_keys=[recovery["request_key"]])
             result["recovery"] = recovery
         result["management"] = self._management(result)
@@ -403,7 +435,8 @@ class Hub:
                 try:
                     previous = json.loads(row["result"])
                     if previous.get("state") == "unknown" and previous.get("recovery", {}).get("code") == "reconnect_unknown":
-                        unknowns[row["request_key"]] = {"fingerprint": row["fingerprint"], "owner_stamp": previous.get("owner_stamp")}
+                        unknowns[row["request_key"]] = {"fingerprint": row["fingerprint"], "owner_stamp": previous.get("owner_stamp"),
+                                                        "recovery": previous.get("recovery")}
                 except (ValueError, TypeError, AttributeError):
                     continue
             try:
@@ -421,13 +454,17 @@ class Hub:
                     recovery = self.store.setting(self._recovery_key(agent["host"], agent["thread_id"])) or {}
                     if recovery.get("code") != "reconnect_unknown":
                         continue
-                    fingerprint = self._reconnect_fingerprint(agent["host"], agent["thread_id"], agent.get("terminal_id"), "ui", None)
+                    origin = recovery.get("request_origin") if recovery.get("request_origin") in ("ui", "plugin") else "ui"
+                    fingerprint = self._reconnect_fingerprint(agent["host"], agent["thread_id"], agent.get("terminal_id"), origin, None)
                     matches = [key for key, item in unknowns.items() if item["fingerprint"] == fingerprint]
                     selected = "agent-reconnect:" + recovery["request_key"] if isinstance(recovery.get("request_key"), str) else matches[0] if len(matches) == 1 else None
-                    if selected in matches and unknowns[selected]["owner_stamp"] == old_stamp:
+                    if (selected in matches and unknowns[selected]["owner_stamp"] == old_stamp
+                            and (origin != "plugin" or unknowns[selected]["recovery"] == recovery)):
                         candidates[selected] = fingerprint
             if result["running"] and result["owner_recovered"] and result["started_empty"] and result.get("previous_pid") and result.get("pid") and result.get("recovery_id") and result["previous_pid"] != result["pid"]:
-                self.store.setting("terminal-owner-recovery-proof", {"pid": result["pid"], "previous_pid": result["previous_pid"], "recovery_id": result["recovery_id"], "operations": candidates})
+                self.store.setting("terminal-owner-recovery-proof", {"pid": result["pid"], "previous_pid": result["previous_pid"],
+                                   "previous_recovery_id": result.get("previous_recovery_id"),
+                                   "recovery_id": result["recovery_id"], "operations": candidates})
             return result
 
     def reconcile_reconnect(self, host, thread_id, request_key, confirm=False):
@@ -456,6 +493,15 @@ class Hub:
             if row["state"] != "done":
                 raise ValueError("原重连可能仍在执行；不能核销或重放。")
             previous = json.loads(row["result"])
+            if (previous.get("state") == "done" and previous.get("recovery", {}).get("reconciled") is True
+                    and previous["recovery"].get("reconciliation_kind") == "live_display"
+                    and previous["recovery"].get("request_key") == request_key
+                    and previous["recovery"].get("request_origin") == "ui"
+                    and self.store.setting(self._recovery_key(host, thread_id)) == previous["recovery"]):
+                result = agent | {"operation": "reconcile_reconnect", "operation_id": request_key,
+                                  "operation_state": "done", "recovery": previous["recovery"]}
+                result["management"] = self._management(result)
+                return result
             if (previous.get("state") == "blocked" and previous.get("recovery", {}).get("code") == "local_display_unavailable"
                     and previous["recovery"].get("reconciled") is True):
                 result = agent | {"operation": "reconcile_reconnect", "operation_id": request_key,
@@ -466,6 +512,8 @@ class Hub:
             owner = self.terminal_service_status()
             if previous.get("state") != "unknown" or previous.get("recovery", {}).get("code") != "reconnect_unknown":
                 raise ValueError("原重连不是可核对的未知结果；不解锁或重放。")
+            if agent.get("connected"):
+                return self._reconcile_live_display(agent, request_key, operation, fingerprint, row, previous)
             if (proof.get("operations", {}).get(operation) != fingerprint
                     or not owner["running"] or owner.get("pid") != proof.get("pid")
                     or not proof.get("recovery_id") or owner.get("recovery_id") != proof.get("recovery_id")):
@@ -524,6 +572,104 @@ class Hub:
             return identity
         except (ValueError, TypeError, UnicodeError, KeyError):
             raise ValueError("原显示身份凭据无效；保留未知结果。") from None
+
+    def _reconcile_live_display(self, agent, request_key, operation, fingerprint, row, previous, origin="ui"):
+        """Resolve an uncertain attachment by proving its existing live display.
+
+        This only records the outcome of the original UI/legacy plugin request. It never
+        enables a retry, attaches a display, or writes terminal input.
+        """
+        host, thread_id, terminal_id = agent["host"], agent["thread_id"], agent.get("terminal_id")
+        config = dict(self.host(host))
+        recovery_key = self._recovery_key(host, thread_id)
+        with self.store.lock:
+            enrolled = self.store.agent(host, thread_id)
+            saved = self.store.db.execute("select value from settings where key=?", (recovery_key,)).fetchone()
+        selected = json.loads(saved["value"]) if saved else None
+        stamp = previous.get("owner_stamp")
+        if (origin not in ("ui", "plugin") or not enrolled or enrolled.get("mode") != "terminal"
+                or not isinstance(terminal_id, str) or not re.fullmatch(r"ceohub-[a-f0-9]{16,48}", terminal_id)
+                or enrolled.get("terminal_id") != terminal_id
+                or config.get("transport") != "ssh" or not isinstance(selected, dict)
+                or selected != previous.get("recovery") or selected.get("code") != "reconnect_unknown"
+                or selected.get("request_key") != request_key or selected.get("request_origin") != origin
+                or not isinstance(stamp, dict) or set(stamp) != {"pid", "recovery_id"}
+                or type(stamp.get("pid")) is not int or stamp["pid"] <= 0
+                or not isinstance(stamp.get("recovery_id"), str) or not re.fullmatch(r"[a-f0-9]{32}", stamp["recovery_id"])):
+            raise ValueError("只能核对当前原请求及其原显示服务身份；保留未知结果。")
+
+        def snapshot():
+            try:
+                value = self.terminals.live_display_snapshot(terminal_id)
+            except Exception:
+                raise ValueError("原显示连接的认证证据尚不能确认；保留未知结果。") from None
+            record = value.get("session") if isinstance(value, dict) else None
+            owner = value.get("owner") if isinstance(value, dict) else None
+            process = value.get("display_identity") if isinstance(value, dict) else None
+            if (not isinstance(record, dict) or not isinstance(owner, dict) or not isinstance(process, dict)
+                    or type(owner.get("pid")) is not int or not 0 < owner["pid"] <= 2147483647
+                    or owner.get("version") != "0.3.0"
+                    or {key: owner.get(key) for key in ("pid", "recovery_id")} != stamp
+                    or any(not isinstance(value.get(key), str) or not re.fullmatch(r"[a-f0-9]{64}", value[key])
+                           for key in ("reference_sha256", "descriptor_sha256"))
+                    or any(not isinstance(value.get(key), (list, tuple)) or len(value[key]) != 5
+                           or any(type(part) is not int for part in value[key]) for key in ("reference_identity", "descriptor_identity"))
+                    or value.get("owner_pid_state") != "alive" or value.get("display_pid_state") != "alive"
+                    or set(process) != {"birth", "executable"} or not isinstance(process.get("birth"), str)
+                    or not re.fullmatch(r"(?:win-filetime:[0-9]{1,24}|linux-start:[a-f0-9-]{36}:[0-9]{1,24})", process["birth"])
+                    or not isinstance(process.get("executable"), str) or not Path(process["executable"]).is_absolute()
+                    or Path(process["executable"]).name.lower() not in ("ssh", "ssh.exe")
+                    or record.get("id") != terminal_id or record.get("host") != host or record.get("transport") != "ssh"
+                    or record.get("target") != config.get("target") or record.get("connected") is not True
+                    or record.get("display_identity") != process
+                    or type(record.get("pid")) is not int or not 0 < record["pid"] <= 2147483647):
+                raise ValueError("原显示、SSH 进程或服务身份不一致；保留未知结果。")
+            self._existing_display_identity(record, terminal_id)
+            return value
+
+        before = snapshot()
+        identity = self._existing_display_identity(before["session"], terminal_id)
+        for _ in range(2):
+            try:
+                remote = self._probe_remote_terminal(host, terminal_id)
+            except Exception:
+                raise ValueError("远端原 tmux/pane 核验暂不可用；保留未知结果。") from None
+            if (not isinstance(remote, dict) or remote.get("ok") is not True
+                    or remote.get("exists") is not True or remote.get("identity") != identity):
+                raise ValueError("远端原 tmux/pane 身份不能确认一致；保留未知结果。")
+        after = snapshot()
+        if before != after or dict(self.host(host)) != config:
+            raise ValueError("核对期间 owner、SSH 显示或机器配置已变化；保留未知结果。")
+        recovery = {"code": "reconnected", "next_action": "open_terminal", "retryable": False,
+                    "reconciled": True, "reconciliation_kind": "live_display", "request_key": request_key, "request_origin": origin,
+                    "message": "已核验原重连的现有显示连接和同一远端 tmux/pane；仅记录核验结果，未重新附着或发送输入。"}
+        if origin == "plugin":
+            recovery.update(maintenance_actor="ui", original_origin="plugin")
+        audit_key = "agent-reconnect-reconciliation:" + hashlib.sha256(operation.encode()).hexdigest()
+        with self.store.lock, self.store.db:
+            if self.store.agent(host, thread_id) != enrolled:
+                raise ValueError("原工作终端登记在核对期间已变化；保留未知结果。")
+            changed = self.store.db.execute("update operations set result=? where request_key=? and fingerprint=? and state='done' and result=?",
+                (json.dumps({"state": "done", "recovery": recovery, "owner_stamp": stamp}, ensure_ascii=False),
+                 operation, fingerprint, row["result"])).rowcount
+            selected_changed = self.store.db.execute("update settings set value=? where key=? and value=?",
+                (json.dumps(recovery), recovery_key, saved["value"])).rowcount
+            if changed != 1 or selected_changed != 1:
+                raise ValueError("原请求或当前核对记录已变化；保留未知结果，不重放。")
+            old_audit = self.store.db.execute("select value from settings where key=?", (audit_key,)).fetchone()
+            audits = json.loads(old_audit["value"]) if old_audit else []
+            if not isinstance(audits, list):
+                raise ValueError("原核对审计不能确认；保留未知结果。")
+            audits.append({"kind": "live_display", "at": time.time(), "request_key": request_key,
+                           "maintenance_actor": "ui", "original_origin": origin,
+                           "fingerprint": fingerprint, "previous_result": previous, "owner_stamp": stamp,
+                           "display_pid": before["session"]["pid"], "display_identity": before["display_identity"],
+                           "descriptor_sha256": before["descriptor_sha256"], "remote_identity": identity})
+            self.store.db.execute("insert or replace into settings values(?,?)", (audit_key, json.dumps(audits)))
+        result = self.get_agent(host, thread_id) | {"operation": "reconcile_reconnect" if origin == "ui" else "reconcile_original_worker", "operation_id": request_key,
+                                                 "operation_state": "done", "recovery": recovery}
+        result["management"] = self._management(result)
+        return result
 
     def _reconcile_ended_display(self, agent, request_key, operation, fingerprint, row, previous):
         """Explicit UI reconciliation, not a claim that the old request never ran.
@@ -647,6 +793,9 @@ class Hub:
     def reconcile_original_worker(self, host, thread_id, request_key, confirm=False):
         """Human UI maintenance for an exact legacy plugin reconnect result.
 
+        Frozen live-display evidence can finish that original request. A proven
+        replacement of its dead owner can instead permit a same-key retry while
+        the authenticated new registry is empty. Both preserve plugin origin.
         Match the current native worker and exact Session to the complete
         binding saved at maintenance, then pin the CURRENT tmux identity for
         same-key reattachment. A legacy binding was not frozen when the old
@@ -686,6 +835,20 @@ class Hub:
                     or previous.get("recovery", {}).get("request_key") != request_key
                     or previous.get("recovery", {}).get("request_origin") != "plugin"):
                 raise ValueError("只能核对当前精确的原 plugin 请求；来源和请求键不会被改写。")
+            if (previous.get("state") == "done" and selected == previous.get("recovery")
+                    and selected.get("reconciled") is True and selected.get("reconciliation_kind") == "live_display"
+                    and selected.get("maintenance_actor") == "ui" and selected.get("original_origin") == "plugin"):
+                result = agent | {"operation": "reconcile_original_worker", "operation_id": request_key,
+                                  "operation_state": "done", "recovery": selected}
+                result["management"] = self._management(result)
+                return result
+            if (previous.get("state") == "blocked" and selected == previous.get("recovery")
+                    and selected.get("reconciliation_kind") == "owner_recovery" and selected.get("reconciled") is True
+                    and selected.get("maintenance_actor") == "ui" and selected.get("original_origin") == "plugin"):
+                result = agent | {"operation": "reconcile_original_worker", "operation_id": request_key,
+                                  "operation_state": "blocked", "recovery": selected}
+                result["management"] = self._management(result)
+                return result
             if (previous.get("state") == "blocked" and selected == previous.get("recovery")
                     and selected.get("reconciliation_kind") == "worker_continuity" and selected.get("reconciled") is True
                     and selected.get("maintenance_actor") == "ui" and selected.get("original_origin") == "plugin"
@@ -698,6 +861,11 @@ class Hub:
             if (previous.get("state") != "unknown" or previous.get("recovery", {}).get("code") != "reconnect_unknown"
                     or selected.get("code") != "reconnect_unknown"):
                 raise ValueError("原请求不是待核对的未知结果；不解锁或重放。")
+            if agent.get("connected"):
+                return self._reconcile_live_display(agent, request_key, operation, fingerprint, row, previous, origin="plugin")
+            proof = self.store.setting("terminal-owner-recovery-proof") or {}
+            if proof.get("operations", {}).get(operation) == fingerprint:
+                return self._reconcile_recovered_plugin_display(agent, request_key, operation, fingerprint, row, previous, selected_row, proof)
             binding = json.loads(binding_row["value"]) if binding_row else None
             if not self._valid_original_worker_binding(binding, terminal_id):
                 raise ValueError("缺少原工作进程的完整已核验会话绑定；保留未知结果，不猜测其他会话。")
@@ -785,6 +953,71 @@ class Hub:
                               "operation_state": "blocked", "recovery": recovery}
             result["management"] = self._management(result)
             return result
+
+    def _reconcile_recovered_plugin_display(self, agent, request_key, operation, fingerprint, row, previous, selected_row, proof):
+        """Confirm absence only under a proven replacement of the old owner.
+
+        Preserve the original legacy plugin request and allow its same-key
+        existing-session retry. Empty registries alone never supply this proof.
+        """
+        host, thread_id, terminal_id = agent["host"], agent["thread_id"], agent["terminal_id"]
+        recovery_key = self._recovery_key(host, thread_id)
+        enrolled = self.store.agent(host, thread_id)
+        selected = json.loads(selected_row["value"]) if selected_row else None
+        stamp = previous.get("owner_stamp")
+        expected_old = {"pid": proof.get("previous_pid"), "recovery_id": proof.get("previous_recovery_id")}
+        if (selected != previous.get("recovery") or not enrolled or enrolled.get("mode") != "terminal"
+                or enrolled.get("terminal_id") != terminal_id or not isinstance(stamp, dict) or stamp != expected_old
+                or set(stamp) != {"pid", "recovery_id"} or type(stamp.get("pid")) is not int
+                or type(proof.get("pid")) is not int or type(proof.get("previous_pid")) is not int
+                or proof["pid"] <= 0 or proof["previous_pid"] <= 0 or proof["pid"] == proof["previous_pid"]
+                or not isinstance(proof.get("recovery_id"), str) or not re.fullmatch(r"[a-f0-9]{32}", proof["recovery_id"])
+                or not isinstance(proof.get("previous_recovery_id"), str)
+                or not re.fullmatch(r"[a-f0-9]{32}", proof["previous_recovery_id"])
+                or proof.get("operations", {}).get(operation) != fingerprint):
+            raise ValueError("原请求与已恢复 owner 的精确凭据不一致；保留未知结果。")
+
+        def owner_matches():
+            owner = self.terminal_service_status()
+            return (owner.get("running") is True and owner.get("pid") == proof["pid"]
+                    and owner.get("recovery_id") == proof["recovery_id"])
+
+        if not owner_matches():
+            raise ValueError("恢复后的显示服务身份尚不能确认；保留未知结果。")
+        try:
+            registry = self.terminals.request("/sessions", timeout=3)
+        except Exception:
+            raise ValueError("恢复后的显示登记暂不能确认；保留未知结果。") from None
+        if not isinstance(registry, dict) or registry.get("sessions") != [] or not owner_matches():
+            raise ValueError("恢复后的 owner 未确认空登记或身份已变化；保留未知结果。")
+        recovery = {"code": "local_display_unavailable", "next_action": "reconnect", "retryable": True,
+                    "reconciled": True, "reconciliation_kind": "owner_recovery", "maintenance_actor": "ui",
+                    "original_origin": "plugin", "request_origin": "plugin", "request_key": request_key,
+                    "message": "已核验原显示 owner 已结束、恢复后的同一 owner 登记为空；仅允许原 plugin 请求键接回原终端，不启动模型或重发任务。"}
+        audit_key = "agent-reconnect-reconciliation:" + hashlib.sha256(operation.encode()).hexdigest()
+        with self.store.lock, self.store.db:
+            proof_row = self.store.db.execute("select value from settings where key='terminal-owner-recovery-proof'").fetchone()
+            if (self.store.agent(host, thread_id) != enrolled or not proof_row or json.loads(proof_row["value"]) != proof):
+                raise ValueError("原登记或服务恢复凭据已变化；保留未知结果。")
+            changed = self.store.db.execute("update operations set result=? where request_key=? and fingerprint=? and state='done' and result=?",
+                (json.dumps({"state": "blocked", "recovery": recovery}, ensure_ascii=False), operation, fingerprint, row["result"])).rowcount
+            selected_changed = self.store.db.execute("update settings set value=? where key=? and value=?",
+                (json.dumps(recovery), recovery_key, selected_row["value"])).rowcount
+            if changed != 1 or selected_changed != 1:
+                raise ValueError("原请求或当前核对记录已变化；保留未知结果。")
+            old_audit = self.store.db.execute("select value from settings where key=?", (audit_key,)).fetchone()
+            audits = json.loads(old_audit["value"]) if old_audit else []
+            if not isinstance(audits, list):
+                raise ValueError("原核对审计不能确认；保留未知结果。")
+            audits.append({"kind": "owner_recovery", "at": time.time(), "request_key": request_key,
+                           "maintenance_actor": "ui", "original_origin": "plugin", "fingerprint": fingerprint,
+                           "previous_result": previous, "old_owner_stamp": stamp,
+                           "owner_stamp": {"pid": proof["pid"], "recovery_id": proof["recovery_id"]}})
+            self.store.db.execute("insert or replace into settings values(?,?)", (audit_key, json.dumps(audits)))
+        result = self.get_agent(host, thread_id) | {"operation": "reconcile_original_worker", "operation_id": request_key,
+                                                 "operation_state": "blocked", "recovery": recovery}
+        result["management"] = self._management(result)
+        return result
 
     def update_agent(self, host, thread_id, alias=None, pinned=None, origin="ui", request_key=None, controller_id=None):
         if origin not in ("ui", "plugin"):
