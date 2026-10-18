@@ -15,6 +15,7 @@ from pathlib import Path
 from agent_captain import __version__ as VERSION
 from agent_captain.sessions import catalog
 from agent_captain.transport.directory_browser import DirectoryBrowser
+from agent_captain.transport.ssh_source import pack_python_source
 from agent_captain.infrastructure.store import Store
 from agent_captain.transport.terminal_client import BrokerError, TerminalClient
 from agent_captain.core.controllers import ControllerService, default_workspace_root
@@ -152,7 +153,7 @@ class Hub:
         if target.startswith("-") or any(c.isspace() or ord(c) < 32 for c in target):
             raise ValueError("Invalid SSH target")
         payload = base64.urlsafe_b64encode(json.dumps(request, ensure_ascii=False).encode()).decode()
-        # Send portable, read-only modules through stdin. No remote installation,
+        # Send compact portable read-only modules through stdin. No remote installation,
         # provider startup or authentication/configuration file reads are needed.
         modules = ("session_binding", "conversation_output") if request["op"] in ("bind_output", "resolve_output", "read_output") else ()
         source = "import sys,types\n"
@@ -163,7 +164,7 @@ class Hub:
         try:
             reply = subprocess.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPersist=no",
                 "-o", "ConnectTimeout=30", target, "python3 - " + payload],
-                input=source, text=True, encoding="utf-8", errors="replace",
+                input=pack_python_source(source), text=True, encoding="utf-8", errors="replace",
                 capture_output=True, timeout=45, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except subprocess.TimeoutExpired:
             raise HistoryReadError("ssh_timeout") from None
@@ -1062,7 +1063,7 @@ class Hub:
         source = source_path("transport", "remote_pty_bridge.py").read_text(encoding="utf-8")
         try:
             reply = subprocess.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPersist=no", "-o", "ConnectTimeout=30",
-                target, "python3 - probe --session " + shlex.quote(terminal_id)], input=source,
+                target, "python3 - probe --session " + shlex.quote(terminal_id)], input=pack_python_source(source),
                 text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=45,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if reply.returncode or len(reply.stdout) > 65536:
@@ -1609,7 +1610,7 @@ class Hub:
         try:
             reply = subprocess.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPersist=no", "-o", "ConnectTimeout=30",
                 target, "python3 - --session " + shlex.quote(terminal_id) + " --lines " + str(lines)],
-                input=source, text=True, encoding="utf-8", errors="replace", capture_output=True,
+                input=pack_python_source(source), text=True, encoding="utf-8", errors="replace", capture_output=True,
                 timeout=45, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if not isinstance(reply.stdout, str) or len(reply.stdout.encode("utf-8")) > remote_terminal_history.MAX_RESPONSE_BYTES:
                 raise ValueError()

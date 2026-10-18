@@ -31,7 +31,7 @@ MODULES = (
     "integrations.mcp_bridge",
     "server.app", "server.service", "sessions.catalog", "sessions.conversation_output",
     "sessions.session_binding", "transport.directory_browser", "transport.remote_foreground_probe",
-    "transport.remote_terminal_history", "transport.terminal_client", "transport.terminal_service",
+    "transport.remote_terminal_history", "transport.ssh_source", "transport.terminal_client", "transport.terminal_service",
 )
 
 

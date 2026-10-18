@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from agent_captain.core.terminal_hub import Hub, HistoryReadError
 from test_terminal_hub import FakeTerminals
+from tests.test_ssh_source import unpack_source
 
 SESSION = "11111111-1111-4111-8111-111111111111"
 TERMINAL = "ceohub-0123456789abcdef01234567"
@@ -53,6 +54,7 @@ class HistoryTransportTests(unittest.TestCase):
         self.assertIn("ConnectTimeout=30", args)
         self.assertEqual(run.call_args.kwargs["timeout"], 45)
         self.assertEqual(args[-2], "test-ssh-alias")
+        self.assertIn("def main(request)", unpack_source(run.call_args.kwargs["input"]))
         self.assertEqual(self.terminals.writes, [])
 
     def test_original_pane_probe_has_bounded_slow_ssh_budget(self):
@@ -64,6 +66,7 @@ class HistoryTransportTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["timeout"], 45)
         self.assertEqual(run.call_args.args[0][-2], "test-ssh-alias")
         self.assertEqual(run.call_args.args[0][-1], "python3 - probe --session " + TERMINAL)
+        self.assertIn("def probe_existing_session", unpack_source(run.call_args.kwargs["input"]))
         self.assertEqual(self.terminals.writes, [])
         self.assertFalse(any(call[0] == "create" for call in self.terminals.calls))
 

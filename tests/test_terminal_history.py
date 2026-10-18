@@ -187,7 +187,8 @@ class HubTerminalHistoryTests(unittest.TestCase):
         self.assertEqual(args[0], ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPersist=no", "-o", "ConnectTimeout=30", "fake316",
                                        "python3 - --session " + TERMINAL + " --lines 5000"])
         self.assertEqual(kwargs["timeout"], 45)
-        self.assertIn("def capture_history", kwargs["input"])
+        from tests.test_ssh_source import unpack_source
+        self.assertIn("def capture_history", unpack_source(kwargs["input"]))
         self.assertFalse(self.terminals.writes)
         self.assertFalse(any(call[0] == "create" for call in self.terminals.calls))
         self.assertFalse(self.hub.store.agent("remote", "worker")["active"])
