@@ -662,5 +662,6 @@ class TerminalClient:
     def write(self, terminal_id, action, body):
         if action not in ("input", "prompt", "resize", "close"):
             raise ValueError("Unknown terminal action")
-        timeout = PROMPT_RPC_TIMEOUT if action == "prompt" else FOREGROUND_RPC_TIMEOUT if action in ("input", "resize") else 20
+        timeout = (PROMPT_RPC_TIMEOUT if action == "prompt" else FOREGROUND_RPC_TIMEOUT if action in ("input", "resize")
+                   else 60 if action == "close" and body.get("require_verified") is True else 20)
         return self.request(f"/sessions/{quote(terminal_id, safe='')}/{action}", body, timeout=timeout)

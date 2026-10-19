@@ -33,6 +33,17 @@ try {
 } catch (_) { pendingCreateStorageError = true; }
 let displayServiceStatus = null, displayServiceCheck = null, displayServiceCheckedAt = 0, displayServiceApiMissing = false, displayRecoveryTarget = null;
 let reconnectReconcileTarget = null;
+const reopenStorageKey = 'agent-captain.pending-terminal-reopen.v1';
+const reopenOperations = new Map(), reopenDrafts = new Map();
+let reopenTarget = null, reopenStorageError = false;
+try {
+  const saved = terminalCreateStorage()?.getItem(reopenStorageKey);
+  if (saved) {
+    const entries = JSON.parse(saved);
+    if (!Array.isArray(entries) || entries.length > 100 || entries.some(entry => !validReopenOperation(entry))) throw new Error('Invalid reopen record');
+    for (const entry of entries) reopenOperations.set(`${entry.body.host}:${entry.body.thread_id}`, entry);
+  }
+} catch (_) { reopenStorageError = true; }
 const displayServiceHelp = '本机显示服务离线不等于远端任务退出。恢复只启动显示服务，不重启 Codex、不发送输入，也不重建已经结束的本机终端。';
 function needsDisplayServiceRecovery(recovery) { return recovery?.code === 'local_display_unavailable' || recovery?.next_action === 'recover_display_service'; }
 function needsReconnectReconciliation(recovery) { return ['reconcile', 'reconcile_reconnect', 'reconcile_original_worker'].includes(recovery?.next_action); }
@@ -47,6 +58,14 @@ const isTerminal = agent => agent?.mode === 'terminal' || !!agent?.terminal_id;
 const isWorkerRecord = agent => agent?.mode !== 'controller' && agent?.kind !== 'controller';
 const isClosedAgent = agent => !!agent && (agent.closed || agent.lifecycle === 'closed' || agent.status === 'closed' || agent.state === 'closed');
 const isClosingAgent = agent => !!agent && (['closing', 'unknown'].includes(agent.close_state) || ['closing', 'close_unknown'].includes(agent.status) || ['closing', 'close_unknown'].includes(agent.state));
+const canReopenAgent = agent => isWorkerRecord(agent) && isTerminal(agent) && !!agent.terminal_id && !isClosedAgent(agent) && !isClosingAgent(agent);
+const pendingReopen = agent => agent && ['unknown', 'submitting'].includes(reopenOperations.get(agentKey(agent))?.state);
+function canInspectPendingReopen(agent, body = null) {
+  if (!agent || !isWorkerRecord(agent) || !isTerminal(agent) || !registeredAgent(agentKey(agent))) return false;
+  const saved = reopenOperations.get(agentKey(agent));
+  return saved?.state === 'unknown' && validReopenOperation(saved) && saved.body.host === agent.host && saved.body.thread_id === agent.thread_id
+    && (!body || Object.keys(saved.body).every(key => saved.body[key] === body[key]) && Object.keys(body).length === Object.keys(saved.body).length);
+}
 const sessionConnected = session => typeof session?.displayConnected === 'boolean' ? session.displayConnected : session?.agent?.connected !== false;
 function displayDisconnected(agent) {
   const session = terminalSession?.key === agentKey(agent) && !terminalSession.disposed ? terminalSession : null;
@@ -205,6 +224,7 @@ function renderAgents(force = false) {
     card.append(quick);
     const more = node('details', null, 'agent-more'), summary = node('summary', '更多'); more.append(summary);
     const moreActions = node('div', null, 'agent-more-actions'); moreActions.append(button('复制直达链接', 'text-button', async () => copyAgentLink(agent)));
+    if (canReopenAgent(agent) || canInspectPendingReopen(agent)) moreActions.append(button(canInspectPendingReopen(agent) ? '核对原重开结果…' : '重开终端…', 'text-button agent-reopen-link', async () => openReopenTerminal(agent)));
     if (terminal && !isClosedAgent(agent) && !isClosingAgent(agent)) moreActions.append(button('关闭终端…', 'text-button agent-close-link', async () => { await selectAgent(agent); if (selectedAgent === agentKey(agent)) openCloseTerminal(); })); more.append(moreActions); card.append(more);
     if (renameTarget?.key === agentKey(agent) && renameTarget.mode !== 'dialog') {
       const form = node('form', null, 'agent-inline-rename'), input = node('input'); input.value = renameTarget.value; input.maxLength = 200; input.required = true; input.setAttribute('aria-label', '工作会话新名称'); input.disabled = renameTarget.saving;
@@ -267,7 +287,10 @@ function renderDetail() {
   if (agent.cwd) meta.append(node('span', agent.cwd, 'muted')); meta.append(node('code', shortId(agent.terminal_id || agent.thread_id), 'thread-id'));
   $('#terminal-panel').hidden = !terminal; $('#legacy-panel').hidden = terminal; $('#refresh-history').hidden = terminal; $('#terminal-focus').hidden = !terminal; $('#terminal-connect').hidden = !terminal;
   const closed = isClosedAgent(agent), closing = isClosingAgent(agent) || !!(terminalSession?.key === selectedAgent && terminalSession.closing), disconnected = terminal && displayDisconnected(agent);
-  for (const id of ['terminal-focus', 'terminal-connect', 'terminal-copy', 'terminal-paste', 'terminal-close']) $(`#${id}`).disabled = closed || closing;
+  const reopening = pendingReopen(agent);
+  $('#terminal-reopen').hidden = !canReopenAgent(agent) && !canInspectPendingReopen(agent); $('#terminal-reopen').disabled = !!reopenTarget?.submitting;
+  $('#terminal-reopen').textContent = canInspectPendingReopen(agent) ? '核对原重开结果…' : '重开终端…';
+  for (const id of ['terminal-focus', 'terminal-connect', 'terminal-copy', 'terminal-paste', 'terminal-close']) $(`#${id}`).disabled = closed || closing || reopening;
   if (disconnected) { $('#terminal-focus').disabled = true; $('#terminal-paste').disabled = true; }
   if (terminalSession?.key === selectedAgent) { terminalSession.closed = closed; if (closed || closing) { terminalSession.closing = true; cancelPendingResize(terminalSession); terminalSession.term.blur(); } }
   $('#terminal-help').textContent = '滚轮、PageUp / PageDown 只滚动翻页，不输入到 agent。Shift+Home 查看最早保留历史，Shift+End 回到最新。' + (closed ? '终端已关闭，保留的输出仍可查看。需要继续工作时请新建终端；这个已关闭的进程不会重新启动。' : closing ? '终端正在关闭或关闭结果尚未确认，输入与重连已暂停。保留的输出仍可查看，请先核对进程状态。' : disconnected ? '显示连接已断开，输入已暂停。保留画面仍可查看和复制；这不能证明远端工作进程退出。可以点击「重新连接」接回原终端，会话和进程是否仍在需重新核对。' : '选中文字后 Ctrl+C 复制，无选中时 Ctrl+C 中断。Ctrl+V 粘贴，也可用 Ctrl+Shift+C/V 或右键菜单。关闭页面会保留任务；「关闭终端」会结束其中的工作进程。');
@@ -279,7 +302,8 @@ function renderDetail() {
   const runningAgent = agent.agent_ready === true || agent.state === 'agent' || agent.status === 'agent';
   $('#resume-guide').hidden = !sourceId || !terminal || disconnected || runningAgent;
   if (sourceId) $('#resume-command').textContent = resumeCommand(sourceId);
-  if (terminal && closed) $('#terminal-status').textContent = '终端已关闭';
+  if (reopening) $('#terminal-status').textContent = '重开结果待核对 · 旧输入入口已暂停';
+  else if (terminal && closed) $('#terminal-status').textContent = '终端已关闭';
   else if (terminal && disconnected && !closing) $('#terminal-status').textContent = disconnectedLabel;
   else if (terminal && (!terminalSession || terminalSession.key !== selectedAgent)) $('#terminal-status').textContent = agent.connected ? '正在读取终端画面……' : '终端尚未连接，点击重新连接';
   $('#terminal-output').disabled = !terminal;
@@ -440,7 +464,8 @@ function renderTerminalErrors(session) {
 }
 function disposeTerminal() {
   if (!terminalSession) return;
-  if (terminalSession.input) flushTerminalInput(terminalSession);
+  if (terminalSession.input && !terminalSession.reopening) flushTerminalInput(terminalSession);
+  if (terminalSession.input && terminalSession.reopening) reopenDrafts.set(terminalSession.key, terminalSession.input);
   terminalSession.disposed = true; clearTimeout(terminalSession.timer); clearTimeout(terminalSession.inputTimer); clearTimeout(terminalSession.resizeTimer);
   disposeTerminalScroll(terminalSession);
   disposeTerminalInput(terminalSession);
@@ -452,9 +477,11 @@ function isCurrentTerminal(session) {
   return !!session && terminalSession === session && selectedAgent === session.key && !session.disposed && !session.closing && !session.closed && session.initialized;
 }
 function isTerminalDisplayCurrent(session) { return session?.kind === 'controller' ? !!window.PronController?.isTerminalCurrent(session) : terminalSession === session; }
-function canWriteTerminal(session) { return isCurrentTerminal(session) && sessionConnected(session) && !window.PronTerminalHistory?.isActive?.(session) && (session.kind !== 'controller' || window.PronController?.canWriteTerminal(session)); }
+function canWriteTerminal(session) { return isCurrentTerminal(session) && !session.reopening && isTerminalGenerationCurrent(session) && sessionConnected(session) && !window.PronTerminalHistory?.isActive?.(session) && (session.kind !== 'controller' || window.PronController?.canWriteTerminal(session)); }
 function terminalApiPath(session, operation) { return `/api/${session.kind === 'controller' ? 'controllers' : 'terminals'}/${operation}`; }
 function terminalApiIdentity(session) { return session.kind === 'controller' ? {id: session.controllerId} : {host: session.agent.host, thread_id: session.agent.thread_id}; }
+function terminalMutationIdentity(session) { return {...terminalApiIdentity(session), ...(session.kind === 'controller' ? {} : {expected_terminal_id: session.terminalId || session.agent.terminal_id})}; }
+function isTerminalGenerationCurrent(session) { return session.kind === 'controller' || !session.terminalId || registeredAgent(session.key)?.terminal_id === session.terminalId; }
 function terminalStatusElement(session) { return $(session.kind === 'controller' ? '#controller-terminal-status' : '#terminal-status'); }
 function updateDisplayConnection(session, connected) {
   if (session.kind === 'controller') { window.PronController?.updateDisplayConnection(session, connected); return; }
@@ -800,6 +827,9 @@ async function openTerminal(agent, options = {}) {
   installTerminalProtocolGuards(term);
   const fit = new window.FitAddon.FitAddon(); term.loadAddon(fit); term.open($('#terminal'));
   const session = {key: agentKey(agent), agent, term, fit, seq: 0, initialized: false, disposed: false, displayConnected: agent.connected !== false, closing: false, closed: isClosedAgent(agent), pasteReading: false, wheelRemainder: 0, wheelBuffer: null, frameGeneration: 0, forceSnapshot: true, writingFrame: false, restoringFrame: false, fitPending: false, resizeGeneration: 0, resizePending: false, geometryUnknown: false, resizeRecoveryAttempts: 0, resizeRecoveryRetryAt: 0, targetSize: '', timer: null, inputTimer: null, resizeTimer: null, input: '', inputChain: Promise.resolve(), size: '', observer: null, inputError: '', pollError: '', resizeError: ''};
+  session.terminalId = agent.terminal_id;
+  session.reopening = !!pendingReopen(agent);
+  if (term.options) term.options.disableStdin = session.reopening;
   terminalSession = session;
   initializeTerminalScroll(session);
   term.attachCustomKeyEventHandler(event => handleTerminalKey(session, event));
@@ -813,9 +843,16 @@ async function openTerminal(agent, options = {}) {
 }
 function flushTerminalInput(session) {
   clearTimeout(session.inputTimer); session.inputTimer = null;
+  if (session.reopening) return;
   const data = session.input; session.input = ''; if (!data || session.disposed || session.closing || session.closed || !sessionConnected(session)) return;
-  const body = {...terminalApiIdentity(session), data, request_key: crypto.randomUUID()};
-  session.inputChain = session.inputChain.then(() => session.closing || session.closed || !sessionConnected(session) || session.kind === 'controller' && !canWriteTerminal(session) ? undefined : request(terminalApiPath(session, 'input'), body)).then(() => { session.inputError = ''; renderTerminalErrors(session); }).catch(error => {
+  const body = {...terminalMutationIdentity(session), data, request_key: crypto.randomUUID()};
+  session.inputChain = session.inputChain.then(() => {
+    if (session.reopening || !isTerminalGenerationCurrent(session)) {
+      session.reopenQueuedDraft = (session.reopenQueuedDraft || '') + data;
+      reopenDrafts.set(session.key, session.reopenQueuedDraft + (session.reopenBufferedDraft || '')); return;
+    }
+    return session.closing || session.closed || !sessionConnected(session) || session.kind === 'controller' && !canWriteTerminal(session) ? undefined : request(terminalApiPath(session, 'input'), body);
+  }).then(() => { session.inputError = ''; renderTerminalErrors(session); }).catch(error => {
     if (isDisconnectedError(error)) updateDisplayConnection(session, false);
     session.inputError = `输入未确认送达：${error.message}。请核对终端后再操作，避免重复输入。`;
     renderTerminalErrors(session);
@@ -830,7 +867,7 @@ function cancelPendingResize(session) {
   session.forceSnapshot = true;
 }
 function scheduleResize(session, cols, rows) {
-  if (session.disposed || session.closing || session.closed || session.restoringFrame || !session.initialized || !sessionConnected(session) || cols < 2 || rows < 2) return;
+  if (session.disposed || session.reopening || !isTerminalGenerationCurrent(session) || session.closing || session.closed || session.restoringFrame || !session.initialized || !sessionConnected(session) || cols < 2 || rows < 2) return;
   if (window.PronTerminalHistory?.isActive?.(session)) return;
   if (session.kind === 'controller' && !window.PronController?.isDisplayVisible(session)) return;
   const size = `${cols}:${rows}`;
@@ -854,7 +891,7 @@ function scheduleResize(session, cols, rows) {
 function queueTerminalResize(session) {
   clearTimeout(session.resizeTimer); session.resizeTimer = setTimeout(async () => {
     session.resizeTimer = null;
-    if (session.disposed || !isTerminalDisplayCurrent(session) || !session.resizeDesired) return;
+    if (session.disposed || session.reopening || !isTerminalGenerationCurrent(session) || !isTerminalDisplayCurrent(session) || !session.resizeDesired) return;
     if (window.PronTerminalHistory?.isActive?.(session)) { cancelPendingResize(session); return; }
     if (session.closing || session.closed || !sessionConnected(session)) { cancelPendingResize(session); return; }
     // A disposed/reopened display can still have a request in flight for the
@@ -878,14 +915,14 @@ function queueTerminalResize(session) {
     terminalResizeFlights.set(flightKey, flight); session.resizeInFlight = true;
     if (recoveringGeometry) session.resizeRecoveryAttempts = (session.resizeRecoveryAttempts || 0) + 1;
     try {
-      await request(terminalApiPath(session, 'resize'), {...terminalApiIdentity(session), cols, rows});
-      if (session.disposed || !isTerminalDisplayCurrent(session) || generation !== session.resizeGeneration) return;
+      await request(terminalApiPath(session, 'resize'), {...terminalMutationIdentity(session), cols, rows});
+      if (session.disposed || session.reopening || !isTerminalGenerationCurrent(session) || !isTerminalDisplayCurrent(session) || generation !== session.resizeGeneration) return;
       session.size = size; session.resizePending = false; session.resizeDesired = null; session.resizeError = '';
       session.geometryUnknown = false; session.resizeRecoveryAttempts = 0; session.resizeRecoveryRetryAt = 0;
       session.frameGeneration = (session.frameGeneration || 0) + 1;
       session.forceSnapshot = true; renderTerminalErrors(session);
     } catch (error) {
-      if (session.disposed || !isTerminalDisplayCurrent(session) || generation !== session.resizeGeneration) return;
+      if (session.disposed || session.reopening || !isTerminalGenerationCurrent(session) || !isTerminalDisplayCurrent(session) || generation !== session.resizeGeneration) return;
       session.resizePending = false; session.resizeDesired = null; session.targetSize = ''; session.forceSnapshot = true;
       if (recoveringGeometry) session.resizeRecoveryRetryAt = Date.now() + Math.min(30000, 2000 * 2 ** (session.resizeRecoveryAttempts - 1));
       if (isDisconnectedError(error)) { updateDisplayConnection(session, false); renderTerminalErrors(session); return; }
@@ -901,7 +938,7 @@ function queueTerminalResize(session) {
   }, 140);
 }
 async function pollTerminal(session) {
-  if (session.disposed) return;
+  if (session.disposed || session.reopening || !isTerminalGenerationCurrent(session)) return;
   if (session.kind === 'controller' && !window.PronController?.canReadDisplay(session)) return;
   if (session.resizePending) { session.timer = setTimeout(() => pollTerminal(session), 200); return; }
   let delay = 350;
@@ -909,7 +946,8 @@ async function pollTerminal(session) {
   try {
     const query = new URLSearchParams({...terminalApiIdentity(session), after: String(snapshot ? 0 : session.seq)});
     const result = await request(terminalApiPath(session, 'output') + '?' + query);
-    if (session.disposed || !isTerminalDisplayCurrent(session) || generation !== (session.frameGeneration || 0) || session.resizePending) return;
+    if (session.disposed || session.reopening || !isTerminalGenerationCurrent(session) || !isTerminalDisplayCurrent(session) || generation !== (session.frameGeneration || 0) || session.resizePending) return;
+    if (session.kind !== 'controller' && result.terminal_id && result.terminal_id !== session.terminalId) { session.pollError = '终端代次已变化，旧画面不再更新。请核对原重开请求。'; return; }
     const reset = result.reset || snapshot;
     if (!reset && result.cols >= 2 && result.rows >= 2 && session.size && session.size !== `${result.cols}:${result.rows}`) {
       session.frameGeneration = (session.frameGeneration || 0) + 1; session.forceSnapshot = true;
@@ -917,7 +955,7 @@ async function pollTerminal(session) {
     }
     const data = result.reset && result.ansi != null ? result.ansi : result.data ?? result.ansi ?? '';
     await writeTerminalFrame(session, data, reset, result.cols, result.rows);
-    if (session.disposed || !isTerminalDisplayCurrent(session) || generation !== (session.frameGeneration || 0) || session.resizePending) return;
+    if (session.disposed || session.reopening || !isTerminalGenerationCurrent(session) || !isTerminalDisplayCurrent(session) || generation !== (session.frameGeneration || 0) || session.resizePending) return;
     session.seq = Number(result.seq ?? result.current_seq ?? session.seq);
     session.forceSnapshot = false;
     if (reset && result.cols >= 2 && result.rows >= 2) session.size = `${result.cols}:${result.rows}`;
@@ -938,16 +976,17 @@ async function pollTerminal(session) {
     session.pollError = result.error || ''; renderTerminalErrors(session);
     if (sessionConnected(session)) { safeFit(session); scheduleResize(session, session.term.cols, session.term.rows); }
   } catch (error) {
-    if (session.disposed || !isTerminalDisplayCurrent(session)) return;
+    if (session.disposed || session.reopening || !isTerminalGenerationCurrent(session) || !isTerminalDisplayCurrent(session)) return;
     terminalStatusElement(session).textContent = '终端连接暂时不可用';
     session.pollError = ['hub_unreachable', 'ui_session_expired', 'hub_response_invalid'].includes(error.code) ? error.message : `${error.message}。可尝试「重新连接」；重新连接不会自动创建第二个终端。`;
     renderTerminalErrors(session); delay = 2000;
   } finally {
-    if (!session.disposed && isTerminalDisplayCurrent(session) && (session.kind !== 'controller' || window.PronController?.canReadDisplay(session))) session.timer = setTimeout(() => pollTerminal(session), delay);
+    if (!session.disposed && !session.reopening && isTerminalGenerationCurrent(session) && isTerminalDisplayCurrent(session) && (session.kind !== 'controller' || window.PronController?.canReadDisplay(session))) session.timer = setTimeout(() => pollTerminal(session), delay);
   }
 }
 async function reconnectTerminal(options = {}) {
   const agent = currentAgent(); if (!isTerminal(agent)) return;
+  if (pendingReopen(agent)) { openReopenTerminal(agent); return; }
   if (agent.recovery?.code === 'reconnect_unknown' && canReconcileReconnect(agent)) { openReconnectReconciliation(); return; }
   if (!displayDisconnected(agent)) { disposeTerminal(); await openTerminal(agent); return; }
   const key = agentKey(agent), previous = reconnectOperations.get(key);
@@ -1359,8 +1398,124 @@ function selectDirectory(path) {
   if (!target || createTarget !== target.create || createTarget.fingerprint || !$('#create-dialog').open) { $('#directory-dialog').close(); return; }
   $('#create-cwd').value = path; $('#create-title').placeholder = `留空使用：${defaultWorkerName(createTarget.host, path)}`; $('#directory-dialog').close(); $('#create-cwd').focus();
 }
+function validReopenOperation(value) {
+  const body = value?.body, text = item => typeof item === 'string' && item.length > 0 && item.length <= 200 && !/[\x00-\x1f\x7f-\x9f]/.test(item);
+  return value?.version === 1 && ['unknown', 'blocked', 'done'].includes(value.state) && !!body && typeof body === 'object' && !Array.isArray(body)
+    && Object.keys(body).length === 5 && Object.keys(body).every(key => ['host', 'thread_id', 'expected_terminal_id', 'confirmed', 'request_key'].includes(key))
+    && text(body.host) && text(body.thread_id) && text(body.expected_terminal_id) && body.confirmed === true && /^[A-Za-z0-9_.:-]{1,200}$/.test(body.request_key || '');
+}
+function persistReopenOperation(key, operation) {
+  const entries = [...reopenOperations].filter(([entryKey]) => entryKey !== key).map(([, entry]) => entry);
+  entries.push(operation);
+  if (entries.length > 100) throw new Error('保留的重开记录过多，请先核对已有请求；没有发送新的重开操作。');
+  const serialized = JSON.stringify(entries);
+  try {
+    const storage = terminalCreateStorage();
+    if (!storage?.setItem || !storage?.getItem) throw new Error('Storage unavailable');
+    storage.setItem(reopenStorageKey, serialized);
+    if (storage.getItem(reopenStorageKey) !== serialized) throw new Error('Request not retained');
+    reopenOperations.set(key, operation);
+  } catch (_) { throw new Error('浏览器无法可靠保存原重开请求，尚未发送新的操作。请允许会话存储后重试；不会丢失请求键后重新结束终端。'); }
+}
+function renderReopenDialog() {
+  const target = reopenTarget; if (!target) return;
+  const held = target.operation.state === 'unknown', blocked = target.operation.state === 'blocked';
+  $('#reopen-name').textContent = target.name; $('#reopen-host').textContent = target.machine;
+  $('#reopen-cwd').textContent = target.cwd || '目录未记录'; $('#reopen-terminal-id').textContent = target.operation.body.expected_terminal_id;
+  $('#reopen-approval').disabled = target.submitting || held || blocked;
+  $('#reopen-confirm').disabled = target.submitting || blocked || !held && !$('#reopen-approval').checked;
+  $('#reopen-confirm').textContent = target.submitting ? '正在核对原请求…' : held ? '核对原重开结果' : blocked ? '已阻止 · 关闭后重新确认' : '结束原终端并重开 Shell';
+  $('#reopen-error').textContent = target.error || target.operation.note || (held ? '原重开结果尚未确认。只沿用同一个请求键核对，不自动重试、新建或重发输入。' : '');
+  $('#reopen-error').hidden = !$('#reopen-error').textContent;
+  const draft = terminalSession?.key === target.key ? terminalSession.input || reopenDrafts.get(target.key) || '' : reopenDrafts.get(target.key) || '';
+  $('#reopen-draft').value = draft; $('#reopen-draft-panel').hidden = !draft;
+  $('#reopen-human-warning').hidden = !target.humanBusy;
+  document.querySelectorAll('#reopen-dialog [data-close]').forEach(element => { element.disabled = target.submitting; });
+}
+function openReopenTerminal(agent = currentAgent()) {
+  if (reopenTarget?.submitting || !canReopenAgent(agent) && !canInspectPendingReopen(agent)) return;
+  if (reopenStorageError) { toast('原重开记录无法读取，请先核对登记与原请求；不会生成新键绕过未知结果。'); return; }
+  const key = agentKey(agent), saved = reopenOperations.get(key), session = terminalSession?.key === key ? terminalSession : null;
+  const operation = saved?.state === 'unknown' ? saved : {version: 1, state: 'prepared', body: {
+    host: agent.host, thread_id: agent.thread_id, expected_terminal_id: agent.terminal_id, confirmed: true, request_key: crypto.randomUUID()}};
+  reopenTarget = {key, operation, name: workerDisplayName(agent), machine: `${workerMachineName(agent)} (${agent.host})`, cwd: agent.cwd,
+    humanBusy: !!agent.human_busy || !!session?.input, submitting: false, error: ''};
+  $('#reopen-approval').checked = false;
+  renderReopenDialog(); $('#reopen-dialog').showModal();
+}
+function pauseTerminalForReopen(session) {
+  if (!session || session.disposed) return;
+  session.reopening = true; session.frameGeneration = (session.frameGeneration || 0) + 1;
+  clearTimeout(session.inputTimer); session.inputTimer = null; clearTimeout(session.timer); session.timer = null;
+  cancelPendingResize(session); session.term.options.disableStdin = true; session.term.blur();
+  if (session.input) {
+    session.reopenBufferedDraft = session.input;
+    reopenDrafts.set(session.key, (session.reopenQueuedDraft || '') + session.input); session.input = '';
+  }
+}
+async function submitReopenTerminal() {
+  const target = reopenTarget; if (!target || target.submitting || target.operation.state === 'blocked') return;
+  const operation = target.operation, body = operation.body, agent = registeredAgent(target.key);
+  if (operation.state === 'unknown' ? !canInspectPendingReopen(agent, body) : !canReopenAgent(agent)) throw new Error('这个工作终端或原重开请求身份不可用，没有发送操作。');
+  if (operation.state !== 'unknown' && (!$('#reopen-approval').checked || agent.terminal_id !== body.expected_terminal_id)) throw new Error('请重新核对目标并明确确认；终端身份已变化时不会操作。');
+  target.submitting = true; target.error = ''; renderReopenDialog();
+  const session = terminalSession?.key === target.key ? terminalSession : null;
+  try {
+    persistReopenOperation(target.key, {...operation, state: 'unknown'});
+    operation.state = 'unknown';
+    pauseTerminalForReopen(session); renderDetail(); renderReopenDialog();
+    if (session) {
+      await session.inputChain;
+      const flight = terminalResizeFlights.get(`${terminalApiPath(session, 'resize')}:${JSON.stringify(terminalApiIdentity(session))}`);
+      if (flight) await flight;
+    }
+    const result = await request('/api/terminals/reopen', {...body});
+    const validReceipt = result.operation === 'reopen_terminal' && result.operation_id === body.request_key
+      && result.previous_terminal_id === body.expected_terminal_id && result.host === body.host && result.thread_id === body.thread_id;
+    if (!validReceipt || !['done', 'blocked', 'unknown'].includes(result.operation_state)) throw new Error('重开回执身份未通过核对；保留原请求键，不自动操作。');
+    operation.note = result.recovery?.message || '已核对原重开请求。';
+    if (result.operation_state === 'done' && result.reopened === true && typeof result.terminal_id === 'string' && result.terminal_id !== body.expected_terminal_id) {
+      operation.state = 'done'; persistReopenOperation(target.key, operation);
+      const current = registeredAgent(target.key);
+      if (current && ![body.expected_terminal_id, result.terminal_id].includes(current.terminal_id)) {
+        agentRecoveryNotices.set(target.key, '原重开已完成，但当前登记已进入另一代终端。不会用迟到回执替换新代次，请刷新并核对当前终端。');
+        if (reopenTarget === target) $('#reopen-dialog').close();
+        renderDetail(); renderAgents(true); return result;
+      }
+      if (current) Object.assign(current, result);
+      reconnectOperations.delete(target.key); persistWorkbench();
+      agentRecoveryNotices.set(target.key, '已重开为新的 Shell。没有启动或恢复模型，没有重发原任务；请按需要在终端自行启动。');
+      if (selectedAgent === target.key) {
+        if (terminalSession?.key === target.key) { pauseTerminalForReopen(terminalSession); disposeTerminal(); }
+        resetConversationOutput(); renderDetail();
+        if (current) {
+          try { await openTerminal(current, {focus: false}); }
+          catch (error) { agentRecoveryNotices.set(target.key, `新 Shell 已确认建立，但网页画面尚未打开：${error.message}。请刷新画面；不要再发新的重开请求。`); renderAgentRecoveryNotice(current); }
+        }
+      }
+      renderAgents(true); renderHosts();
+      if (reopenTarget === target) $('#reopen-dialog').close();
+      toast('已重开 Shell；名称、置顶和目录保留。未启动 Codex，也未重发任务。');
+      return result;
+    }
+    operation.state = result.operation_state === 'blocked' ? 'blocked' : 'unknown';
+    if (result.operation_state === 'done') operation.note = '后台回执未证明新终端身份，结果仍待核对。';
+    persistReopenOperation(target.key, operation);
+    if (operation.state === 'blocked' && session && !session.disposed && registeredAgent(target.key)?.terminal_id === session.terminalId) {
+      session.reopening = false; session.term.options.disableStdin = !canWriteTerminal(session); void pollTerminal(session);
+    }
+    agentRecoveryNotices.set(target.key, operation.note); renderDetail(); return result;
+  } catch (error) {
+    target.error = `重开结果待核对：${error.message}。不会自动换键、重试或重发输入。`;
+    agentRecoveryNotices.set(target.key, target.error);
+    if (reopenOperations.has(target.key)) { operation.state = 'unknown'; operation.note = target.error; try { persistReopenOperation(target.key, operation); } catch (_) {} }
+    if (selectedAgent === target.key) renderAgentRecoveryNotice(agent);
+    throw error;
+  } finally { target.submitting = false; if (reopenTarget === target) renderReopenDialog(); renderDetail(); }
+}
 function openCloseTerminal() {
   const agent = currentAgent(); if (!isTerminal(agent) || isClosedAgent(agent) || isClosingAgent(agent)) return;
+  if (pendingReopen(agent)) { openReopenTerminal(agent); return; }
   const host = state.hosts.find(item => item.id === agent.host);
   closeTarget = {host: agent.host, thread_id: agent.thread_id, terminal_id: agent.terminal_id, key: agentKey(agent), alias: agent.alias || agent.title || shortId(agent.thread_id), command: agent.command && agent.command !== 'xterm-256color' ? agent.command : '当前进程名称未确认（可能仍在运行）'};
   $('#close-name').textContent = closeTarget.alias; $('#close-host').textContent = host?.label || agent.host; $('#close-command').textContent = closeTarget.command;
@@ -1384,7 +1539,7 @@ async function closeTerminal(target = closeTarget) {
     await session.inputChain;
   }
     if (selectedAgent !== target.key || (session && terminalSession !== session)) throw new Error('终端已切换，本次关闭请求已取消，请重新确认。');
-    const result = await request('/api/terminals/close', {host: target.host, thread_id: target.thread_id, confirm: true});
+    const result = await request('/api/terminals/close', {host: target.host, thread_id: target.thread_id, expected_terminal_id: target.terminal_id, confirm: true});
     if (session && !session.disposed && terminalSession === session) { session.closed = !!result.closed; session.term.blur(); }
     await refresh(true);
     if (!result.closed) throw new Error('关闭结果尚未确认，输入与重连已暂停。请核对这个终端的进程状态。' + (result.error ? ' ' + result.error : ''));
@@ -1402,8 +1557,8 @@ async function closeTerminal(target = closeTarget) {
   }
 }
 $('#machine-settings').onclick = () => openMachine(currentHost()); $('#add-machine').onclick = () => openMachine(); $('#machine-transport').onchange = updateMachineTransport;
-document.querySelectorAll('[data-close]').forEach(element => { element.onclick = () => { if (element.dataset.close === 'terminal-service-recovery-dialog' && displayRecoveryTarget?.submitting || element.dataset.close === 'terminal-reconcile-dialog' && reconnectReconcileTarget?.submitting) return; document.getElementById(element.dataset.close).close(); }; });
-document.querySelectorAll('dialog').forEach(dialog => { dialog.addEventListener('click', event => { if (event.target === dialog && !(dialog.id === 'close-dialog' && closeTarget?.submitting) && !(dialog.id === 'terminal-service-recovery-dialog' && displayRecoveryTarget?.submitting) && !(dialog.id === 'terminal-reconcile-dialog' && reconnectReconcileTarget?.submitting)) { const rect = dialog.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close(); } }); });
+document.querySelectorAll('[data-close]').forEach(element => { element.onclick = () => { if (element.dataset.close === 'terminal-service-recovery-dialog' && displayRecoveryTarget?.submitting || element.dataset.close === 'terminal-reconcile-dialog' && reconnectReconcileTarget?.submitting || element.dataset.close === 'reopen-dialog' && reopenTarget?.submitting) return; document.getElementById(element.dataset.close).close(); }; });
+document.querySelectorAll('dialog').forEach(dialog => { dialog.addEventListener('click', event => { if (event.target === dialog && !(dialog.id === 'close-dialog' && closeTarget?.submitting) && !(dialog.id === 'terminal-service-recovery-dialog' && displayRecoveryTarget?.submitting) && !(dialog.id === 'terminal-reconcile-dialog' && reconnectReconcileTarget?.submitting) && !(dialog.id === 'reopen-dialog' && reopenTarget?.submitting)) { const rect = dialog.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close(); } }); });
 $('#machine-form').onsubmit = event => { event.preventDefault(); action($('#machine-save'), async () => {
   const id = $('#machine-id').value.trim(); await request('/api/hosts/upsert', {id, label: $('#machine-label').value.trim(), transport: $('#machine-transport').value, target: $('#machine-transport').value === 'ssh' ? $('#machine-target').value.trim() : '', live: true}); selectHost(id); $('#machine-dialog').close(); await refresh(true); toast('机器配置已保存，可以打开工作终端。');
 }); };
@@ -1452,6 +1607,11 @@ $('#terminal-page-up').onclick = () => scrollTerminalView(terminalSession, 'page
 $('#terminal-page-down').onclick = () => scrollTerminalView(terminalSession, 'page-down');
 $('#terminal-latest').onclick = () => scrollTerminalView(terminalSession, 'latest');
 $('#terminal-close').onclick = openCloseTerminal;
+$('#terminal-reopen').onclick = () => openReopenTerminal();
+$('#reopen-approval').onchange = renderReopenDialog;
+$('#reopen-form').onsubmit = event => { event.preventDefault(); void action($('#reopen-confirm'), submitReopenTerminal); };
+$('#reopen-dialog').addEventListener('cancel', event => { if (reopenTarget?.submitting) event.preventDefault(); });
+$('#reopen-dialog').addEventListener('close', () => { if (!reopenTarget?.submitting) reopenTarget = null; });
 $('#terminal-output').onclick = () => action($('#terminal-output'), () => readConversationOutput());
 $('#terminal-bind-output').onclick = openBindOutput;
 $('#output-refresh').onclick = () => action($('#output-refresh'), () => readConversationOutput());
@@ -1481,6 +1641,9 @@ $('#clipboard-form').onsubmit = event => { event.preventDefault(); action($('#cl
 }); };
 $('#clipboard-dialog').addEventListener('close', () => { clipboardTarget = null; $('#clipboard-text').value = ''; $('#clipboard-text').readOnly = false; });
 $('#copy-resume').onclick = () => action($('#copy-resume'), async () => { await navigator.clipboard.writeText($('#resume-command').textContent); toast('命令已复制。请在终端中自行粘贴并执行。'); });
-window.addEventListener('beforeunload', () => { if (terminalSession?.input) flushTerminalInput(terminalSession); });
+window.addEventListener('beforeunload', event => {
+  if (terminalSession?.input) flushTerminalInput(terminalSession);
+  if ([...reopenDrafts.values()].some(Boolean)) { event?.preventDefault?.(); if (event) event.returnValue = ''; }
+});
 window.addEventListener('hashchange', () => { const key = agentKeyFromHash(), agent = key ? registeredAgent(key) : null; if (agent && agentKey(agent) !== selectedAgent) void selectAgent(agent, {restore: true}).catch(error => toast(error.message)); });
 refresh(); setInterval(refresh, 3000);

@@ -121,6 +121,28 @@ function remoteForegroundCommand(sessionId) {
   return ['python3', '-c', bootstrap, '--session', sessionId].map(shellQuote).join(' ');
 }
 
+function validRemoteCloseIdentity(value, sessionId) {
+  return value && Object.keys(value).sort().join(',') === 'boot_id,created,name,pane,pane_pid,pane_start_ticks,server_pid,session'
+    && value.name === sessionId && typeof value.session === 'string' && /^\$\d+$/.test(value.session)
+    && typeof value.pane === 'string' && /^%\d+$/.test(value.pane)
+    && typeof value.boot_id === 'string' && /^[a-f0-9-]{36}$/.test(value.boot_id)
+    && ['created', 'pane_pid', 'pane_start_ticks', 'server_pid'].every(key => Number.isSafeInteger(value[key]) && value[key] > 0);
+}
+
+function remoteCloseCommand(sessionId, expected) {
+  if (!SESSION_ID.test(sessionId) || !expected || typeof expected.exists !== 'boolean'
+      || Object.keys(expected).sort().join(',') !== (expected.exists ? 'exists,identity' : 'exists')
+      || expected.exists && !validRemoteCloseIdentity(expected.identity, sessionId)) {
+    throw new ApiError(400, 'invalid_close_identity', 'Exact terminal close identity is required');
+  }
+  const body = zlib.deflateSync(fs.readFileSync(path.join(PYTHON_SOURCE, 'transport', 'remote_terminal_close.py'))).toString('base64');
+  const bootstrap = `import base64,zlib;exec(compile(zlib.decompress(base64.b64decode('${body}')),'ceo-hub-terminal-close','exec'))`;
+  const args = ['python3', '-c', bootstrap, 'close', '--session', sessionId];
+  if (expected.exists) args.push('--expected', Buffer.from(JSON.stringify(expected.identity)).toString('base64url'));
+  else args.push('--expected-absent');
+  return args.map(shellQuote).join(' ');
+}
+
 function verifiedIdentity(result) {
   if (result.identity_verified !== true || result.state !== 'agent'
       || !['codex', 'claude', 'aider', 'opencode', 'gemini'].includes(result.agent_kind)
@@ -243,10 +265,12 @@ class TerminalBroker {
     this.readRootMetadata = options.readRootMetadata || linuxRootMetadata;
     this.queryDisplayIdentity = options.queryDisplayIdentity || (pid => identityQuery(['observe', String(pid)]));
     this.maxOutput = options.maxOutput || MAX_OUTPUT;
+    this.closeExitTimeout = options.closeExitTimeout ?? 5000;
+    this.verifiedCloseAttempts = new Map();
   }
 
   describe(session) {
-    const blocked = session.geometryUnknown ? 'geometry_unknown' : session.connected && session.state === 'agent' ? blockedScreen(session) : null;
+    const blocked = session.closeFenced ? 'terminal_close_unknown' : session.geometryUnknown ? 'geometry_unknown' : session.connected && session.state === 'agent' ? blockedScreen(session) : null;
     return {
       id: session.id, host: session.host, transport: session.transport,
       target: session.target, title: session.title, cwd: session.cwd,
@@ -286,6 +310,7 @@ class TerminalBroker {
     const cwd = String(body.cwd || (transport === 'local' ? os.homedir() : '~'));
     if (cwd.includes('\0')) throw new ApiError(400, 'invalid_directory', 'Invalid terminal directory');
     let session = this.sessions.get(id);
+    if (this.verifiedCloseAttempts.has(id)) throw new ApiError(409, 'terminal_closed', 'Original terminal is fenced by an explicit replacement operation');
     if (session && (session.host !== host || session.target !== target || session.transport !== transport
         || session.program !== (direct ? body.program : null)
         || JSON.stringify(session.programArgs) !== JSON.stringify(direct ? body.args : []))) {
@@ -369,6 +394,9 @@ class TerminalBroker {
         } catch { /* The display remains usable without a strict birth proof. */ }
       }
       session.pty = child;
+      let resolveExit;
+      const exitObservation = { child, observed: false, promise: new Promise(resolve => { resolveExit = resolve; }) };
+      session.exitObservation = exitObservation;
       session.connected = true;
       session.geometryUnknown = false;
       session.exitCode = null;
@@ -376,6 +404,8 @@ class TerminalBroker {
       const isCurrentChild = () => session.attachmentGeneration === attachmentGeneration && session.pty === child;
       child.onData(data => { if (isCurrentChild() && session.connected) this.acceptOutput(session, data); });
       child.onExit(({ exitCode }) => {
+        exitObservation.observed = true;
+        resolveExit();
         if (isCurrentChild()) { session.connected = false; session.exitCode = exitCode; session.state = 'exited'; }
       });
     } catch (error) {
@@ -452,6 +482,7 @@ class TerminalBroker {
 
   async input(id, body) {
     const session = this.get(id);
+    if (session.closeFenced) throw new ApiError(409, 'terminal_closing', 'Terminal is fenced for replacement');
     if (typeof body.data !== 'string' || Buffer.byteLength(body.data) > 256 * 1024) throw new ApiError(400, 'invalid_input', 'Expected terminal data up to 256 KiB');
     const origin = body.origin || 'ui';
     if (!['ui', 'plugin'].includes(origin)) throw new ApiError(400, 'invalid_origin', 'Invalid input origin');
@@ -509,6 +540,7 @@ class TerminalBroker {
 
   async prompt(id, body) {
     const session = this.get(id);
+    if (session.closeFenced) throw new ApiError(409, 'terminal_closing', 'Terminal is fenced for replacement');
     if (typeof body.text !== 'string' || !body.text.trim() || Buffer.byteLength(body.text) > 256 * 1024 || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/.test(body.text)) {
       throw new ApiError(400, 'invalid_prompt', 'Expected nonempty task text, without terminal escape sequences, up to 256 KiB');
     }
@@ -676,9 +708,11 @@ class TerminalBroker {
 
   async resize(id, body) {
     const session = this.get(id);
+    if (session.closeFenced) throw new ApiError(409, 'terminal_closing', 'Terminal is fenced for replacement');
     const cols = boundedInteger(body.cols, session.cols, 20, 500);
     const rows = boundedInteger(body.rows, session.rows, 5, 200);
     return this.serializeWrite(session, async () => {
+      if (session.closeFenced) throw new ApiError(409, 'terminal_closing', 'Terminal is fenced for replacement');
       if (!session.connected) throw new ApiError(409, 'terminal_exited', 'Terminal is disconnected');
       await this.flushScreen(session);
       const previous = { cols: session.cols, rows: session.rows };
@@ -712,8 +746,10 @@ class TerminalBroker {
   }
 
   async close(id, body = {}) {
+    if (body.require_verified === true) return this.verifiedClose(id, body);
     const session = this.get(id);
     return this.serializeWrite(session, async () => {
+      if (session.closeFenced) throw new ApiError(409, 'terminal_close_unknown', 'Original replacement close remains fenced');
       if (body.require_idle === true) {
         if (session.transport !== 'local') throw new ApiError(400, 'invalid_close', 'Idle handoff is only supported for local management terminals');
         await this.refreshForeground(session, true);
@@ -731,6 +767,75 @@ class TerminalBroker {
       return { id, closed: true };
     });
   }
+
+  async verifiedClose(id, body) {
+    if (!SESSION_ID.test(id) || !['local', 'ssh'].includes(body.expected_transport)
+        || typeof body.expected_host !== 'string' || !body.expected_host || body.expected_host.length > 200
+        || typeof body.expected_target !== 'string' || body.expected_target.length > 4096
+        || (body.expected_transport === 'local' ? body.expected_target !== ''
+          : !body.expected_target || body.expected_target.startsWith('-') || /[\s\x00-\x1f]/.test(body.expected_target))) {
+      throw new ApiError(400, 'invalid_close_identity', 'Exact registered terminal route is required');
+    }
+    // Validate before publishing the fence. Never accept an arbitrary remote
+    // command or a missing identity as permission to kill a matching name.
+    const remote = body.expected_transport === 'ssh' ? remoteCloseCommand(id, body.expected_remote) : null;
+    const digest = crypto.createHash('sha256').update(JSON.stringify([body.expected_host, body.expected_transport,
+      body.expected_target, body.expected_remote ?? null])).digest('hex');
+    const previous = this.verifiedCloseAttempts.get(id);
+    if (previous) {
+      if (previous.digest !== digest) throw new ApiError(409, 'terminal_close_unknown', 'Original terminal close is already fenced with another identity');
+      return previous.promise;
+    }
+    const session = this.sessions.get(id);
+    if (!session && body.expected_transport === 'local') throw new ApiError(409, 'terminal_close_unknown', 'Original local terminal exit cannot be established');
+    if (session && (session.host !== body.expected_host || session.transport !== body.expected_transport || session.target !== body.expected_target)) {
+      throw new ApiError(409, 'session_conflict', 'Terminal close route changed');
+    }
+    if (session?.attaching) throw new ApiError(409, 'session_attaching', 'Original terminal attachment is still starting');
+    if (session) session.closeFenced = true;
+    const execute = async () => {
+      if (remote) {
+        let response;
+        try {
+          const result = await this.runCommand(sshExecutable(), ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20',
+            '-o', 'ControlMaster=no', '-o', 'ControlPersist=no', '-o', 'ControlPath=none', body.expected_target, remote], 45000);
+          const prefix = 'CEO_HUB_TERMINAL_CLOSE_RESULT=';
+          const lines = String(result.stdout || '').split(/\r?\n/).filter(line => line.startsWith(prefix));
+          response = lines.length === 1 ? JSON.parse(lines[0].slice(prefix.length)) : null;
+        } catch { throw new ApiError(409, 'terminal_close_unknown', 'Remote terminal close was not confirmed'); }
+        if (!response || Object.keys(response).sort().join(',') !== 'closed_verified,ok,terminal_id'
+            || response.ok !== true || response.closed_verified !== true || response.terminal_id !== id) {
+          throw new ApiError(409, 'terminal_close_unknown', 'Remote terminal close was not confirmed');
+        }
+      }
+      if (session) {
+        const observation = session.exitObservation;
+        if (!observation || observation.child !== session.pty) throw new ApiError(409, 'terminal_close_unknown', 'Original display exit cannot be established');
+        if (!observation.observed) {
+          try { session.pty.kill(); }
+          catch { throw new ApiError(409, 'terminal_close_unknown', 'Original display exit was not confirmed'); }
+          let timer;
+          try {
+            await Promise.race([observation.promise, new Promise((resolve, reject) => {
+              timer = setTimeout(() => reject(new ApiError(409, 'terminal_close_unknown', 'Original display exit was not confirmed')), this.closeExitTimeout);
+            })]);
+          } finally { clearTimeout(timer); }
+        }
+        if (!observation.observed || this.sessions.get(id) !== session || session.pty !== observation.child) {
+          throw new ApiError(409, 'terminal_close_unknown', 'Original display identity changed during close');
+        }
+        session.connected = false; session.state = 'exited';
+        this.sessions.delete(id);
+        session.terminal.dispose();
+      }
+      return { id, closed: true, closed_verified: true, record_removed: true,
+        ...(remote ? { remote_closed_verified: true } : {}),
+        local_display_exit_verified: !!session, missing_record: !session };
+    };
+    const promise = session ? this.serializeWrite(session, execute) : Promise.resolve().then(execute);
+    this.verifiedCloseAttempts.set(id, { digest, promise });
+    return promise;
+  }
 }
 
 async function readBody(request) {
@@ -746,6 +851,8 @@ async function readBody(request) {
 }
 
 function createServer(broker, token, recoveryId = null) {
+  const ownerMatches = owner => owner && Object.keys(owner).sort().join(',') === 'pid,recovery_id'
+    && owner.pid === process.pid && owner.recovery_id === recoveryId;
   return http.createServer(async (request, response) => {
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
     response.setHeader('Cache-Control', 'no-store');
@@ -759,9 +866,15 @@ function createServer(broker, token, recoveryId = null) {
       if (auth.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) throw new ApiError(401, 'unauthorized', 'Authentication required');
       const url = new URL(request.url, 'http://127.0.0.1');
       let result;
-      if (request.method === 'GET' && url.pathname === '/health') result = { ok: true, version: VERSION, pid: process.pid, recovery_id: recoveryId, features: ['direct_program', 'input_busy', 'idle_close'] };
+      if (request.method === 'GET' && url.pathname === '/health') result = { ok: true, version: VERSION, pid: process.pid, recovery_id: recoveryId, features: ['direct_program', 'input_busy', 'idle_close', 'verified_close'] };
       else if (request.method === 'GET' && url.pathname === '/sessions') result = { sessions: [...broker.sessions.values()].map(session => broker.describe(session)) };
-      else if (request.method === 'POST' && url.pathname === '/sessions/create') result = await broker.create(await readBody(request));
+      else if (request.method === 'POST' && url.pathname === '/sessions/create') {
+        const body = await readBody(request);
+        if ((Object.hasOwn(body, 'expected_owner') || body.require_verified === true) && !ownerMatches(body.expected_owner)) {
+          throw new ApiError(409, 'terminal_owner_changed', 'Original terminal service generation changed');
+        }
+        result = await broker.create(body);
+      }
       else {
         const match = /^\/sessions\/(ceohub-[a-f0-9]{16,48})\/(snapshot|output|input|prompt|resize|close)$/.exec(url.pathname);
         if (!match) throw new ApiError(404, 'not_found', 'Endpoint not found');
@@ -770,6 +883,10 @@ function createServer(broker, token, recoveryId = null) {
         else if (request.method === 'GET' && action === 'output') result = await broker.output(id, url.searchParams.get('after') || 0);
         else if (request.method === 'POST' && ['input', 'prompt', 'resize', 'close'].includes(action)) {
           const body = await readBody(request);
+          if (action === 'close' && body.require_verified === true
+              && !ownerMatches(body.expected_owner)) {
+            throw new ApiError(409, 'terminal_owner_changed', 'Original terminal service generation changed');
+          }
           result = await broker[action](id, body);
         } else throw new ApiError(405, 'method_not_allowed', 'Invalid request method');
       }
@@ -1011,5 +1128,5 @@ async function main() {
   });
 }
 
-module.exports = { main, TerminalBroker, ApiError, createServer, descriptorPath, shellQuote, classifyCommand, updateHumanInput, blockedScreen, spawnSshPipe, remoteBridgeCommand, directRootIdentity, nativeRootKind, recoveryGuard, verifyRecoveryInputs, requireRefusedRecoveryPort, initializeOwnedDisplay, recoveryOwnerState, validOwnerIdentity, ownBrokerIdentity, parseOwnerLock };
+module.exports = { main, TerminalBroker, ApiError, createServer, descriptorPath, shellQuote, classifyCommand, updateHumanInput, blockedScreen, spawnSshPipe, remoteBridgeCommand, remoteCloseCommand, validRemoteCloseIdentity, directRootIdentity, nativeRootKind, recoveryGuard, verifyRecoveryInputs, requireRefusedRecoveryPort, initializeOwnedDisplay, recoveryOwnerState, validOwnerIdentity, ownBrokerIdentity, parseOwnerLock };
 if (require.main === module) main().catch(error => { process.stderr.write(`Terminal broker failed: ${error.message}\n`); process.exitCode = 1; });

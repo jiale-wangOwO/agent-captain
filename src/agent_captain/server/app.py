@@ -251,11 +251,14 @@ def create_server(hub, port=8766, token=None):
                 elif self.path == "/api/terminals/connect":
                     self.respond(200, hub.connect_terminal(body["host"], body["thread_id"]))
                 elif self.path == "/api/terminals/input":
-                    self.respond(200, hub.terminal_input(body["host"], body["thread_id"], body["data"]))
+                    self.respond(200, hub.terminal_input(body["host"], body["thread_id"], body["data"], expected_terminal_id=body.get("expected_terminal_id")))
                 elif self.path == "/api/terminals/resize":
-                    self.respond(200, hub.terminal_resize(body["host"], body["thread_id"], body["cols"], body["rows"]))
+                    self.respond(200, hub.terminal_resize(body["host"], body["thread_id"], body["cols"], body["rows"], expected_terminal_id=body.get("expected_terminal_id")))
                 elif self.path == "/api/terminals/close":
-                    self.respond(200, hub.terminal_close(body["host"], body["thread_id"], body.get("confirm") is True))
+                    self.respond(200, hub.terminal_close(body["host"], body["thread_id"], body.get("confirm") is True, expected_terminal_id=body.get("expected_terminal_id")))
+                elif self.path == "/api/terminals/reopen":
+                    self.respond(200, hub.reopen_terminal(body["host"], body["thread_id"], body.get("request_key"),
+                        body.get("expected_terminal_id"), confirm=body.get("confirmed") is True))
                 elif self.path == "/api/agents/activate":
                     self.respond(200, hub.activate_agent(body["host"], body["thread_id"], body["active"] is True))
                 elif self.path == "/api/agents/read":
@@ -264,7 +267,7 @@ def create_server(hub, port=8766, token=None):
                 elif self.path == "/api/agents/bind-output":
                     self.respond(200, hub.bind_output(body["host"], body["thread_id"], body["session_id"]))
                 elif self.path == "/api/agents/message":
-                    self.respond(200, hub.send(body["host"], body["thread_id"], body["text"], request_key=body.get("request_key")))
+                    self.respond(200, hub.send(body["host"], body["thread_id"], body["text"], request_key=body.get("request_key"), expected_terminal_id=body.get("expected_terminal_id")))
                 elif self.path == "/api/agents/create":
                     self.respond(200, hub.create_agent(body["host"], body["cwd"], body["title"], body.get("text", ""), body.get("active", True), body.get("request_key"), command=body.get("command", "")))
                 else:

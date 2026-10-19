@@ -9,6 +9,12 @@ AgentCaptain 的远端接口是普通 OpenSSH。对于通过 VS Code Remote Tunn
 - 用户在 AgentCaptain 的机器配置 UI 中填写机器名称及普通 SSH alias。Hub 只保存 `transport: ssh` 与该 alias，不保存 Tunnel 登录令牌或 SSH 私钥。
 - 远端使用自己的 SSH 服务、Python 3、tmux。连接机器或打开 shell 不会启动/恢复 Codex，也不选择模型供应商。
 
+### 重连与重开的传输边界
+
+重连只附着原 tmux，不创建替代 Shell。另一个明确确认的「重开终端」操作才会结束并删除准确旧终端/自有 tmux，再在同一工作目录创建新 Shell；工作卡片、名称和置顶不变，terminal ID 换代。关闭前必须取得原目标、所有权和前台进程身份的证据，原目标缺失也必须确认，不按同名猜测；握手失败、关闭结果不明或能力不足均不能当作成功删除，也不能自动换成普通关闭或重复创建。独立后台进程不保证随前台结束。
+
+新 Shell 不收到工具发出的 Codex/resume、原任务、草稿或排队输入；用户的 Shell 启动配置仍可运行其自定义程序。原会话输出仅保留为历史，不能继续充当新终端的实时绑定；旧代次网页输入、尺寸及关闭请求须被拒绝。MCP `reopen_agent` 必须提供精确 `agent_id`、用户确认时捕获的 `expected_terminal_id`、`confirmed: true` 和稳定 `request_key`；独立管理者另需该机器/目录的新建权限。`unknown` 保留同一键和原回执，只能显式核对，不盲目重做。外部传输仍只提供 SSH，不因该操作取得重启其他隧道、模型或会话的权限。
+
 ## 必须验证的行为
 
 Hub 的常驻显示使用 `ssh -tt`；目录、历史、前台身份与尺寸控制使用独立的短 SSH 连接。因此单次 `ssh host true` 或服务器 banner 成功不足以确认接入可用。

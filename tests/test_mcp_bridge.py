@@ -123,7 +123,7 @@ class McpBridgeTests(unittest.TestCase):
         self.assertEqual(responses[0]["result"]["serverInfo"]["version"], mcp_bridge.VERSION)
         self.assertEqual(responses[2]["result"], {})
         names = {item["name"] for item in responses[1]["result"]["tools"]}
-        self.assertEqual(names, {"list_active_agents", "get_agent", "read_agent", "update_agent", "reconnect_agent", "send_agent_message", "send_terminal_input", "create_agent", "poll_events", "get_delivery", "get_management_policy"})
+        self.assertEqual(names, {"list_active_agents", "get_agent", "read_agent", "update_agent", "reconnect_agent", "reopen_agent", "send_agent_message", "send_terminal_input", "create_agent", "poll_events", "get_delivery", "get_management_policy"})
         self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "ceo-hub")
         self.assertEqual(responses[0]["result"]["serverInfo"]["version"], "0.7.0")
         self.assertNotIn("private-secret", process.stdout)
@@ -265,6 +265,76 @@ class McpBridgeTests(unittest.TestCase):
             self.assertTrue(self.call(bridge, "reconnect_agent", {**arguments, **extra})["result"]["isError"])
         self.assertTrue(self.call(bridge, "reconnect_agent", {"agent_id": "316::terminal-1"})["result"]["isError"])
         self.assertEqual(len(service.calls), 1)
+
+    def test_reopen_schema_is_destructive_explicit_and_closed_to_startup_arguments(self):
+        definition = mcp_bridge.TOOLS_BY_NAME["reopen_agent"]
+        self.assertFalse(definition["annotations"]["readOnlyHint"])
+        self.assertTrue(definition["annotations"]["destructiveHint"])
+        self.assertTrue(definition["annotations"]["idempotentHint"])
+        self.assertFalse(definition["inputSchema"]["additionalProperties"])
+        self.assertEqual(set(definition["inputSchema"]["required"]),
+            {"agent_id", "expected_terminal_id", "confirmed", "request_key"})
+        self.assertEqual(set(definition["inputSchema"]["properties"]),
+            {"agent_id", "expected_terminal_id", "confirmed", "request_key"})
+        self.assertIn("Destructive", definition["description"])
+        self.assertIn("does not start/resume Codex", definition["description"])
+
+    def test_reopen_invalid_confirmation_missing_required_fields_or_extra_arguments_never_contact_http(self):
+        service = self.service()
+        bridge = mcp_bridge.McpBridge()
+        self.initialize(bridge)
+        base = {"agent_id": "316::terminal-1", "expected_terminal_id": "ceohub-" + "a" * 32,
+            "confirmed": True, "request_key": "one-destructive-intent"}
+        invalid = [{key: value for key, value in base.items() if key != field} for field in base]
+        invalid += [{**base, "confirmed": value} for value in (False, 1, None, "true")]
+        invalid += [{**base, "expected_terminal_id": ""}, {**base, "expected_terminal_id": "a" * 129}]
+        invalid += [{**base, **extra} for extra in ({"command": "codex resume"}, {"resume": True},
+            {"force": True}, {"host": "another-host"}, {"target": "another-ssh"}, {"transport": "ssh"},
+            {"controller_id": "forged-controller"}, {"text": "new task"}, {"data": "yes\r"})]
+        for arguments in invalid:
+            with self.subTest(arguments=arguments):
+                response = self.call(bridge, "reopen_agent", arguments)["result"]
+                self.assertTrue(response["isError"])
+        self.assertEqual(service.calls, [])
+
+    def test_reopen_preserves_exact_identity_key_and_lifecycle_evidence_without_resume(self):
+        service = self.service()
+        bridge = mcp_bridge.McpBridge()
+        self.initialize(bridge)
+        arguments = {"agent_id": "316::terminal-1", "expected_terminal_id": "ceohub-" + "a" * 32,
+            "confirmed": True, "request_key": "same-reopen-operation"}
+        for state, code in (("blocked", "verified_close_unavailable"), ("unknown", "reopen_close_unknown"), ("done", "reopened")):
+            service.result = {"agent_id": arguments["agent_id"], "operation": "reopen_terminal",
+                "operation_id": arguments["request_key"], "operation_state": state,
+                "previous_terminal_id": arguments["expected_terminal_id"], "reopened": state == "done",
+                "model_started": False, "recovery": {"code": code, "message": "Only this confirmed terminal; no model command."}}
+            with self.subTest(state=state):
+                response = self.call(bridge, "reopen_agent", arguments)["result"]
+                self.assertFalse(response["isError"])
+                self.assertEqual(response["structuredContent"], service.result)
+                self.assertEqual(service.calls[-1]["body"], {"tool": "reopen_agent", "arguments": arguments})
+        self.assertEqual(len(service.calls), 3, "Only the explicitly issued fake-service requests may be made")
+
+    def test_reopen_timeout_uses_dedicated_budget_keeps_original_key_and_never_retries(self):
+        service = self.service()
+        bridge = mcp_bridge.McpBridge()
+        self.initialize(bridge)
+        arguments = {"agent_id": "316::terminal-1", "expected_terminal_id": "ceohub-" + "a" * 32,
+            "confirmed": True, "request_key": "same-destructive-operation"}
+        for failure in (mcp_bridge.URLError("fixture response lost"), TimeoutError("fixture timeout")):
+            with self.subTest(failure=type(failure).__name__), patch.object(mcp_bridge, "build_opener") as opener:
+                opener.return_value.open.side_effect = failure
+                response = self.call(bridge, "reopen_agent", arguments)["result"]
+                self.assertTrue(response["isError"])
+                message = response["content"][0]["text"]
+                self.assertIn("outcome is unknown", message)
+                self.assertIn("SAME request_key", message)
+                self.assertIn("do not submit a new key", message)
+                opener.return_value.open.assert_called_once()
+                self.assertEqual(opener.return_value.open.call_args.kwargs["timeout"], 210)
+                forwarded = json.loads(opener.return_value.open.call_args.args[0].data)
+                self.assertEqual(forwarded, {"tool": "reopen_agent", "arguments": arguments})
+        self.assertEqual(service.calls, [])
 
     def test_management_action_timeout_preserves_unknown_same_key_guidance_without_retry(self):
         self.service()

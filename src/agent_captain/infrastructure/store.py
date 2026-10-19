@@ -170,6 +170,41 @@ class Store:
             self.db.execute("update outbox set state='scope_revoked',error=? where host=? and thread_id=? and origin='plugin' and state in (" + placeholders + ")",
                             ("已移出 CEO 管理范围；未提交的输入不会执行。", host, thread_id, *states))
 
+    def fence_terminal_reopen(self, host, thread_id, terminal_id, operation, states):
+        """Retain every old delivery, but never carry retryable input forward.
+
+        The caller holds the worker registry lock and has already fenced the
+        generation as closing. Unknown/submitted deliveries remain unchanged;
+        a replacement shell is not evidence that their input was not delivered.
+        """
+        with self.lock, self.db:
+            placeholders = ",".join("?" for _ in states)
+            rows = self.db.execute("select id,state from outbox where host=? and thread_id=? and state in ("
+                + placeholders + ")", (host, thread_id, *states)).fetchall()
+            for row in rows:
+                self.db.execute("update outbox set state='not_sent',error=? where id=?",
+                    ("原终端已请求重新打开；旧待发送输入已作废，不会发送到新终端。", row["id"]))
+                self.db.execute("insert into events(time,kind,data) values(?,?,?)", (time.time(), "terminal_reopen_input_fenced",
+                    json.dumps({"host": host, "thread_id": thread_id, "terminal_id": terminal_id,
+                        "operation_id": operation, "request_id": row["id"], "previous_state": row["state"],
+                        "state": "not_sent"}, ensure_ascii=False)))
+            return [row["id"] for row in rows]
+
+    def replace_terminal_generation(self, host, thread_id, old_terminal_id, new_terminal_id, generation, generation_key, recovery_key):
+        """Publish one replacement ID and archive its superseded recovery atomically."""
+        with self.lock, self.db:
+            row = self.db.execute("select terminal_id,mode from agents where host=? and thread_id=?", (host, thread_id)).fetchone()
+            if not row or row["terminal_id"] != old_terminal_id or row["mode"] != "closing":
+                raise ValueError("原终端登记已经改变；不发布替代终端。")
+            previous = self.db.execute("select value from settings where key=?", (recovery_key,)).fetchone()
+            receipt = dict(generation)
+            receipt["previous_recovery"] = json.loads(previous["value"]) if previous else None
+            self.db.execute("insert or replace into settings(key,value) values(?,?)", (generation_key, json.dumps(receipt)))
+            self.db.execute("delete from settings where key=?", (recovery_key,))
+            self.db.execute("update agents set terminal_id=?,active=0,mode='closing' where host=? and thread_id=?",
+                (new_terminal_id, host, thread_id))
+            return receipt
+
     def fence_pending_policy_upgrade(self, agents, states, migration_key, reason):
         """Once-only durable not-sent fence, with an audit for each old input.
 

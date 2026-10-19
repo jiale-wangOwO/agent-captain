@@ -35,6 +35,23 @@ automatically manageable; naming changes display metadata, not native identity.
 Inspect live evidence for the selected worker rather than treating the
 cached overview as a fresh connectivity check.
 
+`reopen_agent` is a separate **destructive, explicitly confirmed** operation,
+not a reconnect fallback. First inspect the selected worker with `get_agent`;
+send its exact `agent_id`, the confirmed `expected_terminal_id`, `confirmed: true`,
+and a stable `request_key`. It preserves that worker's registration, name, pin
+and directory but replaces its terminal ID. Only identity-proven original
+terminal/foreground work is stopped and its owned tmux removed, if still present;
+ambiguity fails closed. Independent managers also need creation-directory
+permission for that machine and directory, even for an already enrolled worker.
+
+The replacement is a fresh shell: AgentCaptain sends no Codex/resume command and
+does not replay tasks, drafts or queued input. User-configured shell startup
+files may run their own programs. Saved history remains historical evidence,
+not a live binding to the new terminal; inspect and associate any new session
+separately. Check `operation_state` and `recovery`: a blocked or unknown result
+is not success. Reuse the same key only to inspect its retained receipt; never
+blindly repeat replacement with a new key. Old-generation UI writes are rejected.
+
 This is the **existing-chat integration**. It manages the same enrolled workers
 as a Hub-created manager, without activation or per-worker grants. A Hub manager
 retains independent authentication and explicit new-work directory permissions.
@@ -90,7 +107,7 @@ identity you intend to use, not several, to avoid duplicate tools.
 Review the generated commands before registration. A running MCP process and
 its discovered tool list do not hot-reload after source changes: reload that
 MCP connection or reopen the controlling chat and verify `tools/list` includes
-`update_agent` and `reconnect_agent`, with server version `0.7.0`. Updating the
+`update_agent`, `reconnect_agent` and `reopen_agent`, with server version `0.7.0`. Updating the
 installed skill/manifest is separate from replacing a bridge file; local plugin
 cache loading may require an app reload or restart. Do not restart the terminal
 broker or a worker to refresh plugin tools.

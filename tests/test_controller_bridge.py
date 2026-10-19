@@ -59,7 +59,8 @@ class ControllerBridgeTests(unittest.TestCase):
         self.assertNotIn("private-controller-cap", json.dumps(response))
         bridge.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
         response = bridge.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        self.assertEqual(len(response["result"]["tools"]), 12)
+        self.assertEqual(len(response["result"]["tools"]), 13)
+        self.assertIn("reopen_agent", {item["name"] for item in response["result"]["tools"]})
         self.assertIn("get_management_policy", {item["name"] for item in response["result"]["tools"]})
         self.assertEqual(response["result"]["tools"][-1]["name"], "get_controller_context")
         self.assertEqual(len(self.calls), 1)
@@ -108,7 +109,8 @@ class ControllerBridgeTests(unittest.TestCase):
             self.assertIn("result", self.initialize(bridge))
             bridge.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
             response = bridge.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        self.assertEqual(len(response["result"]["tools"]), 11)
+        self.assertEqual(len(response["result"]["tools"]), 12)
+        self.assertIn("reopen_agent", {item["name"] for item in response["result"]["tools"]})
         self.assertIn("get_management_policy", {item["name"] for item in response["result"]["tools"]})
 
     def test_custom_terminal_descriptor_and_logs_only_change_child_environment(self):

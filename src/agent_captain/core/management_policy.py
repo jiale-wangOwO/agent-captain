@@ -80,6 +80,14 @@ replacement, resume Codex, restart a shared tunnel or replay tasks. Keep the
 same request_key and reconcile uncertain results. Existing-worker access is
 automatic; explicit allowed project roots are required only for creating new
 workers. Do not grant new hosts, directories or filesystem access yourself.
+Only explicit human confirmation to end and replace the selected terminal
+authorizes reopen_agent. Freeze get_agent's terminal_id as expected_terminal_id,
+pass confirmed=true and a stable request_key. It verifies and removes the old
+terminal before creating a fresh shell in the original directory; it does not
+send Codex startup/resume, task, draft or queued input. User shell initialization
+remains user-controlled. Independent managers need creation permission for that
+directory. An unknown outcome is inspected with the same key, never another
+replacement; old saved output is history, not the new terminal's live Session.
 Do not change authentication, model providers or approval decisions.
 Initialization only calls get_controller_context and then waits for the user.
 Do not recursively create, register or manage another management session.
@@ -107,8 +115,12 @@ MCP_INSTRUCTIONS = (
     "consequential external actions outside the user's request. A shell is not Codex. History-only, "
     "closed and management sessions are not workers. Reconnect only an explicitly requested "
     "original SSH display, without resume, replacement, tunnel restart or replay; use stable "
-    "request keys. New-worker creation still needs the intended allowed project roots. Direct "
-    "execution is reserved for explicit user requests or Hub platform maintenance. Use "
+    "request keys. New-worker creation still needs the intended allowed project roots. "
+    "Reopen only after explicit human confirmation to end the exact terminal, using reopen_agent "
+    "with its frozen expected_terminal_id, confirmed=true and a stable request_key. This destructive "
+    "replacement opens a new shell, never auto-resumes Codex or replays drafts/tasks; unknown "
+    "outcomes retain the same key and independent managers need creation-directory permission. "
+    "Direct execution is reserved for explicit user requests or Hub platform maintenance. Use "
     "get_management_policy for the current public role guidance; it grants no capabilities. "
     "No separate Captain model or automatic frontend wake runs here."
 )

@@ -124,12 +124,12 @@ class HttpServiceTests(unittest.TestCase):
 
     def test_terminal_routes_forward_same_identity_and_do_not_persist_ui_keys(self):
         calls = []
-        self.hub.terminal_input = lambda host, thread, data: calls.append((host, thread, data)) or {"accepted": True}
+        self.hub.terminal_input = lambda host, thread, data, **kw: calls.append((host, thread, data, kw)) or {"accepted": True}
         self.hub.terminal_output = lambda host, thread, after: {"ansi": "Shared", "seq": 2, "reset": True, "cols": 90, "rows": 25}
         cookie = "ceo_session=test-private-token"
         self.request("/api/terminals/input", {"host": "local", "thread_id": "t", "data": "exact\r"}, Cookie=cookie, Origin=self.server.origin)
         output = self.request("/api/terminals/output?host=local&thread_id=t&after=0", Cookie=cookie)
-        self.assertEqual(calls, [("local", "t", "exact\r")])
+        self.assertEqual(calls, [("local", "t", "exact\r", {"expected_terminal_id": None})])
         self.assertEqual(output["ansi"], "Shared")
         self.assertEqual(self.hub.store.outbox(), [])
 
@@ -159,10 +159,10 @@ class HttpServiceTests(unittest.TestCase):
 
     def test_close_route_needs_explicit_confirmation(self):
         calls = []
-        def close(host, thread_id, confirm=False):
+        def close(host, thread_id, confirm=False, expected_terminal_id=None):
             if confirm is not True:
                 raise ValueError("explicit confirmation required")
-            calls.append((host, thread_id))
+            calls.append((host, thread_id, expected_terminal_id))
             return {"closed": True, "status": "closed"}
         self.hub.terminal_close = close
         cookie = "ceo_session=test-private-token"
@@ -170,7 +170,70 @@ class HttpServiceTests(unittest.TestCase):
             self.request("/api/terminals/close", {"host": "local", "thread_id": "owned"}, Cookie=cookie, Origin=self.server.origin)
         result = self.request("/api/terminals/close", {"host": "local", "thread_id": "owned", "confirm": True}, Cookie=cookie, Origin=self.server.origin)
         self.assertTrue(result["closed"])
-        self.assertEqual(calls, [("local", "owned")])
+        self.assertEqual(calls, [("local", "owned", None)])
+
+    def test_terminal_mutations_forward_exact_captured_generation_without_persisting_ui_input(self):
+        terminal_id = "ceohub-" + "a" * 32
+        cookie = "ceo_session=test-private-token"
+        cases = (
+            ("/api/terminals/input", "terminal_input", {"data": "exact\r", "request_key": "not-a-persisted-ui-delivery"},
+             ("local", "t", "exact\r"), {"expected_terminal_id": terminal_id}),
+            ("/api/terminals/resize", "terminal_resize", {"cols": 90, "rows": 25},
+             ("local", "t", 90, 25), {"expected_terminal_id": terminal_id}),
+            ("/api/terminals/close", "terminal_close", {"confirm": True},
+             ("local", "t", True), {"expected_terminal_id": terminal_id}),
+            ("/api/agents/message", "send", {"text": "fresh-generation task", "request_key": "message-generation-once"},
+             ("local", "t", "fresh-generation task"), {"request_key": "message-generation-once", "expected_terminal_id": terminal_id}),
+        )
+        for route, method, changes, arguments, keywords in cases:
+            with self.subTest(route=route):
+                handler = Mock(return_value={"accepted": True})
+                setattr(self.hub, method, handler)
+                self.request(route, {"host": "local", "thread_id": "t", "expected_terminal_id": terminal_id, **changes},
+                    Cookie=cookie, Origin=self.server.origin)
+                handler.assert_called_once_with(*arguments, **keywords)
+        self.assertEqual(self.hub.store.outbox(), [])
+
+    def test_reopen_route_requires_browser_session_same_origin_and_explicit_selected_identity(self):
+        terminal_id = "ceohub-" + "a" * 32
+        body = {"host": "local", "thread_id": "selected", "expected_terminal_id": terminal_id,
+            "request_key": "reopen-one-selected-terminal", "confirmed": True}
+        receipt = {"operation": "reopen_terminal", "operation_id": body["request_key"],
+            "previous_terminal_id": terminal_id, "operation_state": "unknown", "reopened": False,
+            "recovery": {"code": "reopen_close_unknown", "next_action": "inspect_connection"}}
+        self.hub.reopen_terminal = Mock(return_value=receipt)
+        denied = ({"Authorization": "Bearer test-private-token"},
+                  {"Cookie": "ceo_session=test-private-token"},
+                  {"Cookie": "ceo_session=test-private-token", "Origin": "https://evil.example"})
+        for headers in denied:
+            with self.subTest(headers=sorted(headers)), self.assertRaises(HTTPError) as error:
+                self.request("/api/terminals/reopen", body, **headers)
+            self.assertEqual(error.exception.code, 403)
+        self.hub.reopen_terminal.assert_not_called()
+        result = self.request("/api/terminals/reopen", body,
+            Cookie="ceo_session=test-private-token", Origin=self.server.origin)
+        self.assertEqual(result, receipt, "Unknown lifecycle evidence must not be relabelled as success")
+        self.hub.reopen_terminal.assert_called_once_with("local", "selected", body["request_key"], terminal_id, confirm=True)
+        self.assertEqual(self.hub.store.outbox(), [])
+
+    def test_reopen_route_does_not_coerce_truthy_or_legacy_confirmation_into_permission(self):
+        terminal_id = "ceohub-" + "a" * 32
+        attempts = []
+        def reopen(host, thread_id, request_key, expected_terminal_id, confirm=False):
+            attempts.append((host, thread_id, request_key, expected_terminal_id, confirm))
+            if confirm is not True:
+                raise ValueError("explicit confirmation required")
+            return {"reopened": True}
+        self.hub.reopen_terminal = reopen
+        base = {"host": "local", "thread_id": "selected", "request_key": "same-reopen-intent", "expected_terminal_id": terminal_id}
+        for changes in ({}, {"confirmed": False}, {"confirmed": 1}, {"confirmed": "true"}, {"confirm": True}):
+            with self.subTest(changes=changes), self.assertRaises(HTTPError) as error:
+                self.request("/api/terminals/reopen", {**base, **changes},
+                    Cookie="ceo_session=test-private-token", Origin=self.server.origin)
+            self.assertEqual(error.exception.code, 400)
+        self.assertTrue(all(attempt[-1] is False for attempt in attempts))
+        self.assertEqual(len(attempts), 5)
+        self.assertEqual(self.hub.store.outbox(), [])
 
     def test_output_association_is_only_ui_origin_and_read_forwards_pagination(self):
         calls = []

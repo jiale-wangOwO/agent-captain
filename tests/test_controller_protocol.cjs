@@ -86,7 +86,7 @@ test('private broker health advertises new features without a protocol version b
     const response = await fetch(`http://127.0.0.1:${server.address().port}/health`, { headers: { Authorization: 'Bearer fake-private-capability' } });
     const result = await response.json();
     assert.equal(result.version, '0.3.0');
-    assert.deepEqual(result.features, ['direct_program', 'input_busy', 'idle_close']);
+    assert.deepEqual(result.features, ['direct_program', 'input_busy', 'idle_close', 'verified_close']);
   } finally {
     await new Promise(resolve => server.close(resolve));
   }

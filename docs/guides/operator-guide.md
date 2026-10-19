@@ -124,6 +124,14 @@ Reconnection only reattaches the original remote persistent terminal. It must no
 
 Workers and managers are separate records and terminal services. A manager is not registered as its own worker; authenticated tools reject manager-to-manager operations and recursive management creation. These are Hub API safeguards, not operating-system sandbox isolation.
 
+### Reopen a terminal (destructive)
+
+Use **Reopen terminal…** (「重开终端…」) in the worker's **More** menu or detail view only when you intend to replace its terminal, not merely reconnect. Check the displayed machine, name, directory and old terminal ID; save any needed drafts, then explicitly confirm ending the old terminal and its foreground work. The identity-proven original terminal and foreground processes are stopped, and its owned tmux is removed if present; unrelated sessions and independently detached daemons are not promised to stop. Project files are not deleted. Missing or ambiguous ownership/close evidence fails closed, with no ordinary-close fallback.
+
+The same worker card, alias, pin and directory remain, but its terminal ID changes. AgentCaptain opens a fresh shell and issues no Codex/resume command; your own shell startup configuration may still run programs. Tasks, drafts and queued input are not replayed. Saved conversation history remains historical evidence, not a live binding to the new shell. Start and associate a new model session yourself when needed. Old browser-generation input, resize and close requests are rejected.
+
+Inspect `operation_state` and `recovery`, not just a connected indicator. A blocked/unknown result is not success; keep the original request key and manually inspect its retained receipt. Refresh or reload never blindly replaces the terminal again, and unknown results must not be bypassed with a new key. For a known blocked operation, close the dialog and explicitly confirm a new intent before trying again. Page-local unsent keys remain available for copying, never as automatic input to the replacement; copy them before refreshing.
+
 ## Optional: connect an existing Codex chat with the legacy plugin
 
 This is a compatibility path for a chat you already run, not a required step for Hub-created management sessions. Both paths can manage the same registered open shared workers; neither requires a global activation list or a per-manager worker checklist. A Hub-created manager retains its independent authenticated identity, lifecycle, delivery records, and explicit new-creation directory settings. The identity-only `get_controller_context` tool is not available to legacy credentials. The existing-chat plugin uses a shared service credential and retains its compatibility creation channel; it does not enforce an independent manager's creation-directory roots. Prefer a Hub-created management session when you need those explicit directory limits. This compatibility channel does not authorize unrelated tasks or bypass human approvals; see [the security boundary](../../SECURITY.md#legacy-existing-chat-integration).
@@ -201,6 +209,7 @@ The management terminal is separate from worker terminals. **Hide display** or c
 | `list_active_agents` | Compatibility name: list all registered open shared workers, including temporarily disconnected originals; no activation filter |
 | `update_agent` | Persist the worker's display alias or pinned order without changing Codex or terminal input |
 | `reconnect_agent` | Safely reattach the exact original registered terminal, without new creation, resume, or task replay |
+| `reopen_agent` | Destructive, explicitly confirmed terminal replacement; preserve the worker card/directory but open a new shell |
 | `get_agent` | Inspect one terminal's connection and foreground state |
 | `read_agent` | Read its exact-session output with pagination |
 | `send_agent_message` | Deliver ordinary user task text |
@@ -210,6 +219,8 @@ The management terminal is separate from worker terminals. **Hide display** or c
 | `poll_events` | Read incremental registered-worker events |
 
 Read, write, delivery lookup, and event tools authenticate their caller and operate on registered open shared workers, not arbitrary sessions or manager terminals. Worker membership is automatic, but connection/readiness checks, human-draft protection, closed-session rejection, and independent lifecycle checks remain enforced. Existing queued writes retain their original request identity; old unknown or revoked operations are not replayed by this migration. Creating new workers through a Hub-created manager requires its explicit machine/project-directory roots; the existing-chat plugin retains the separate compatibility channel described above. The service does not automatically approve worker actions, recursively create managers, or start a new controller turn.
+
+`reopen_agent` requires all four arguments: exact `agent_id`, `expected_terminal_id` captured from `get_agent` when the user confirmed replacement, `confirmed: true`, and stable `request_key`. It is not authorized merely by a request to reconnect or progress a project. Hub-created managers need creation permission for the existing machine/directory as well; ordinary access to an enrolled worker does not grant replacement permission. Same-key calls inspect the retained outcome rather than blindly repeat a destructive operation. The browser equivalent is `POST /api/terminals/reopen` with `host`, `thread_id`, `expected_terminal_id`, `confirmed: true`, and `request_key`.
 
 ## SSH and tunnels
 

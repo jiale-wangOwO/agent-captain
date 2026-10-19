@@ -33,6 +33,7 @@ description: 在当前 Codex 对话中担任主控，通过 AgentCaptain 管理�
 
 - 用户要求命名、改名或置顶时用 `update_agent`，只传准确目标 `agent_id`、需要更改的 `alias` / `pinned` 及稳定 `request_key`。名称可持久保存并供网页与工具共同识别；不改 Codex 原生 Session、终端 ID、目录、输入或模型配置。用户没有指定名称时，不擅自覆盖其现有名称。
 - 用户明确要求重新连接时用 `reconnect_agent`，只对已获授权的 SSH 工作终端重新接入其原有 tmux 会话。检查 `operation_state` 与 `recovery`，`blocked` / `unknown` 不能当作恢复成功。已连接时为 no-op；原会话不存在、本地终端已退出或用户明确关闭的终端不能借此新建替代。它不启动 `codex`、不发送 `resume`、不重放任何任务或按键。显示连接恢复不证明原项目任务完成，也不自动核验 Codex 日志关联。
+- 用户明确确认结束并替换指定终端时，才用 `reopen_agent`；断线或重连失败本身不是重开的授权。先用 `get_agent` 核对目标，将其 `terminal_id` 固定为 `expected_terminal_id`，传 `confirmed=true` 与稳定 `request_key`。它严格核验并关闭、清理旧终端（存在时），在原目录创建新终端，保留工作名称和登记；会结束旧终端的前台工作，不承诺停止独立后台进程。工具不发送 Codex 启动、resume 或任务命令，也不转发旧草稿或排队输入；用户自己的 shell 初始化仍由其配置决定。独立管理者仍需原目录的新建权限。检查 `operation_state`、`recovery` 和新 `terminal_id`；`unknown` 时只沿用原键核对，不换键重复关闭或创建。关闭无法严格确认时不创建。旧会话记录保留为历史，不能当作新终端的实时输出；恢复模型或重发业务任务需要另外的明确授权。旧插件缺少该工具时，报告需要更新，不借原始输入绕过核验。
 - 外部 tunnel 不可用时汇总工具返回的阻塞原因与用户操作 / Reload 提示，不自动重启 tunnel、daemon 或管理服务，不自动重连循环。原工作进程未确认时不要建议另启相同 Codex 会话；需要新建或恢复模型必须由用户另作明确决定。
 
 ## 使用共享终端

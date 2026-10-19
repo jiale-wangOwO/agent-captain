@@ -20,12 +20,12 @@ from agent_captain.infrastructure.store import Store
 from agent_captain.transport.terminal_client import BrokerError, TerminalClient
 from agent_captain.core.controllers import ControllerService, default_workspace_root
 from agent_captain.core.management_policy import public_management_policy
-from agent_captain.transport import remote_terminal_history
+from agent_captain.transport import remote_terminal_history, remote_terminal_close
 from agent_captain.paths import ROOT, source_path
 RETRYABLE = ("queued", "waiting_for_agent", "human_busy", "awaiting_connection", "blocked")
 MANAGEMENT_EVENTS = ("host_configured", "host_connected", "host_unavailable", "agent_attached",
                      "agent_created", "agent_activated", "agent_deactivated", "message_submitted",
-                     "terminal_input_submitted", "terminal_state", "terminal_output", "terminal_closed", "agent_updated", "agent_reconnected")
+                     "terminal_input_submitted", "terminal_state", "terminal_output", "terminal_closed", "agent_updated", "agent_reconnected", "terminal_reopened")
 
 
 HISTORY_ERROR_MESSAGES = {
@@ -324,6 +324,22 @@ class Hub:
         if row.get("mode") in ("closed", "closing", "close_unknown"):
             raise ValueError("此终端已关闭或关闭结果尚未确认，不能再输入或重新连接。请新建终端；需要原对话时可在新终端运行 codex resume。")
 
+    @staticmethod
+    def _generation_key(host, thread_id):
+        return "terminal-generation:" + host + ":" + thread_id
+
+    def _require_terminal_generation(self, row, expected_terminal_id=None, origin="ui"):
+        # Old clients may address the first generation by the worker card. Once
+        # that card has been explicitly replaced, only a generation-aware UI
+        # may write/resize/close it. Native plugin actions resolve the current
+        # worker under registry_lock; their old request keys stay fenced.
+        if expected_terminal_id is not None:
+            if (not isinstance(expected_terminal_id, str)
+                    or expected_terminal_id != row.get("terminal_id")):
+                raise ValueError("终端已切换到新一代；旧画面操作未发送，请重新打开终端。")
+        elif origin == "ui" and self.store.setting(self._generation_key(row["host"], row["thread_id"])):
+            raise ValueError("此终端已重新打开；请刷新并使用明确的新终端身份，旧界面操作未发送。")
+
     def is_managed_worker(self, row):
         """Registered open worker identity; cheap metadata, never live probing.
 
@@ -367,6 +383,13 @@ class Hub:
                 "agent_ready": bool(runtime.get("agent_ready")), "human_busy": bool(runtime.get("human_busy")), "blocked_reason": runtime.get("blocked_reason"),
                 "human_input": runtime.get("human_input"),
                 **self._closed_status(row, runtime)}
+        generation = self.store.setting(self._generation_key(host, thread_id))
+        if generation:
+            result["terminal_generation"] = {"terminal_id": row.get("terminal_id"), "requires_expected_terminal_id": True}
+            if generation.get("previous_session_id"):
+                result["previous_output_binding"] = {"state": "historical", "session_id": generation["previous_session_id"],
+                    "terminal_id": generation["previous_terminal_id"], "live_session_verified": False,
+                    "note": "上一终端的历史关联；新终端尚未启动或关联该会话。"}
         recovery = self.store.setting(self._recovery_key(host, thread_id))
         if recovery:
             recovery = dict(recovery)
@@ -1378,6 +1401,175 @@ class Hub:
         combined = request_key + suffix
         return combined if len(combined) <= 200 else hashlib.sha256(request_key.encode()).hexdigest() + suffix
 
+    def _probe_reopen_terminal(self, host, terminal_id):
+        """Fresh, boot-qualified identity for one explicit destructive intent."""
+        config = self.host(host)
+        target = config.get("target", "")
+        if (config.get("transport") != "ssh" or not remote_terminal_close.SESSION.fullmatch(terminal_id)
+                or not isinstance(target, str) or not target or target.startswith("-")
+                or any(char.isspace() or ord(char) < 32 for char in target)):
+            return {"ok": False, "reason": "invalid_target"}
+        try:
+            source = source_path("transport", "remote_terminal_close.py").read_text(encoding="utf-8")
+            reply = subprocess.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPersist=no",
+                "-o", "ConnectTimeout=30", target, "python3 - probe --session " + shlex.quote(terminal_id)],
+                input=pack_python_source(source), text=True, encoding="utf-8", errors="strict", capture_output=True,
+                timeout=45, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if reply.returncode or len(reply.stdout.encode("utf-8")) > 65536:
+                return {"ok": False, "reason": "route_or_identity_unavailable"}
+            lines = [line[len(remote_terminal_close.MARKER):] for line in reply.stdout.splitlines()
+                     if line.startswith(remote_terminal_close.MARKER)]
+            value = json.loads(lines[0]) if len(lines) == 1 else None
+            if (not isinstance(value, dict) or value.get("ok") is not True or value.get("terminal_id") != terminal_id
+                    or type(value.get("exists")) is not bool
+                    or set(value) != ({"ok", "terminal_id", "exists", "identity"} if value["exists"] else {"ok", "terminal_id", "exists"})
+                    or value["exists"] and not remote_terminal_close.valid_identity(value.get("identity"), terminal_id)):
+                raise ValueError()
+            return value
+        except (OSError, UnicodeError, ValueError, subprocess.TimeoutExpired):
+            return {"ok": False, "reason": "route_or_identity_unavailable"}
+
+    @staticmethod
+    def _reopen_owner(health):
+        if (not isinstance(health, dict) or health.get("ok") is not True
+                or type(health.get("pid")) is not int or not 0 < health["pid"] <= 2147483647
+                or not isinstance(health.get("recovery_id"), str)
+                or not re.fullmatch(r"[a-f0-9]{32}", health["recovery_id"])
+                or not isinstance(health.get("features"), list) or "verified_close" not in health["features"]):
+            raise ValueError("verified_close_unavailable")
+        return {"pid": health["pid"], "recovery_id": health["recovery_id"]}
+
+    def reopen_terminal(self, host, thread_id, request_key, expected_terminal_id, confirm=False, origin="ui", controller_id=None):
+        """Explicitly replace one worker terminal, never resume its model.
+
+        Every side effect is fenced by a durable intent. A lost response cannot
+        justify a second close or create, even after restarting the web service.
+        """
+        if confirm is not True:
+            raise ValueError("重新打开会终止旧终端及其中的进程，并创建空白终端；请明确确认。")
+        if origin not in ("ui", "plugin"):
+            raise ValueError("重新打开来源必须为 ui 或 plugin。")
+        self._request_key(request_key)
+        if not request_key:
+            raise ValueError("重新打开必须提供稳定 request_key。")
+        if not isinstance(expected_terminal_id, str) or not remote_terminal_close.SESSION.fullmatch(expected_terminal_id):
+            raise ValueError("必须提供确认时的精确旧终端身份。")
+        with self.registry_lock:
+            agent = self.get_agent(host, thread_id, plugin=False)
+            operation = "terminal-reopen:" + request_key
+            fingerprint = hashlib.sha256(json.dumps([host, thread_id, expected_terminal_id, origin, controller_id]).encode()).hexdigest()
+            if controller_id is not None:
+                self._require_creation_scope(controller_id, host, agent.get("cwd", ""))
+                with self.store.lock:
+                    receipt = self.store.db.execute("select fingerprint from operations where request_key=?", (operation,)).fetchone()
+                # A same-controller receipt can still be read after this very
+                # request fenced its worker as uncertain. It is never authority
+                # for a second mutation or for a fresh closed-worker request.
+                if not receipt or receipt["fingerprint"] != fingerprint or self.is_managed_worker(self.store.agent(host, thread_id)):
+                    self._require_controller_scope(controller_id, host, thread_id)
+            try:
+                previous = self.store.begin_operation(operation, fingerprint)
+            except RuntimeError:
+                return {**agent, "operation": "reopen_terminal", "operation_id": request_key, "operation_state": "unknown",
+                    "reopened": False, "previous_terminal_id": expected_terminal_id,
+                    "recovery": {"code": "reopen_unknown", "next_action": "inspect_connection",
+                        "message": "原重新打开请求尚未完成核验；不会重复关闭或创建，请保留原请求键。"}}
+            if previous is not None:
+                return previous
+
+            def finish(code, message, state="blocked", reopened=False):
+                result = {**self.get_agent(host, thread_id), "operation": "reopen_terminal", "operation_id": request_key,
+                    "operation_state": state, "reopened": reopened, "previous_terminal_id": expected_terminal_id,
+                    "recovery": {"code": code, "message": message,
+                        "next_action": "open_terminal" if reopened else "update_display_service" if code == "verified_close_unavailable" else "inspect_connection"}}
+                self.store.finish_operation(operation, result)
+                return result
+
+            if not self.is_managed_worker(self.store.agent(host, thread_id)):
+                return finish("worker_not_open", "只有未关闭的已登记工作终端可以重新打开；不会恢复已关闭或管理会话。")
+            if agent.get("terminal_id") != expected_terminal_id:
+                return finish("terminal_generation_changed", "当前终端与确认时的旧终端不同；未关闭或创建，请重新核对。")
+            config = dict(self.host(host))
+            self._directory(config, agent.get("cwd", ""))
+            # No default owner launcher, broad registry scan, or remote action
+            # is allowed until the bound broker advertises exact-close support.
+            try:
+                owner = self._reopen_owner(self.terminals.request("/health", timeout=3))
+            except Exception:
+                return finish("verified_close_unavailable", "原显示服务尚不支持严格核验关闭；请先更新显示服务，未关闭或创建终端。")
+            with self.store.lock:
+                submitting = self.store.db.execute("select 1 from outbox where host=? and thread_id=? and state='submitting' limit 1",
+                    (host, thread_id)).fetchone()
+            if submitting:
+                return finish("input_submission_in_progress", "该终端仍有提交中的输入；请先核对提交结果，未关闭或创建终端。")
+            remote = None
+            if config["transport"] == "ssh":
+                probe = self._probe_reopen_terminal(host, expected_terminal_id)
+                if not probe.get("ok"):
+                    return finish("reopen_preflight_unavailable", "无法确认旧远端终端的精确身份或不存在；未关闭或创建，请检查 SSH 路由。")
+                remote = {"exists": probe["exists"]}
+                if probe["exists"]:
+                    remote["identity"] = probe["identity"]
+            try:
+                if self._reopen_owner(self.terminals.request("/health", timeout=3)) != owner:
+                    raise ValueError()
+            except Exception:
+                return finish("display_owner_changed", "核验期间显示服务身份变化；未关闭或创建，请核对原 owner。")
+
+            # Fence before close so neither a stale browser nor an old queued
+            # Captain prompt can be redirected to the replacement generation.
+            self.store.remember(host, thread_id, agent["alias"], active=False, mode="closing")
+            self.store.fence_terminal_reopen(host, thread_id, expected_terminal_id, request_key, RETRYABLE)
+            self.record_event("terminal_reopen_started", host=host, thread_id=thread_id,
+                terminal_id=expected_terminal_id, operation_id=request_key, origin=origin)
+            body = {"require_verified": True, "expected_owner": owner, "expected_host": host,
+                "expected_transport": config["transport"], "expected_target": config.get("target", "")}
+            if remote is not None:
+                body["expected_remote"] = remote
+            try:
+                closed = self.terminals.write(expected_terminal_id, "close", body)
+                if (not isinstance(closed, dict) or closed.get("id") != expected_terminal_id
+                        or closed.get("closed") is not True or closed.get("closed_verified") is not True
+                        or closed.get("record_removed") is not True
+                        or not (closed.get("local_display_exit_verified") is True
+                            or config["transport"] == "ssh" and closed.get("missing_record") is True)
+                        or config["transport"] == "ssh" and closed.get("remote_closed_verified") is not True):
+                    raise ValueError()
+                if self._reopen_owner(self.terminals.request("/health", timeout=3)) != owner:
+                    raise ValueError()
+            except Exception:
+                self.store.remember(host, thread_id, agent["alias"], active=False, mode="close_unknown")
+                return finish("reopen_close_unknown", "旧终端关闭或显示服务身份未获严格确认；未创建新终端，不会重复关闭。", "unknown")
+
+            terminal_id = "ceohub-" + uuid.uuid5(uuid.NAMESPACE_URL,
+                json.dumps(["agentcaptain-terminal-reopen-v1", host, thread_id, expected_terminal_id, request_key], ensure_ascii=False)).hex
+            binding = self.store.setting(self._output_key(host, expected_terminal_id)) or {}
+            generation = {"previous_terminal_id": expected_terminal_id, "terminal_id": terminal_id,
+                "operation_id": request_key, "previous_session_id": binding.get("session_id"), "at": time.time()}
+            # Register the new ID before issuing its only create attempt. If a
+            # response is lost, the same worker card retains that exact ID.
+            generation = self.store.replace_terminal_generation(host, thread_id, expected_terminal_id, terminal_id,
+                generation, self._generation_key(host, thread_id), self._recovery_key(host, thread_id))
+            self.record_event("terminal_generation_replaced", host=host, thread_id=thread_id,
+                previous_terminal_id=expected_terminal_id, terminal_id=terminal_id, operation_id=request_key,
+                previous_session_id=generation["previous_session_id"], historical=True)
+            try:
+                runtime = self.terminals.request("/sessions/create", {"session_id": terminal_id, "host": host,
+                    "transport": config["transport"], "target": config.get("target", ""), "cwd": agent["cwd"],
+                    "title": agent["alias"], "cols": 100, "rows": 30, "expected_owner": owner, "require_verified": True})
+                if (not isinstance(runtime, dict) or runtime.get("id") != terminal_id or runtime.get("host") != host
+                        or runtime.get("transport") != config["transport"] or runtime.get("target", "") != config.get("target", "")
+                        or runtime.get("cwd") != agent["cwd"] or runtime.get("connected") is not True
+                        or self._reopen_owner(self.terminals.request("/health", timeout=3)) != owner):
+                    raise ValueError()
+            except Exception:
+                self.store.remember(host, thread_id, agent["alias"], active=False, mode="close_unknown")
+                return finish("reopen_create_unknown", "旧终端已严格关闭，新终端创建结果待核对；已保留新身份，不会重复创建或启动模型。", "unknown")
+            self.store.remember(host, thread_id, agent["alias"], active=True, mode="terminal")
+            self.record_event("terminal_reopened", host=host, thread_id=thread_id, previous_terminal_id=expected_terminal_id,
+                terminal_id=terminal_id, operation_id=request_key, origin=origin, model_started=False)
+            return finish("reopened", "已关闭并清理精确旧终端，在原目录打开新的空白终端；未启动 Codex、恢复会话或发送任务。", "done", True)
+
     def create_terminal(self, host, cwd, title, thread_id=None, cols=100, rows=30, active=False, request_key=None, controller_id=None):
         config = self.host(host)
         if self.controllers.is_controller_reference(host, thread_id, cwd=cwd or None):
@@ -1671,7 +1863,7 @@ class Hub:
     def _delivery(row):
         return {**row, "request_id": row["id"], "delivery": row["state"]}
 
-    def _submit(self, host, thread_id, data, kind, origin, request_key, controller_id=None):
+    def _submit(self, host, thread_id, data, kind, origin, request_key, controller_id=None, expected_terminal_id=None):
         self._request_key(request_key)
         if origin not in ("ui", "plugin"):
             raise ValueError("输入来源必须为 ui 或 plugin。")
@@ -1680,6 +1872,7 @@ class Hub:
             if controller_id is not None:
                 self._require_controller_scope(controller_id, host, thread_id)
             self._require_open(agent)
+            self._require_terminal_generation(agent, expected_terminal_id, origin)
             request_id = self.store.enqueue(host, thread_id, data, origin=origin, request_key=request_key, kind=kind)
             row = self.store.delivery(request_id)
             if row["state"] not in RETRYABLE:
@@ -1716,18 +1909,18 @@ class Hub:
                 self.store.update_outbox(request_id, "unknown", error=str(error))
             return self._delivery(self.store.delivery(request_id))
 
-    def send(self, host, thread_id, text, origin="ui", request_key=None, controller_id=None):
+    def send(self, host, thread_id, text, origin="ui", request_key=None, controller_id=None, expected_terminal_id=None):
         if not isinstance(text, str) or not text.strip() or len(text) > 30000 or any((ord(c) < 32 and c not in "\r\n\t") or 127 <= ord(c) <= 159 for c in text):
             raise ValueError("消息不能为空，最长 30000 字符，不接受终端控制字符。")
-        return self._submit(host, thread_id, text, "prompt", origin, request_key, controller_id=controller_id)
+        return self._submit(host, thread_id, text, "prompt", origin, request_key, controller_id=controller_id, expected_terminal_id=expected_terminal_id)
 
-    def terminal_input(self, host, thread_id, data, origin="ui", request_key=None, controller_id=None):
+    def terminal_input(self, host, thread_id, data, origin="ui", request_key=None, controller_id=None, expected_terminal_id=None):
         if not isinstance(data, str) or not data or len(data) > 30000:
             raise ValueError("终端输入不能为空，最长 30000 字符。")
         if origin == "plugin":
             if not request_key:
                 raise ValueError("插件输入必须提供稳定 request_key。")
-            return self._submit(host, thread_id, data, "input", origin, request_key, controller_id=controller_id)
+            return self._submit(host, thread_id, data, "input", origin, request_key, controller_id=controller_id, expected_terminal_id=expected_terminal_id)
         # User keystrokes can contain login secrets: forward without persisting.
         if origin != "ui":
             raise ValueError("输入来源必须为 ui 或 plugin。")
@@ -1739,6 +1932,7 @@ class Hub:
         if not agent or not agent.get("terminal_id"):
             raise ValueError("请先连接共享终端。")
         self._require_open(agent)
+        self._require_terminal_generation(agent, expected_terminal_id)
         return self.terminals.write(agent["terminal_id"], "input", {"data": data, "origin": "ui"})
 
     def terminal_output(self, host, thread_id, after=0):
@@ -1748,13 +1942,14 @@ class Hub:
         except Exception:
             if agent.get("mode") not in ("closed", "closing", "close_unknown"):
                 raise
-            return {"data": "", "seq": max(0, int(after)), "reset": False, "output_unavailable": True,
+            return {"data": "", "seq": max(0, int(after)), "reset": False, "output_unavailable": True, "terminal_id": agent["terminal_id"],
                     **self._closed_status(agent, {}), "note": "终端缓存暂时不可读取；登记记录仍保留，不会重新启动或连接。"}
-        return {**output, **self._closed_status(agent, output)}
+        return {**output, "terminal_id": agent["terminal_id"], **self._closed_status(agent, output)}
 
-    def terminal_resize(self, host, thread_id, cols=100, rows=30):
+    def terminal_resize(self, host, thread_id, cols=100, rows=30, expected_terminal_id=None):
         agent = self.get_agent(host, thread_id)
         self._require_open(agent)
+        self._require_terminal_generation(agent, expected_terminal_id)
         return self.terminals.write(agent["terminal_id"], "resize", {"cols": cols, "rows": rows})
 
     def terminal_history(self, host, thread_id, lines=5000):
@@ -1822,11 +2017,12 @@ class Hub:
                 raise ValueError("读取期间所选终端登记已变化，未返回历史；请重新核对。")
         return {key: value for key, value in result.items() if key not in ("identity", "note")} | {"note": remote_terminal_history.NOTE}
 
-    def terminal_close(self, host, thread_id, confirm=False):
+    def terminal_close(self, host, thread_id, confirm=False, expected_terminal_id=None):
         if confirm is not True:
             raise ValueError("关闭会终止这个终端及其中的进程，请明确确认关闭。")
         with self.registry_lock:
             agent = self.get_agent(host, thread_id)
+            self._require_terminal_generation(agent, expected_terminal_id)
             terminal_id = agent.get("terminal_id")
             if not terminal_id or not re.fullmatch(r"ceohub-[a-f0-9]{16,48}", terminal_id):
                 raise ValueError("此记录没有可关闭的共享终端。")
@@ -2032,6 +2228,12 @@ class Hub:
                     raise PermissionError("此送达记录不属于当前管理会话。")
             return self._delivery(row)
         host, thread_id = self.split_agent_id(arguments["agent_id"])
+        if tool == "reopen_agent":
+            if not arguments.get("request_key"):
+                raise ValueError("重新打开必须提供稳定 request_key。")
+            return self.reopen_terminal(host, thread_id,
+                self._controller_key(controller_id, arguments["request_key"]) if controller_id is not None else arguments["request_key"],
+                arguments.get("expected_terminal_id"), confirm=arguments.get("confirmed", False), origin="plugin", controller_id=controller_id)
         if controller_id is not None:
             self._require_controller_scope(controller_id, host, thread_id)
         if tool == "get_agent":
