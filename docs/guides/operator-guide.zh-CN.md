@@ -49,7 +49,7 @@ npm ci
 python scripts/captain.py serve
 ```
 
-打开 [http://127.0.0.1:8766/](http://127.0.0.1:8766/)。仓库为 private，克隆需要 GitHub 访问权限。
+打开 [http://127.0.0.1:8766/](http://127.0.0.1:8766/)。0.7 从源码仓库及其已安装的 npm 依赖运行，不是独立桌面安装器；管理会话初始化和桌面交接仍属实验性，具体边界见下文。
 
 Windows 可双击 `run_agentcaptain.cmd`：在当前用户后台启动服务并打开 UI。也可显式运行：
 

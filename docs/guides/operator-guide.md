@@ -50,7 +50,7 @@ npm ci
 python scripts/captain.py serve
 ```
 
-Open [http://127.0.0.1:8766/](http://127.0.0.1:8766/). The repository is private, so cloning requires GitHub access.
+Open [http://127.0.0.1:8766/](http://127.0.0.1:8766/). Version 0.7 runs from this source checkout and its installed npm dependencies; it is not a standalone desktop installer. Management-session initialization and desktop transfer remain experimental as described below.
 
 On Windows, `run_agentcaptain.cmd` starts the per-user service in the background and opens the UI. For explicit background operation:
 

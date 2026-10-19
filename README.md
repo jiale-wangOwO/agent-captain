@@ -55,7 +55,7 @@ When ready, give me the URL and a short guide to connecting workers,
 chatting with them directly, and delegating tasks through the lead agent.
 ```
 
-Any coding agent can help with installation; the Captain itself currently runs in local Codex. Repository access and any required sign-in or approvals still need your participation.
+Any coding agent can help with installation; the Captain itself currently runs in local Codex. Any required Codex sign-in, trust decisions, or approvals still need your participation.
 
 ### Manual setup
 
@@ -68,11 +68,11 @@ npm ci
 python scripts/captain.py serve
 ```
 
-Open **[localhost:8766](http://127.0.0.1:8766/)**. The repository currently remains **private**; cloning requires access. A fresh installation contains only your local machine.
+Open **[localhost:8766](http://127.0.0.1:8766/)**. A fresh installation contains only your local machine.
 
 On Windows, `run_agentcaptain.cmd` starts the per-user background service and opens the workbench. For explicit background operation, use `python scripts/captain.py service start` and `python scripts/captain.py service status`. No administrator service or automatic startup is installed.
 
-Prefer an installed command? Run `python -m pip install -e .` in this checkout, then use `agent-captain serve` or `agent-captain service start`. Keep the checkout and its npm dependencies available; this is not a self-contained desktop installer.
+Prefer an installed command? Run `python -m pip install -e .` in this checkout, then use `agent-captain serve` or `agent-captain service start`. Version 0.7 is a checkout-based source release: keep the checkout and its npm dependencies available. It is not a self-contained desktop installer, and these instructions do not require a published PyPI or npm package.
 
 1. **Connect work.** Add an SSH alias if needed, choose a project folder, and open a terminal. Start `codex`, `codex-switch`, or your usual launcher yourself.
 2. **Start your Captain.** Choose **Start management session**. The Hub prepares a dedicated local Codex conversation with its role, identity, and tools. Complete any sign-in, trust, or permission prompts yourself; no manual plugin installation is required for this path.
@@ -109,6 +109,6 @@ Hub-created Captains have independent tool identities and explicit machine/proje
 
 ## Contribute
 
-Focused bug reports, reproducible tests, and small pull requests are welcome from collaborators with repository access. Use synthetic fixtures; never attach real tokens, connection descriptors, session logs, or personal configuration. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+Focused bug reports, reproducible tests, and small pull requests are welcome. Use synthetic fixtures; never attach real tokens, connection descriptors, session logs, or personal configuration. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
 MIT licensed. See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md). AgentCaptain is an independent project; OpenAI, Codex, and other third-party names belong to their respective owners.

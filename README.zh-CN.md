@@ -53,7 +53,7 @@ If you have a coding agent (Claude Code, Cursor, Codex, whatever), you don't nee
 准备好后，给我工作台地址，以及接入工作 agent、直接对话和通过主控派发任务的简短用法。
 ```
 
-安装助手可以是任意编程 Agent；管理会话本身目前仍使用本机 Codex。仓库访问、登录和必要审批仍需要你参与。
+安装助手可以是任意编程 Agent；管理会话本身目前仍使用本机 Codex。Codex 登录、信任决定和必要审批仍需要你参与。
 
 ### 手动安装
 
@@ -66,11 +66,11 @@ npm ci
 python scripts/captain.py serve
 ```
 
-打开 **[localhost:8766](http://127.0.0.1:8766/)**。仓库目前仍为 **private**，克隆需要访问权限。全新配置只有本机，不会自行发现或连接你的服务器。
+打开 **[localhost:8766](http://127.0.0.1:8766/)**。全新配置只有本机，不会自行发现或连接你的服务器。
 
 Windows 可双击 `run_agentcaptain.cmd`，在当前用户后台启动服务并打开工作台；也可显式运行 `python scripts/captain.py service start`、`python scripts/captain.py service status`。不会安装管理员服务或开机自启。
 
-希望使用简短命令时，可在本仓库执行 `python -m pip install -e .`，之后使用 `agent-captain serve` 或 `agent-captain service start`。仍需保留仓库和 npm 依赖；这不是独立打包的桌面安装器。
+希望使用简短命令时，可在本仓库执行 `python -m pip install -e .`，之后使用 `agent-captain serve` 或 `agent-captain service start`。0.7 是从源码仓库运行的版本，仍需保留仓库和 npm 依赖；这不是独立打包的桌面安装器，安装步骤也不依赖已发布的 PyPI 或 npm 包。
 
 1. **接入工作。** 按需添加 SSH 别名，选择项目目录、打开终端，自行运行 `codex`、`codex-switch` 或常用启动器。
 2. **启动管理会话。** 点击 **「启动管理会话」**，Hub 为原生本机 Codex 对话准备角色、身份和工具。这条路径无需手动安装插件；登录、信任与权限提示仍由你确认。
@@ -107,6 +107,6 @@ Hub 创建的管理会话有独立工具身份，**新建工作终端**受明确
 
 ## 参与贡献
 
-欢迎有仓库访问权限的协作者提交可复现的问题、测试和小范围 PR。请使用虚构测试数据，不要附上真实 token、连接文件、会话日志或个人配置。见 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [SECURITY.md](SECURITY.md)。
+欢迎提交可复现的问题、测试和小范围 PR。请使用虚构测试数据，不要附上真实 token、连接文件、会话日志或个人配置。见 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [SECURITY.md](SECURITY.md)。
 
 项目采用 MIT 许可证，见 [LICENSE](LICENSE) 和[第三方说明](THIRD_PARTY_NOTICES.md)。AgentCaptain 是独立项目；OpenAI、Codex 及其他第三方名称属于各自所有者。
