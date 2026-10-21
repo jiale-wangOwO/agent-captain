@@ -47,6 +47,20 @@ prebuilt binary is unavailable. CI covers Windows and Linux with Python 3.11 and
 3.13. Test results are evidence for those environments, not a guarantee of every
 shell, tunnel, provider, or remote-machine combination.
 
+CI runs on pushes to `main`, pull requests, and manual dispatch. Every run checks
+documentation links/branding, publication hygiene, and the CI-routing rules on
+Ubuntu, without installing dependencies. Changes limited to the listed root
+documentation/license files, documentation Markdown/images, static brand assets,
+or the pull request template stop there.
+Code, configuration, tests, tooling, unknown paths, and manual dispatch keep the
+full four-job matrix. Missing diff history also runs the full matrix. Superseded
+runs on the same branch/PR are cancelled, and test jobs have a 20-minute timeout.
+CI does not upload build artifacts. To configure a required check, use the
+always-present **CI result** check: it requires successful publication checks and,
+when selected, every matrix job. The existing OS/Python checks are intentionally
+skipped for documentation-only changes, not left pending by a workflow-level path
+filter. Publication checks must pass before tests can start.
+
 The default suites use fake transports, temporary directories, and isolated
 loopback HTTP services. Do not enable live test environment variables in CI.
 Files ending in `_live.cjs` are explicitly invoked diagnostics, not part of the
