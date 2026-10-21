@@ -2,16 +2,48 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  preflight:
+    name: Publication and CI scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      full_tests: ${{ steps.scope.outputs.full_tests }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Both push endpoints and the PR base must be available for git diff.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify documentation, publication, and CI scope rules
+        run: python3 -m unittest tests.test_repository_presentation tests.test_publication tests.test_ci_scope -v
+      - name: Check candidate publication contents
+        run: python3 scripts/check_publication.py --tracked
+      - name: Select test scope
+        id: scope
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CI_HEAD_SHA: ${{ github.sha }}
+        run: python3 scripts/ci_scope.py
+
   unit-tests:
     name: ${{ matrix.os }} / Python ${{ matrix.python }} / Node 22
+    needs: preflight
+    if: needs.preflight.outputs.full_tests == 'true'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -35,8 +67,6 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-      - name: Check candidate publication contents
-        run: python scripts/check_publication.py --tracked
       - name: Install terminal dependencies
         run: npm ci
       - name: Install checkout CLI
@@ -47,3 +77,24 @@ jobs:
         run: npm run test:terminal
       - name: Browser contract and rendering unit tests
         run: npm run test:ui
+
+  ci-result:
+    name: CI result
+    if: always()
+    needs: [preflight, unit-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require publication checks and the selected tests
+        env:
+          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
+          FULL_TESTS: ${{ needs.preflight.outputs.full_tests }}
+          TEST_RESULT: ${{ needs.unit-tests.result }}
+        run: |
+          test "$PREFLIGHT_RESULT" = success
+          if [ "$FULL_TESTS" = true ]; then
+            test "$TEST_RESULT" = success
+          else
+            test "$FULL_TESTS" = false
+            test "$TEST_RESULT" = skipped
+          fi
